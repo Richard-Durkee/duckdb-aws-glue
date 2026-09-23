@@ -1,0 +1,156 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_lazy_partitions.test
+# description: The partitions of a table are fetched from Glue when a scan first needs them, not when a table reference
+# group: [scan_partitioned]
+
+#              is bound: a statement that only binds the table makes no GetPartitions call. Counted through the HTTP log.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.lp_orders;
+
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+CREATE TABLE my_datalake.default.lp_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.lp_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15'), (3, 30.0, '2016-05-16');
+
+# The Glue API calls since the last truncate_duckdb_logs(), by operation
+statement ok
+CREATE MACRO glue_calls() AS TABLE
+    SELECT regexp_extract(request.headers['x-amz-target'], 'AWSGlue\.(\w+)', 1) AS api, count(*) AS n
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.headers['x-amz-target'] IS NOT NULL
+    GROUP BY 1 ORDER BY 1;
+
+statement ok
+CALL enable_logging('HTTP', storage='memory');
+
+# Statements that bind the table without scanning it: the table is fetched, its partitions are not
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DESCRIBE my_datalake.default.lp_orders;
+
+query II
+FROM glue_calls();
+----
+GetTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE VIEW lp_view AS SELECT * FROM my_datalake.default.lp_orders;
+
+query II
+FROM glue_calls();
+----
+GetTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+PREPARE lp_count AS SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = ?;
+
+query II
+FROM glue_calls();
+----
+GetTable	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+SELECT no_such_column FROM my_datalake.default.lp_orders;
+----
+Binder Error
+
+query II
+FROM glue_calls();
+----
+GetTable	1
+
+# Planning a scan needs the partitions (pruning, cardinality): one fetch, made while the plan is built
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+EXPLAIN SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-15';
+
+query II
+FROM glue_calls();
+----
+GetPartitions	1
+GetTable	1
+
+# The results are unchanged: pruning, partition values and the prepared statement all see the partitions
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query IR
+SELECT dt, sum(amount) FROM my_datalake.default.lp_orders WHERE dt >= '2016-05-15' GROUP BY dt ORDER BY dt;
+----
+2016-05-15	20.0
+2016-05-16	30.0
+
+query II
+FROM glue_calls();
+----
+GetPartitions	1
+GetTable	1
+
+query I
+EXECUTE lp_count('2016-05-14');
+----
+1
+
+query I
+SELECT count(*) FROM lp_view;
+----
+3
+
+# EXPLAIN shows the table location until the partitions are known; the counts of partitions kept and pruned are
+# reported once the filter has been applied
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-15';
+----
+physical_plan	<REGEX>:.*Read Parquet.*
+
+# hive_scan with an explicit partition list never asks Glue
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lp_orders', schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'}, partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
+----
+2
+
+query II
+FROM glue_calls();
+----
+
+statement ok
+DROP VIEW lp_view;
+
+statement ok
+DROP TABLE my_datalake.default.lp_orders;

@@ -354,8 +354,9 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 	auto &type = bind_data.columns[input.column_index.GetPrimaryIndex()].type;
 	unique_ptr<BaseStatistics> result;
 	value_set_t distinct_values;
+	auto &partitions = info.Partitions(context);
 	for (auto partition_index : partition_indexes) {
-		auto &partition = info.partitions[partition_index];
+		auto &partition = partitions[partition_index];
 		if (key_index >= partition.values.size()) {
 			// Glue registered the partition with fewer values than the table has keys
 			return nullptr;

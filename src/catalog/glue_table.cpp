@@ -97,11 +97,14 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	for (auto &key : table_info.partition_keys) {
 		scan_info->partition_keys.push_back(key.name);
 	}
-	// the partitions as registered in Glue, each with its own location
+	// partitions are fetched on first use, not at bind
 	if (!scan_info->partition_keys.empty()) {
 		auto &glue_catalog = catalog.Cast<GlueCatalog>();
-		scan_info->partitions =
-		    GlueAPI::GetPartitions(context, glue_catalog, latest_info.database_name, latest_info.name);
+		auto database_name = latest_info.database_name;
+		auto table_name = latest_info.name;
+		scan_info->partition_loader = [&glue_catalog, database_name, table_name](ClientContext &load_context) {
+			return GlueAPI::GetPartitions(load_context, glue_catalog, database_name, table_name);
+		};
 	}
 	return BindHiveScan(context, std::move(scan_info), bind_data);
 }

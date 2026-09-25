@@ -1,0 +1,210 @@
+# name: test/sql/hive/hive_scan/scan/test_filename_column.test
+# description: The filename virtual column of an unpartitioned Hive table: the location of the data file a row was
+# group: [scan]
+
+#              read from, as for read_parquet and hive_scan
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_flat;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_flat_csv;
+
+statement ok
+CREATE TABLE my_datalake.default.path_flat (id INTEGER, name VARCHAR);
+
+# every insert writes its own data file below the table location
+statement ok
+INSERT INTO my_datalake.default.path_flat VALUES (1, 'one'), (2, 'two');
+
+statement ok
+INSERT INTO my_datalake.default.path_flat VALUES (3, 'three');
+
+statement ok
+INSERT INTO my_datalake.default.path_flat VALUES (4, 'four'), (5, 'five'), (6, 'six');
+
+# The data files, read directly: every row with the file it is in
+statement ok
+CREATE TEMP TABLE flat_files AS
+SELECT id, filename AS path FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*');
+
+query II
+SELECT count(*), count(DISTINCT path) FROM flat_files;
+----
+6	3
+
+#---------------------------------------------------------------------------
+# filename is not one of the table's columns
+#---------------------------------------------------------------------------
+query II
+SELECT * FROM my_datalake.default.path_flat ORDER BY id LIMIT 1;
+----
+1	one
+
+query I
+SELECT count(*) FROM (DESCRIBE my_datalake.default.path_flat);
+----
+2
+
+#---------------------------------------------------------------------------
+# every row names the file it is in
+#---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM my_datalake.default.path_flat t JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
+----
+6
+
+query III
+SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.parquet'
+FROM my_datalake.default.path_flat ORDER BY id;
+----
+1	one	true
+2	two	true
+3	three	true
+4	four	true
+5	five	true
+6	six	true
+
+# the rows of one insert share a file
+query II
+SELECT count(DISTINCT filename), count(*) FROM my_datalake.default.path_flat;
+----
+3	6
+
+query I
+SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat GROUP BY filename ORDER BY ids;
+----
+[1, 2]
+[3]
+[4, 5, 6]
+
+# only filename, no data column
+query I
+SELECT count(DISTINCT filename) FROM my_datalake.default.path_flat;
+----
+3
+
+# a table alias and a quoted, qualified name
+query I
+SELECT count(*) FROM my_datalake.default.path_flat AS t WHERE t.filename IS NOT NULL;
+----
+6
+
+#---------------------------------------------------------------------------
+# filters on filename
+#---------------------------------------------------------------------------
+query I
+SELECT id FROM my_datalake.default.path_flat
+WHERE filename = (SELECT path FROM flat_files WHERE id = 5)
+ORDER BY id;
+----
+4
+5
+6
+
+query I
+SELECT id FROM my_datalake.default.path_flat
+WHERE filename IN (SELECT path FROM flat_files WHERE id IN (1, 3)) AND id > 1
+ORDER BY id;
+----
+2
+3
+
+query I
+SELECT count(*) FROM my_datalake.default.path_flat WHERE filename = 'no such file';
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.path_flat WHERE filename LIKE '%/default/path_flat/%';
+----
+6
+
+#---------------------------------------------------------------------------
+# ORDER BY ... LIMIT (late materialization joins the scan to a copy of itself)
+#---------------------------------------------------------------------------
+query II
+SELECT t.id, t.filename = f.path FROM my_datalake.default.path_flat t JOIN flat_files f USING (id)
+ORDER BY id DESC LIMIT 2;
+----
+6	true
+5	true
+
+query I
+SELECT id FROM my_datalake.default.path_flat ORDER BY filename = (SELECT path FROM flat_files WHERE id = 3) DESC, id LIMIT 2;
+----
+3
+1
+
+#---------------------------------------------------------------------------
+# files that are not data (_SUCCESS, .crc) are not read, so never show up as a filename
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT 99 AS id, 'hidden' AS name) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/_hidden.parquet';
+
+query II
+SELECT count(*), count(*) FILTER (filename LIKE '%/_hidden.parquet') FROM my_datalake.default.path_flat;
+----
+6	0
+
+#---------------------------------------------------------------------------
+# the same for a csv table
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.path_flat_csv (id INTEGER, name VARCHAR) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.path_flat_csv VALUES (1, 'one'), (2, 'two');
+
+statement ok
+INSERT INTO my_datalake.default.path_flat_csv VALUES (3, 'three');
+
+query II
+SELECT id, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat_csv/%.csv'
+FROM my_datalake.default.path_flat_csv ORDER BY id;
+----
+1	true
+2	true
+3	true
+
+# the csv files, read directly
+query I
+SELECT count(*) FROM my_datalake.default.path_flat_csv t
+JOIN read_csv('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat_csv/*', columns = {id: 'INTEGER', name: 'VARCHAR'}, header = false) f
+ON t.id = f.id AND t.filename = f.filename;
+----
+3
+
+query I
+SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat_csv GROUP BY filename ORDER BY ids;
+----
+[1, 2]
+[3]
+
+#---------------------------------------------------------------------------
+# hive_scan() over the same files
+#---------------------------------------------------------------------------
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'}) t
+JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
+----
+6
+
+statement ok
+DROP TABLE my_datalake.default.path_flat;
+
+statement ok
+DROP TABLE my_datalake.default.path_flat_csv;

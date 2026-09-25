@@ -1,0 +1,271 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_filename_column.test
+# description: The filename virtual column of a partitioned Hive table, with nested partition directories: partitions
+# group: [scan_partitioned]
+
+#              registered inside (and above) the directories of other partitions, directories that are not
+#              partitions, and partitions outside the table location. Every row has to name the file it was read
+#              from, whether the partitions are listed one by one or with one recursive listing of the table location,
+#              and whether or not the other partitions are pruned.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested;
+
+statement ok
+CREATE TABLE my_datalake.default.path_nested (id INTEGER, val VARCHAR, year INTEGER, month INTEGER, day VARCHAR)
+PARTITIONED BY (year, month, day);
+
+# three levels of partition directories: <root>/year=.../month=.../day=...
+statement ok
+INSERT INTO my_datalake.default.path_nested VALUES
+    (1, 'a', 2024, 1, '01'), (2, 'b', 2024, 1, '01'),
+    (3, 'c', 2024, 1, '02'),
+    (4, 'd', 2024, 2, '01'),
+    (5, 'e', 2025, 1, '01');
+
+# a second file in a partition that already has one
+statement ok
+INSERT INTO my_datalake.default.path_nested VALUES (6, 'f', 2024, 1, '01');
+
+# day=0 next to day=01 and day=02: a directory name that is a prefix of other directory names
+statement ok
+INSERT INTO my_datalake.default.path_nested VALUES (7, 'g', 2024, 1, '0');
+
+# a value that is escaped in the directory name, and a NULL (__HIVE_DEFAULT_PARTITION__)
+statement ok
+INSERT INTO my_datalake.default.path_nested VALUES (8, 'h', 2024, 3, 'a/b'), (9, 'i', 2024, 3, NULL);
+
+# a partition registered INSIDE the directory of another partition (year=2024/month=1/day=01)
+statement ok
+COPY (SELECT 20 AS id, 'late' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late/data.parquet';
+
+statement ok
+CALL glue_add_partition('my_datalake.default.path_nested', {year: '2024', month: '1', day: 'late'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late');
+
+# a partition registered ABOVE the directories of other partitions: its files lie directly in year=2024
+statement ok
+COPY (SELECT 30 AS id, 'top' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/data.parquet';
+
+statement ok
+CALL glue_add_partition('my_datalake.default.path_nested', {year: '2023', month: '12', day: 'top'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024');
+
+# a partition outside the table location
+statement ok
+COPY (SELECT 40 AS id, 'away' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p/data.parquet';
+
+statement ok
+CALL glue_add_partition('my_datalake.default.path_nested', {year: '2022', month: '6', day: 'away'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p');
+
+# a directory inside a partition that is not a partition itself, and one below the table location that is not a
+# partition either: neither is data of the table
+statement ok
+COPY (SELECT 50 AS id, 'stray' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=02/extra/data.parquet';
+
+statement ok
+COPY (SELECT 51 AS id, 'unregistered' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=9/day=09/data.parquet';
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.path_nested');
+----
+10
+
+# every data file written above, read directly: each id is in exactly one file
+statement ok
+CREATE TEMP TABLE nested_files AS
+SELECT id, filename AS path
+FROM read_parquet(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*.parquet',
+                   '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*.parquet'], hive_partitioning = false);
+
+query II
+SELECT count(*), count(DISTINCT id) FROM nested_files;
+----
+14	14
+
+# the directory of a filename, relative to the test directory
+statement ok
+CREATE MACRO rel_dir(p) AS regexp_replace(replace(p, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/', ''), '[^/]*$', '');
+
+# the queries below run twice: listing every partition on its own, and with one recursive listing of the location
+foreach threshold 100 1
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+#---------------------------------------------------------------------------
+# a full scan: every row names the file it is in, and nothing outside the partitions is read
+#---------------------------------------------------------------------------
+query IIII
+SELECT id, year, day, rel_dir(filename) FROM my_datalake.default.path_nested ORDER BY id;
+----
+1	2024	01	default/path_nested/year=2024/month=1/day=01/
+2	2024	01	default/path_nested/year=2024/month=1/day=01/
+3	2024	02	default/path_nested/year=2024/month=1/day=02/
+4	2024	01	default/path_nested/year=2024/month=2/day=01/
+5	2025	01	default/path_nested/year=2025/month=1/day=01/
+6	2024	01	default/path_nested/year=2024/month=1/day=01/
+7	2024	0	default/path_nested/year=2024/month=1/day=0/
+8	2024	a/b	default/path_nested/year=2024/month=3/day=a%2Fb/
+9	2024	NULL	default/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
+20	2024	late	default/path_nested/year=2024/month=1/day=01/late/
+30	2023	top	default/path_nested/year=2024/
+40	2022	away	path_nested_elsewhere/p/
+
+query II
+SELECT count(*), count(*) FILTER (t.filename = f.path)
+FROM my_datalake.default.path_nested t JOIN nested_files f USING (id);
+----
+12	12
+
+# the two files of year=2024/month=1/day=01
+query I
+SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_nested
+WHERE rel_dir(filename) = 'default/path_nested/year=2024/month=1/day=01/'
+GROUP BY filename ORDER BY ids;
+----
+[1, 2]
+[6]
+
+#---------------------------------------------------------------------------
+# pruned to the partition that has another partition registered inside its directory: the nested files are not its
+#---------------------------------------------------------------------------
+query III
+SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1 AND day = '01'
+ORDER BY id;
+----
+1	01	default/path_nested/year=2024/month=1/day=01/
+2	01	default/path_nested/year=2024/month=1/day=01/
+6	01	default/path_nested/year=2024/month=1/day=01/
+
+# pruned to the partition inside it
+query III
+SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE day = 'late';
+----
+20	late	default/path_nested/year=2024/month=1/day=01/late/
+
+# pruned to the partition above the others: only the files directly in its directory
+query III
+SELECT id, year, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2023;
+----
+30	2023	default/path_nested/year=2024/
+
+# pruned to every partition below the one above the others, and not that one
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1;
+----
+[1, 2, 3, 6, 7, 20]
+
+# pruned to the partition with the stray directory: the stray file is not read
+query III
+SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE month = 1 AND day = '02';
+----
+3	02	default/path_nested/year=2024/month=1/day=02/
+
+# pruned to the day=0 partition, whose directory name is a prefix of day=01 and day=02
+query III
+SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE day = '0';
+----
+7	0	default/path_nested/year=2024/month=1/day=0/
+
+# pruned to the escaped and the NULL partition
+query III
+SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE month = 3 ORDER BY id;
+----
+8	a/b	default/path_nested/year=2024/month=3/day=a%2Fb/
+9	NULL	default/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
+
+# pruned to the partition outside the table location
+query III
+SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year < 2023;
+----
+40	away	path_nested_elsewhere/p/
+
+#---------------------------------------------------------------------------
+# filters on filename together with partition filters
+#---------------------------------------------------------------------------
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.path_nested WHERE filename LIKE '%/day=01/%';
+----
+[1, 2, 4, 5, 6, 20]
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.path_nested WHERE filename LIKE '%/day=01/%' AND day = '01';
+----
+[1, 2, 4, 5, 6]
+
+query I
+SELECT id FROM my_datalake.default.path_nested WHERE filename = (SELECT path FROM nested_files WHERE id = 30);
+----
+30
+
+#---------------------------------------------------------------------------
+# ORDER BY ... LIMIT (late materialization) and aggregates
+#---------------------------------------------------------------------------
+query II
+SELECT id, rel_dir(filename) FROM my_datalake.default.path_nested ORDER BY id DESC LIMIT 3;
+----
+40	path_nested_elsewhere/p/
+30	default/path_nested/year=2024/
+20	default/path_nested/year=2024/month=1/day=01/late/
+
+query II
+SELECT id, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1 ORDER BY val DESC LIMIT 2;
+----
+20	default/path_nested/year=2024/month=1/day=01/late/
+7	default/path_nested/year=2024/month=1/day=0/
+
+query II
+SELECT count(DISTINCT filename), count(DISTINCT rel_dir(filename)) FROM my_datalake.default.path_nested;
+----
+11	10
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+#---------------------------------------------------------------------------
+# hive_scan() over the same directories
+#---------------------------------------------------------------------------
+foreach threshold 100 1
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query III
+SELECT id, day, rel_dir(filename) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested',
+    schema := {id: 'INTEGER', val: 'VARCHAR', year: 'INTEGER', month: 'INTEGER', day: 'VARCHAR'},
+    partitions := [
+        {year: 2024, month: 1, day: '01', location: NULL},
+        {year: 2024, month: 1, day: 'late', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late'},
+        {year: 2023, month: 12, day: 'top', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024'}
+    ])
+WHERE day <> 'late'
+ORDER BY id;
+----
+1	01	default/path_nested/year=2024/month=1/day=01/
+2	01	default/path_nested/year=2024/month=1/day=01/
+6	01	default/path_nested/year=2024/month=1/day=01/
+30	top	default/path_nested/year=2024/
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.path_nested;

@@ -247,10 +247,12 @@ SELECT page, views FROM my_datalake.default.dml_pageviews WHERE year = 2019 ORDE
 about	4
 home	12
 
-# "$path" (the S3 location of the row's data file) is not exposed yet
-statement error
-SELECT "$path" FROM my_datalake.default.dml_pageviews WHERE year = 2019;
+# filename: the S3 location of the row's data file (see test_filename_column.test)
+query II
+SELECT page, filename LIKE '%/dml_pageviews/year=2019/%' FROM my_datalake.default.dml_pageviews WHERE year = 2019 ORDER BY page;
 ----
+about	true
+home	true
 
 #---------------------------------------------------------------------------
 # escaping single quotes

@@ -184,6 +184,14 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 	return &entry->Cast<SchemaCatalogEntry>();
 }
 
+void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
+	if (!context.transaction.IsAutoCommit()) {
+		throw TransactionException("This connection is currently in a transaction. Transaction support is not "
+		                           "provided for Hive tables. Please call COMMIT, ABORT or ROLLBACK before trying "
+		                           "the query again");
+	}
+}
+
 GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char *statement) {
 	auto &glue_table = table.Cast<GlueTable>();
 	if (glue_table.table_info.GetFormat() != GlueTableFormat::HIVE) {

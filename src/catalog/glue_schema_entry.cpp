@@ -547,6 +547,43 @@ bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
 
 } // namespace
 
+//! ALTER TABLE t SET (key = value, ...) / RESET (key, ...): Hive's SET / UNSET TBLPROPERTIES
+void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto table_name = alter_table.GetQualifiedName().Name().GetIdentifierName();
+	vector<pair<string, string>> set;
+	vector<string> unset;
+	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS) {
+		auto &options = alter_table.Cast<SetTableOptionsInfo>();
+		auto binder = Binder::CreateBinder(context);
+		TableFunctionBinder option_binder(*binder, context, "ALTER TABLE SET");
+		for (auto &option : options.table_options) {
+			auto expr_copy = option.second->Copy();
+			auto bound_expr = option_binder.Bind(expr_copy);
+			if (bound_expr->HasParameter()) {
+				throw ParameterNotResolvedException();
+			}
+			auto value = ExpressionExecutor::EvaluateScalar(context, *bound_expr, true);
+			if (value.IsNull()) {
+				throw BinderException("NULL is not a valid value for table property '%s'", option.first);
+			}
+			set.emplace_back(option.first, value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		}
+	} else {
+		for (auto &option : alter_table.Cast<ResetTableOptionsInfo>().table_options) {
+			unset.push_back(option.GetIdentifierName());
+		}
+	}
+	GlueAPI::UpdateTableParameters(context, glue_catalog, database_info.name, table_name, set, unset);
+
+	GlueTableInfo updated;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, updated)) {
+		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
+		                       table_name);
+	}
+	tables.CreateEntry(tables.CreateEntry(updated));
+}
+
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &context = transaction.GetContext();
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -579,6 +616,11 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		throw NotImplementedException("Only ALTER TABLE is supported for Glue tables");
 	}
 	auto &alter_table = info.Cast<AlterTableInfo>();
+	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS ||
+	    alter_table.alter_table_type == AlterTableType::RESET_TABLE_OPTIONS) {
+		AlterTableProperties(context, alter_table);
+		return;
+	}
 
 	// Work on the current Glue definition, not the cached one
 	GlueTableInfo current;

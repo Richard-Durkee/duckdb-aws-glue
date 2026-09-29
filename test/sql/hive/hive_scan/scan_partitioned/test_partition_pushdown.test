@@ -259,10 +259,11 @@ EXPLAIN SELECT sum(c) FROM (
 ----
 physical_plan	<!REGEX>:.*__common_subplan.*
 
+# costing the four scans lists one partition of each, never a whole table
 query I
 SELECT count(*) FROM listed_dirs();
 ----
-0
+4
 
 query II
 EXPLAIN SELECT id FROM my_datalake.default.pp_orders UNION ALL SELECT id FROM my_datalake.default.pp_orders_twin;

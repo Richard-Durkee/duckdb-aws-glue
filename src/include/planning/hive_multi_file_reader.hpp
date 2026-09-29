@@ -43,9 +43,6 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
-	//! The cardinality function of the bound file format reader, wrapped the same way, and the fallback whenever no
-	//! sample could be taken
-	table_function_cardinality_t format_cardinality = nullptr;
 	//! Rows and bytes of one data file, measured once from a file the scan is going to read anyway. Glue carries no
 	//! statistics of any kind, so this is the only thing that makes the cost reflect the data. Guarded because the
 	//! cardinality is asked for more than once per plan, and the answer costs a request.

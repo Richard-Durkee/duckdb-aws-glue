@@ -400,12 +400,19 @@ HiveMultiFileList::ByteEstimate HiveMultiFileList::EstimateBytes() const {
 }
 
 OpenFileInfo HiveMultiFileList::GetSampleFile() const {
-	// expands the first listing job only, and the files stay in the list for the scan to read
-	auto first = GetFirstFile();
-	if (first.path.empty()) {
-		return first;
-	}
 	lock_guard<mutex> lck(lock);
+	// one listing job at most, even when it finds no file: looking for a file must not list the whole table
+	if (expanded_files.empty() && !all_files_expanded) {
+		if (client_context.IsInterrupted()) {
+			throw InterruptException();
+		}
+		if (!ExpandNextPath()) {
+			all_files_expanded = true;
+		}
+	}
+	if (expanded_files.empty()) {
+		return OpenFileInfo("");
+	}
 	optional_idx largest;
 	idx_t largest_size = 0;
 	for (idx_t i = 0; i < expanded_files.size(); i++) {
@@ -415,7 +422,7 @@ OpenFileInfo HiveMultiFileList::GetSampleFile() const {
 			largest_size = size.GetIndex();
 		}
 	}
-	return largest.IsValid() ? expanded_files[largest.GetIndex()] : first;
+	return largest.IsValid() ? expanded_files[largest.GetIndex()] : expanded_files[0];
 }
 
 vector<OpenFileInfo> HiveMultiFileList::GetDisplayFileList(optional_idx max_files) const {
@@ -530,6 +537,10 @@ static FileSample SampleFile(ClientContext &context, const MultiFileBindData &bi
 		return FileSample {scan_info.sampled_file_rows, scan_info.sampled_file_bytes};
 	}
 	scan_info.file_sample_attempted = true;
+	if (scan_info.file_format == HiveFileFormat::AVRO) {
+		// no bounded way to count avro rows without an avro reader, so there is nothing to list for
+		return FileSample {};
+	}
 	auto file = files.GetSampleFile();
 	if (file.path.empty()) {
 		return FileSample {};
@@ -566,24 +577,33 @@ static FileSample SampleFile(ClientContext &context, const MultiFileBindData &bi
 		scan_info.sampled_file_rows = SampleLineOrientedRowsPerFile(context, file, scan_info.header);
 		break;
 	case HiveFileFormat::AVRO:
-		// binary, with its own block structure: no bounded way to count rows without an avro reader
 		break;
 	}
 	return FileSample {scan_info.sampled_file_rows, scan_info.sampled_file_bytes};
 }
 
+//! Estimate without listing; the format's own cardinality asks for GetFileCount(500), which lists while planning
+static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, const MultiFileBindData &bind_data) {
+	auto count_info = bind_data.file_list->GetFileCount();
+	auto estimated_file_count = count_info.count;
+	if (count_info.type != FileExpansionType::ALL_FILES_EXPANDED) {
+		estimated_file_count *= 2;
+	}
+	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
+}
+
 //! Cardinality of a Hive scan: the rows per byte of one sampled file, over the bytes of the files the scan will read.
 //! Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the same, and
-//! csv/json/avro are estimated at one row.
+//! csv and json are estimated at one row.
 static unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto hive_list = dynamic_cast<const HiveMultiFileList *>(bind_data.file_list.get());
 	if (!hive_list) {
-		return nullptr;
+		return UnsampledCardinality(context, bind_data);
 	}
 	auto &scan_info = hive_list->ScanInfo();
-	auto fallback = [&]() -> unique_ptr<NodeStatistics> {
-		return scan_info.format_cardinality ? scan_info.format_cardinality(context, bind_data_p) : nullptr;
+	auto fallback = [&]() {
+		return UnsampledCardinality(context, bind_data);
 	};
 	// the partitions this scan reads -- pruning has already happened by the time the cardinality is asked for, so a
 	// filtered scan is costed on what it actually reads
@@ -737,7 +757,6 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_info->format_statistics = scan_function.statistics_extended;
 	scan_function.statistics_extended = HivePartitionStatistics;
 	// and the row count comes from a sampled file rather than the format's constant
-	scan_info->format_cardinality = scan_function.cardinality;
 	scan_function.cardinality = HiveScanCardinality;
 
 	vector<LogicalType> return_types;

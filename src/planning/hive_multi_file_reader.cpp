@@ -7,6 +7,8 @@
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
@@ -366,9 +368,27 @@ static unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, co
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
-static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data,
+//! Serialize the fields that identify a scan; CommonSubplanOptimizer uses them to decide whether sub-plans are equal
+static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
                               const TableFunction &function) {
-	throw NotImplementedException("HiveScan serialization not implemented");
+	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
+	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
+	auto &info = list.ScanInfo();
+	serializer.WriteProperty(100, "catalog", info.catalog_name);
+	serializer.WriteProperty(101, "database", info.database_name);
+	serializer.WriteProperty(102, "table", info.table_name);
+	serializer.WriteProperty(103, "location", info.root_location);
+	// by value: an index into Glue's partition list means nothing elsewhere
+	vector<vector<string>> partitions;
+	vector<string> locations;
+	for (auto index : list.PartitionIndexes()) {
+		partitions.push_back(info.partitions[index].values);
+		locations.push_back(info.partitions[index].location);
+	}
+	serializer.WriteProperty(104, "partitions", partitions);
+	serializer.WriteProperty(105, "partition_locations", locations);
+	serializer.WriteProperty(106, "types", bind_data.types);
+	serializer.WriteProperty(107, "names", bind_data.names);
 }
 
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, TableFunction &function) {

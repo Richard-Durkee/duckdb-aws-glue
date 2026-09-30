@@ -46,16 +46,17 @@ bool GlueSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 //===--------------------------------------------------------------------===//
 // Create / Drop / Alter
 //===--------------------------------------------------------------------===//
-GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &context,
-                                                                const CreateTableInfo &create_info) {
-	GlueCreateTableOptions result;
-	if (create_info.options.empty()) {
+vector<pair<string, Value>>
+GlueSchemaEntry::EvaluateOptions(ClientContext &context,
+                                 const case_insensitive_map_t<unique_ptr<ParsedExpression>> &options,
+                                 const string &statement) {
+	vector<pair<string, Value>> result;
+	if (options.empty()) {
 		return result;
 	}
 	auto binder = Binder::CreateBinder(context);
-	TableFunctionBinder option_binder(*binder, context, "CREATE TABLE options");
-	for (auto &option : create_info.options) {
-		auto &key = option.first;
+	TableFunctionBinder option_binder(*binder, context, statement + " options");
+	for (auto &option : options) {
 		auto expr_copy = option.second->Copy();
 		auto bound_expr = option_binder.Bind(expr_copy);
 		if (bound_expr->HasParameter()) {
@@ -63,8 +64,19 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 		}
 		auto value = ExpressionExecutor::EvaluateScalar(context, *bound_expr, true);
 		if (value.IsNull()) {
-			throw BinderException("NULL is not a valid value for CREATE TABLE option '%s'", key);
+			throw BinderException("NULL is not a valid value for %s option '%s'", statement, option.first);
 		}
+		result.emplace_back(option.first, std::move(value));
+	}
+	return result;
+}
+
+GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &context,
+                                                                const CreateTableInfo &create_info) {
+	GlueCreateTableOptions result;
+	for (auto &option : EvaluateOptions(context, create_info.options, "CREATE TABLE")) {
+		auto &key = option.first;
+		auto &value = option.second;
 		auto string_value = value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
 
 		if (StringUtil::CIEquals(key, "type")) {

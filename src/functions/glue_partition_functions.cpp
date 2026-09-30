@@ -728,15 +728,18 @@ TableFunction GetGluePartitionsFunction() {
 TableFunction GetGlueAddPartitionFunction() {
 	TableFunction function("glue_add_partition", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAddPartitionScan,
 	                       GlueAddPartitionBind, GluePartitionChangeInit);
-	function.named_parameters["location"] = LogicalType::VARCHAR;
-	function.named_parameters["if_not_exists"] = LogicalType::BOOLEAN;
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("location", LogicalType::VARCHAR);
+		options.Add("if_not_exists", LogicalType::BOOLEAN);
+	});
 	return function;
 }
 
 TableFunction GetGlueDropPartitionFunction() {
 	TableFunction function("glue_drop_partition", {LogicalType::VARCHAR, LogicalType::ANY}, GlueDropPartitionScan,
 	                       GlueDropPartitionBind, GluePartitionChangeInit);
-	function.named_parameters["if_exists"] = LogicalType::BOOLEAN;
+	function.GetSignature().WithTypedKwargs(
+	    "options", [](TypedKwargs &options) { options.Add("if_exists", LogicalType::BOOLEAN); });
 	return function;
 }
 

@@ -43,13 +43,6 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
-	//! Rows and bytes of one data file, measured once from a file the scan is going to read anyway. Glue carries no
-	//! statistics of any kind, so this is the only thing that makes the cost reflect the data. Guarded because the
-	//! cardinality is asked for more than once per plan, and the answer costs a request.
-	mutable mutex sample_lock;
-	mutable optional_idx sampled_file_rows;
-	mutable optional_idx sampled_file_bytes;
-	mutable bool file_sample_attempted = false;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
@@ -81,21 +74,10 @@ public:
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
-	//! The total number of files this scan will read, extrapolating the files-per-partition of the partitions listed so
-	//! far over the partitions still to list. Exact once everything is listed, and invalid before anything is.
-	optional_idx EstimateTotalFileCount() const;
-	//! What the listing says about the bytes of the files this scan will read
-	struct ByteEstimate {
-		//! Total bytes, extrapolated the same way as the file count. Invalid when the listing reported no size at all
-		optional_idx total;
-		//! The smallest and largest listed file, which is what tells files of one size from files of many
-		idx_t smallest = 0;
-		idx_t largest = 0;
-	};
-	ByteEstimate EstimateBytes() const;
-	//! The largest listed file, listing the first job when nothing is listed yet. It carries the least per-file format
-	//! overhead and the most of the table's bytes, so it is the least misleading file to measure.
-	OpenFileInfo GetSampleFile() const;
+	//! The data files of one directory the scan reads, for measuring the table: the first partition's, or the location
+	//! of an unpartitioned table. Never the table root of a partitioned table, which is listed recursively. The listing
+	//! is kept until the query ends, and any scan listing the same directory in the query takes it from there.
+	vector<OpenFileInfo> ListSampleDirectory() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
 
@@ -110,9 +92,6 @@ private:
 	};
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
-	//! How many partitions the listings already run covered, and how many are still to come. Under the lock, after
-	//! PlanListings
-	void CountPartitions(idx_t &covered, idx_t &remaining) const;
 	void ListRoot(FileSystem &fs, const vector<idx_t> &partitions) const;
 	void ListPartition(FileSystem &fs, idx_t partition_index) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters

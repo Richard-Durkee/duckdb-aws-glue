@@ -73,7 +73,8 @@ SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
 1	0	1
 
-# ten partitions, at the threshold: one listing of the table root instead
+# ten partitions, at the threshold: the scan lists the table root instead. The estimate's listing of one
+# of the ten partitions comes on top, since a root listing cannot take it over
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -85,7 +86,7 @@ SELECT count(*) FROM my_datalake.default.scale20 WHERE dt IN ('d1','d2','d3','d4
 query III
 SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
-1	1	0
+2	1	1
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale20;
@@ -151,7 +152,7 @@ SELECT count(*) FROM my_datalake.default.scale200 WHERE dt IN ('d1','d2','d3','d
 query III
 SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
-1	1	0
+2	1	1
 
 # unchanged by the tenfold rise in partition count
 query II
@@ -204,10 +205,10 @@ SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
 1	0	1
 
-# Reading ten partitions of two thousand takes TWO requests, not one: the root listing has passed S3's
+# Reading ten partitions of two thousand takes TWO root requests, not one: the root listing has passed S3's
 # 1000-key page size, so the request count has started tracking the table's size. Ten narrow listings
-# would have been ten requests over ten keys; this is two requests over two thousand. Extrapolating,
-# 20k partitions is ~20 requests to read the same twenty rows.
+# would have been ten requests over ten keys; this is two requests over two thousand, plus the estimate's
+# one partition listing. Extrapolating, 20k partitions is ~20 requests to read the same twenty rows.
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -219,7 +220,7 @@ SELECT count(*) FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3','
 query III
 SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
-2	2	0
+3	2	1
 
 # still exact at a hundredfold the partition count of the first block
 query II

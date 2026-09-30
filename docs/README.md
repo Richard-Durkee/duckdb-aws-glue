@@ -196,8 +196,8 @@ The tests are written against two `--test-config` files, which decide where the 
 
 - `test/configs/local_glue.json`: [moto](https://github.com/getmoto/moto) serving the Glue API and
   [SeaweedFS](https://github.com/seaweedfs/seaweedfs) serving S3, both from `scripts/docker-compose.yml`, which also
-  creates the bucket, the Glue database `default` and the bucketed tables `default.fixture_bucketed` and
-  `default.fixture_bucketed_multi` (the extension can not create those).
+  creates the bucket, the Glue database `default` and the bucketed table `default.fixture_bucketed_multi` (bucket
+  columns without a NumberOfBuckets, which the extension does not create).
 - `test/configs/cloud_glue.json`: a live AWS Glue Data Catalog, with credentials from the AWS credential chain.
 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,

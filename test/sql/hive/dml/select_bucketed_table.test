@@ -1,0 +1,197 @@
+# name: test/sql/hive/dml/select_bucketed_table.test
+# description: a bucketed (clustered) Glue table reads exactly like the same files read unbucketed
+# group: [dml]
+
+# The three tables share one location, so they are the same bytes carrying different metadata, and the unbucketed
+# one is the control. A predicate on a bucket column still reads every file: bucket pruning needs the hash function,
+# which Glue does not record.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET glue_create_bucketed_tables = true;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bucket_plain;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bucket_hashed;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bucket_sorted;
+
+statement ok
+CREATE TABLE my_datalake.default.bucket_plain (id INTEGER, amount DOUBLE, region VARCHAR)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read');
+
+statement ok
+CREATE TABLE my_datalake.default.bucket_hashed (id INTEGER, amount DOUBLE, region VARCHAR)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read', BucketColumns = ['id'], NumberOfBuckets = 4);
+
+# two bucket columns, a bucket count that does not match the file count, and both sort directions
+statement ok
+CREATE TABLE my_datalake.default.bucket_sorted (id INTEGER, amount DOUBLE, region VARCHAR)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read', BucketColumns = ['id', 'region'], NumberOfBuckets = 8,
+      SortColumns = [{'Column': 'id', 'SortOrder': 1}, {'Column': 'region', 'SortOrder': 0}]);
+
+# One file per id % 4 over ids 0-9, so the layout is consistent with 'bucketed by id into 4 buckets'. COPY TO writes
+# S3 directly, so this is not a write through the catalog and the write guard is not involved.
+statement ok
+COPY (SELECT 0 AS id, 0.0 AS amount, 'r0' AS region UNION ALL SELECT 4, 40.0, 'r0' UNION ALL SELECT 8, 80.0, 'r0')
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000000_0' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 1 AS id, 10.0 AS amount, 'r1' AS region UNION ALL SELECT 5, 50.0, 'r1' UNION ALL SELECT 9, 90.0, 'r1')
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000001_0' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 2 AS id, 20.0 AS amount, 'r0' AS region UNION ALL SELECT 6, 60.0, 'r0')
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000002_0' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 3 AS id, 30.0 AS amount, 'r1' AS region UNION ALL SELECT 7, 70.0, 'r1')
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/000003_0' (FORMAT parquet);
+
+#---------------------------------------------------------------------------
+# the bucketed tables return exactly what the unbucketed one does
+#---------------------------------------------------------------------------
+# EXCEPT ALL in both directions: no row the control does not have, and none missing. A count alone would not catch a
+# wrong value.
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.bucket_hashed)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.bucket_plain)
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.bucket_plain)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.bucket_hashed)
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.bucket_sorted)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.bucket_plain)
+);
+----
+0
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.bucket_plain)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.bucket_sorted)
+);
+----
+0
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_plain;
+----
+10	45	450.0	2
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_hashed;
+----
+10	45	450.0	2
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_sorted;
+----
+10	45	450.0	2
+
+#---------------------------------------------------------------------------
+# a predicate on a bucket column returns the right rows
+#---------------------------------------------------------------------------
+# id = 7 lives in 000003_0 only: a bucket-aware engine would read one file, this reads all four
+query II
+SELECT id, amount FROM my_datalake.default.bucket_hashed WHERE id = 7;
+----
+7	70.0
+
+query I
+SELECT count(*) FROM my_datalake.default.bucket_hashed WHERE id IN (0, 1, 2, 3);
+----
+4
+
+query I
+SELECT count(*) FROM my_datalake.default.bucket_hashed WHERE id = 999;
+----
+0
+
+# the second bucket column of the two-column table
+query I
+SELECT count(*) FROM my_datalake.default.bucket_sorted WHERE region = 'r1';
+----
+5
+
+# a join of two bucketed tables is an ordinary hash join, and correct
+query II
+SELECT count(*), sum(h.amount) FROM my_datalake.default.bucket_hashed h
+JOIN my_datalake.default.bucket_sorted s USING (id);
+----
+10	450.0
+
+#---------------------------------------------------------------------------
+# a false bucketing claim does not change what is read
+#---------------------------------------------------------------------------
+# bucket_hashed claims 4 buckets on id; this fifth file holds ids of every residue. A reader that trusted the claim
+# could skip these rows, this one does not consult it.
+statement ok
+COPY (SELECT 100 AS id, 1000.0 AS amount, 'r0' AS region UNION ALL SELECT 101, 1010.0, 'r1'
+      UNION ALL SELECT 102, 1020.0, 'r0' UNION ALL SELECT 103, 1030.0, 'r1')
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/violates_the_claim.parquet' (FORMAT parquet);
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.default.bucket_hashed WHERE id >= 100;
+----
+4	406
+
+query I
+SELECT count(*) FROM my_datalake.default.bucket_hashed WHERE id = 102;
+----
+1
+
+query I
+SELECT count(*) FROM (
+  (SELECT * FROM my_datalake.default.bucket_hashed)
+  EXCEPT ALL
+  (SELECT * FROM my_datalake.default.bucket_plain)
+);
+----
+0
+
+query IIII
+SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.default.bucket_hashed;
+----
+14	451	4510.0	2
+
+statement ok
+DROP TABLE my_datalake.default.bucket_plain;
+
+statement ok
+DROP TABLE my_datalake.default.bucket_hashed;
+
+statement ok
+DROP TABLE my_datalake.default.bucket_sorted;

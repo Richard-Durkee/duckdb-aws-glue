@@ -331,7 +331,7 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 	// fails), then write the query result into it
 	auto &glue_catalog = op.schema.catalog.Cast<GlueCatalog>();
 	auto transaction = glue_catalog.GetCatalogTransaction(context);
-	auto entry = op.schema.CreateTable(transaction, *op.info);
+	auto entry = glue_catalog.CreateTable(transaction, op.schema, *op.info);
 
 	vector<Identifier> names;
 	vector<LogicalType> types;

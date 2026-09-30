@@ -1,5 +1,6 @@
 # name: test/sql/hive/bugs/s3_partition_statistics_must_not_prune.test
 # description: partition-column statistics must not prune a row that exists.
+# group: [bugs]
 
 # Corner case protection:
 #

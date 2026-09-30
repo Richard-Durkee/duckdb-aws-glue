@@ -619,6 +619,19 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			}
 			throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
 		}
+		// Glue keeps BucketColumns and SortColumns as they are, naming a column the table no longer has
+		for (auto &bucket_column : current.bucket_columns) {
+			if (StringUtil::CIEquals(bucket_column, name)) {
+				throw CatalogException("Column \"%s\" is a bucket column of table \"%s\" and can not be dropped", name,
+				                       table_name);
+			}
+		}
+		for (auto &sort_column : current.sort_columns) {
+			if (StringUtil::CIEquals(sort_column.name, name)) {
+				throw CatalogException("Column \"%s\" is a sort column of table \"%s\" and can not be dropped", name,
+				                       table_name);
+			}
+		}
 		if (columns.size() == 1) {
 			throw CatalogException("Can not drop column \"%s\": table \"%s\" needs at least one column", name,
 			                       table_name);

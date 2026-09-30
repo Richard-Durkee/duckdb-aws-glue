@@ -76,9 +76,9 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
-  partition key) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable. Existing parquet files
-  keep their types, so only widening type changes are allowed: integer widening (TINYINT to BIGINT), FLOAT to
-  DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
+  partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
+  Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
+  BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
   a database when the database is dropped.
 

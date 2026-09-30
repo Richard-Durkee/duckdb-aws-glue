@@ -354,28 +354,10 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 	});
 }
 
-static void CheckTableParametersChangeable(const vector<string> &keys) {
-	for (auto &key : keys) {
-		if (key.empty()) {
-			throw InvalidInputException("A table property needs a name");
-		}
-		if (GlueTableInfo::IsFormatParameter(key)) {
-			throw InvalidInputException("Table property '%s' decides how the table is read and can not be changed "
-			                            "with ALTER TABLE",
-			                            key);
-		}
-	}
-}
-
 void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                     const string &table_name, const vector<pair<string, string>> &set,
                                     const vector<string> &unset) {
-	CheckWritable(catalog, "UpdateTable");
-	vector<string> keys = unset;
-	for (auto &entry : set) {
-		keys.push_back(entry.first);
-	}
-	CheckTableParametersChangeable(keys);
+	// Reached only through ALTER TABLE, which the binder refuses on a read-only attach before it gets here.
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {

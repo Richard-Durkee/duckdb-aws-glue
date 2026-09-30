@@ -547,6 +547,19 @@ bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
 
 } // namespace
 
+//! The parameters GlueTableInfo::GetFormat() derives the table format from can not be set or reset: changing
+//! table_type on a Hive table would relabel it as Iceberg or Delta without a metadata file behind it.
+static void CheckTablePropertyChangeable(const string &key) {
+	if (key.empty()) {
+		throw InvalidInputException("A table property needs a name");
+	}
+	if (GlueTableInfo::IsFormatParameter(key)) {
+		throw InvalidInputException("Table property '%s' decides how the table is read and can not be changed "
+		                            "with ALTER TABLE",
+		                            key);
+	}
+}
+
 //! ALTER TABLE t SET (key = value, ...) / RESET (key, ...): Hive's SET / UNSET TBLPROPERTIES
 void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table) {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -558,6 +571,7 @@ void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInf
 		auto binder = Binder::CreateBinder(context);
 		TableFunctionBinder option_binder(*binder, context, "ALTER TABLE SET");
 		for (auto &option : options.table_options) {
+			CheckTablePropertyChangeable(option.first);
 			auto expr_copy = option.second->Copy();
 			auto bound_expr = option_binder.Bind(expr_copy);
 			if (bound_expr->HasParameter()) {
@@ -571,7 +585,9 @@ void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInf
 		}
 	} else {
 		for (auto &option : alter_table.Cast<ResetTableOptionsInfo>().table_options) {
-			unset.push_back(option.GetIdentifierName());
+			auto key = option.GetIdentifierName();
+			CheckTablePropertyChangeable(key);
+			unset.push_back(std::move(key));
 		}
 	}
 	GlueAPI::UpdateTableParameters(context, glue_catalog, database_info.name, table_name, set, unset);

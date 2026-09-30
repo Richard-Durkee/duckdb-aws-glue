@@ -8,6 +8,7 @@
 #include <aws/glue/model/DeleteTableRequest.h>
 #include <aws/glue/model/GetTableRequest.h>
 #include <aws/glue/model/GetTablesRequest.h>
+#include <aws/glue/model/Order.h>
 #include <aws/glue/model/SerDeInfo.h>
 #include <aws/glue/model/UpdateTableRequest.h>
 
@@ -124,7 +125,17 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 	storage_descriptor.SetColumns(ToAwsColumns(table.columns));
 	storage_descriptor.SetSerdeInfo(serde_info);
 	storage_descriptor.SetCompressed(false);
-	storage_descriptor.SetNumberOfBuckets(-1);
+	storage_descriptor.SetNumberOfBuckets(table.number_of_buckets);
+	if (!table.bucket_columns.empty()) {
+		storage_descriptor.SetBucketColumns(ToAwsValues(table.bucket_columns));
+	}
+	for (auto &sort_column : table.sort_columns) {
+		Aws::Glue::Model::Order order;
+		order.SetColumn(sort_column.name);
+		// Glue's SortOrder is 1 for ascending, 0 for descending
+		order.SetSortOrder(sort_column.sort_order == GlueSortOrder::DESCENDING ? 0 : 1);
+		storage_descriptor.AddSortColumns(std::move(order));
+	}
 	parameters.emplace("EXTERNAL", "TRUE");
 
 	Aws::Glue::Model::TableInput table_input;

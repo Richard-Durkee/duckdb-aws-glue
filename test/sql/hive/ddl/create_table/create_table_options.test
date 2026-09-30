@@ -3,7 +3,8 @@
 # group: [create_table]
 
 #              [db_name.]table_name, PARTITIONED BY, LOCATION, TBLPROPERTIES, and the ones without a DuckDB
-#              counterpart (EXTERNAL, COMMENT, CLUSTERED BY, ROW FORMAT, STORED AS, WITH SERDEPROPERTIES)
+#              counterpart (EXTERNAL, COMMENT, ROW FORMAT, STORED AS, WITH SERDEPROPERTIES). CLUSTERED BY is the
+#              bucketing options, in create_bucketed_table.test
 
 require httpfs
 
@@ -167,18 +168,18 @@ statement ok
 DROP TABLE my_datalake.default.ddl_opts_props;
 
 #---------------------------------------------------------------------------
-# not supported: COMMENT, CLUSTERED BY, ROW FORMAT, STORED AS, WITH SERDEPROPERTIES
+# not supported: COMMENT, ROW FORMAT, STORED AS, WITH SERDEPROPERTIES
 #---------------------------------------------------------------------------
 # table comments are not written to Glue
 statement error
 COMMENT ON TABLE my_datalake.default.ddl_opts IS 'planet data';
 ----
 
-# SORTED BY (the closest DuckDB syntax to CLUSTERED BY) is rejected
+# DuckDB's SORTED BY is rejected, the sort order of a bucketed table is the SortColumns option
 statement error
 CREATE TABLE my_datalake.default.ddl_opts_sorted (id INTEGER) SORTED BY (id);
 ----
-SORTED BY
+the sort order of a bucketed table is the SortColumns option
 
 statement ok
 DROP TABLE my_datalake.default.ddl_opts;

@@ -17,59 +17,71 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
+statement ok
+SET glue_create_bucketed_tables = true;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.bucketed_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.bucketed_orders (id INTEGER, amount DOUBLE)
+WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'SortOrder': 1}]);
+
 query II
 SELECT column_name, data_type FROM duckdb_columns()
-WHERE database_name = 'my_datalake' AND table_name = 'fixture_bucketed' ORDER BY column_index;
+WHERE database_name = 'my_datalake' AND table_name = 'bucketed_orders' ORDER BY column_index;
 ----
 id	INTEGER
 amount	DOUBLE
 
-# the fixture location is shared between runs, so the queries below filter on specific ids
+# data written by another engine; COPY TO writes S3 directly and is not a write through the catalog
 statement ok
 COPY (SELECT 1 AS id, 10.0 AS amount UNION ALL SELECT 2, 20.0)
-TO '{DEFAULT_S3_LOCATION}/fixture/fixture_bucketed/data.parquet' (FORMAT parquet);
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bucketed_orders/data.parquet' (FORMAT parquet);
 
 query II
-SELECT id, amount FROM my_datalake.default.fixture_bucketed WHERE id IN (1, 2) ORDER BY id;
+SELECT id, amount FROM my_datalake.default.bucketed_orders ORDER BY id;
 ----
 1	10.0
 2	20.0
 
 statement error
-INSERT INTO my_datalake.default.fixture_bucketed VALUES (3, 30.0);
+INSERT INTO my_datalake.default.bucketed_orders VALUES (3, 30.0);
 ----
-<REGEX>:.*INSERT into Glue table 'fixture_bucketed' is not supported: the table is clustered by \(id\) into 4 buckets, sorted by \(id ASC\), and DuckDB does not write a bucketed layout.*
+<REGEX>:.*INSERT into Glue table 'bucketed_orders' is not supported: the table is clustered by \(id\) into 4 buckets, sorted by \(id ASC\), and DuckDB does not write a bucketed layout.*
 
 query I
-SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 3;
+SELECT count(*) FROM my_datalake.default.bucketed_orders;
 ----
-0
+2
 
 statement error
-INSERT INTO my_datalake.default.fixture_bucketed SELECT 4, 40.0;
+INSERT INTO my_datalake.default.bucketed_orders SELECT 4, 40.0;
 ----
 write a bucketed layout
 
 query I
-SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 4;
+SELECT count(*) FROM my_datalake.default.bucketed_orders;
 ----
-0
+2
 
-# CTAS does not go through the bucketing check, but IF NOT EXISTS on an existing table writes nothing
+# CTAS without bucketing options does not go through the bucketing check, but IF NOT EXISTS on an existing table
+# writes nothing
 statement ok
-CREATE TABLE IF NOT EXISTS my_datalake.default.fixture_bucketed AS SELECT 9 AS id, 90.0 AS amount;
+CREATE TABLE IF NOT EXISTS my_datalake.default.bucketed_orders AS SELECT 9 AS id, 90.0 AS amount;
 
 query I
-SELECT count(*) FROM my_datalake.default.fixture_bucketed WHERE id = 9;
+SELECT count(*) FROM my_datalake.default.bucketed_orders;
 ----
-0
+2
 
 statement error
-INSERT INTO my_datalake.default.fixture_bucketed VALUES (5, 50.0);
+INSERT INTO my_datalake.default.bucketed_orders VALUES (5, 50.0);
 ----
 clustered by (id) into 4 buckets
 
-# bucket columns without NumberOfBuckets or SortColumns
+# bucket columns without NumberOfBuckets or SortColumns, which CREATE TABLE does not make: a fixture table from
+# scripts/docker-compose.yml, never written to
 statement error
 INSERT INTO my_datalake.default.fixture_bucketed_multi VALUES (1, 1.0);
 ----
@@ -96,3 +108,6 @@ SELECT count(*) FROM my_datalake.default.unbucketed_orders;
 
 statement ok
 DROP TABLE my_datalake.default.unbucketed_orders;
+
+statement ok
+DROP TABLE my_datalake.default.bucketed_orders;

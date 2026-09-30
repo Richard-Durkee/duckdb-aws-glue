@@ -61,6 +61,11 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
+  With `SET glue_create_bucketed_tables = true`, `BucketColumns = ['col', ...]`, `NumberOfBuckets = n` and
+  `SortColumns = [{'Column': 'col', 'SortOrder': 1}, ...]` (1 ascending, 0 descending) create a bucketed (clustered)
+  table, Hive's `CLUSTERED BY (...) SORTED BY (...) INTO n BUCKETS`: bucket and sort columns are columns of the table
+  that are not partition keys, and `BucketColumns` needs a positive `NumberOfBuckets`. The setting is off by default
+  because DuckDB does not write to such a table (see below).
 - `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition
   touched, partition columns are not stored in the files) and register new partition directories in Glue with
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
@@ -69,7 +74,7 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
-  they can be read.
+  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable. Existing parquet files
   keep their types, so only widening type changes are allowed: integer widening (TINYINT to BIGINT), FLOAT to

@@ -75,7 +75,8 @@ ErrorData GlueCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	// PARTITIONED BY is accepted here and validated in GlueSchemaEntry::CreateTable (Hive tables only, plain
 	// column references)
 	if (!base.sort_keys.empty()) {
-		return ErrorData(ExceptionType::CATALOG, "SORTED BY is not supported for tables in a Glue catalog");
+		return ErrorData(ExceptionType::CATALOG, "SORTED BY is not supported for tables in a Glue catalog, the sort "
+		                                         "order of a bucketed table is the SortColumns option");
 	}
 	return ErrorData();
 }

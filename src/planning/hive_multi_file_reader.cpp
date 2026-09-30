@@ -493,6 +493,26 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 //===--------------------------------------------------------------------===//
 // Cardinality sample
 //===--------------------------------------------------------------------===//
+//! The uncompressed size a gzip file records in its last four bytes (modulo 4 GiB, and of its last member only)
+static optional_idx GzipUncompressedSize(FileSystem &fs, const string &path) {
+	auto handle = fs.OpenFile(path, FileFlags::FILE_FLAGS_READ);
+	if (!handle) {
+		return optional_idx();
+	}
+	auto compressed_size = static_cast<idx_t>(handle->GetFileSize());
+	if (compressed_size < 4) {
+		return optional_idx();
+	}
+	uint8_t trailer[4];
+	handle->Read(trailer, sizeof(trailer), compressed_size - sizeof(trailer));
+	auto size = idx_t(trailer[0]) | idx_t(trailer[1]) << 8 | idx_t(trailer[2]) << 16 | idx_t(trailer[3]) << 24;
+	// text compresses, so a recorded size below the compressed one has wrapped past 4 GiB
+	if (size < compressed_size) {
+		return optional_idx();
+	}
+	return size;
+}
+
 //! List ONE directory of a table and open ONE of its files, once per query, so every scan's cost reflects the data.
 //!
 //! This is the trick read_parquet already plays -- it globs and binds on the first file. We skip that path because
@@ -502,18 +522,34 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 //! footer to ask.
 static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const OpenFileInfo &file, bool header) {
 	static constexpr idx_t SAMPLE_BYTES = 65536;
+	// zstd records its uncompressed size only optionally, and the scan cannot decompress the others at all
+	for (auto extension : {".zst", ".snappy", ".lz4", ".bz2", ".deflate"}) {
+		if (StringUtil::EndsWith(file.path, extension)) {
+			return optional_idx();
+		}
+	}
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto handle = fs.OpenFile(file.path, FileFlags::FILE_FLAGS_READ);
+	auto gzip = IsFileCompressed(file.path, FileCompressionType::GZIP);
+	optional_idx gzip_size;
+	if (gzip) {
+		gzip_size = GzipUncompressedSize(fs, file.path);
+		if (!gzip_size.IsValid()) {
+			return optional_idx();
+		}
+	}
+	auto compression = gzip ? FileCompressionType::GZIP : FileCompressionType::UNCOMPRESSED;
+	auto handle = fs.OpenFile(file.path, FileFlags::FILE_FLAGS_READ | compression);
 	if (!handle) {
 		return optional_idx();
 	}
-	auto file_size = static_cast<idx_t>(handle->GetFileSize());
+	// sizes and lines are counted uncompressed
+	auto file_size = gzip ? gzip_size.GetIndex() : static_cast<idx_t>(handle->GetFileSize());
 	if (file_size == 0) {
 		return optional_idx();
 	}
-	auto sample_size = MinValue<idx_t>(file_size, SAMPLE_BYTES);
-	string buffer(sample_size, '\0');
-	handle->Read(reinterpret_cast<void *>(&buffer[0]), sample_size, 0);
+	string buffer(MinValue<idx_t>(file_size, SAMPLE_BYTES), '\0');
+	// sequentially, since a compressed stream cannot be read at an offset
+	auto sample_size = static_cast<idx_t>(handle->Read(reinterpret_cast<void *>(&buffer[0]), buffer.size()));
 	idx_t lines = 0;
 	for (idx_t i = 0; i < sample_size; i++) {
 		if (buffer[i] == '\n') {

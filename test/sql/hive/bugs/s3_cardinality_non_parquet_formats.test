@@ -76,6 +76,12 @@ DROP TABLE IF EXISTS my_datalake.default.avro_p3;
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.avro_skw;
 
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.csv_gz;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.csv_zst;
+
 # ----------------------------------------------------------------------------------------------------
 # csv
 # ----------------------------------------------------------------------------------------------------
@@ -321,6 +327,74 @@ EXPLAIN SELECT * FROM my_datalake.default.json_skw;
 physical_plan	<REGEX>:.*Read Json.*~40 rows.*
 
 # ----------------------------------------------------------------------------------------------------
+# compressed csv -- the lines of a compressed prefix are noise, and its size is not the file's. gzip
+# records the uncompressed size in its last four bytes, so the prefix is read decompressed and scaled
+# by that; zstd records it only optionally, so it is not measured.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+CREATE TABLE my_datalake.default.csv_gz (id INTEGER, v VARCHAR) WITH (format = 'csv');
+
+# 20,000 rows, well past the 64KB prefix uncompressed, so the recorded size is what scales it
+statement ok
+COPY (SELECT i AS id, 'r' || (i % 7) AS v FROM generate_series(1,20000) t(i))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/csv_gz/data.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
+
+query I
+SELECT count(*) FROM my_datalake.default.csv_gz;
+----
+20000
+
+# was ~16, from newline bytes in the compressed stream
+query II
+EXPLAIN SELECT * FROM my_datalake.default.csv_gz;
+----
+physical_plan	<REGEX>:.*Read Csv.*~2[0-3],[0-9]{3} rows.*
+
+statement ok
+CREATE TABLE my_datalake.default.csv_zst (id INTEGER, v VARCHAR) WITH (format = 'csv');
+
+statement ok
+COPY (SELECT i AS id, 'r' || (i % 7) AS v FROM generate_series(1,20000) t(i))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/csv_zst/data.csv.zst' (FORMAT csv, HEADER false, COMPRESSION zstd);
+
+query I
+SELECT count(*) FROM my_datalake.default.csv_zst;
+----
+20000
+
+# not measured: the format's own estimate
+query II
+EXPLAIN SELECT * FROM my_datalake.default.csv_zst;
+----
+physical_plan	<REGEX>:.*Read Csv.*~1 row.*
+
+# snappy, lz4, bzip2 and deflate are not measured either. DuckDB writes none of them, so gzip bytes stand in
+# under each extension; that is what one of these files looks like to the sampler, and a line count of them
+# was ~16. Only EXPLAIN is run: the scan cannot decompress these codecs and fails on the first line.
+foreach codec snappy lz4 bz2 deflate
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.csv_{codec};
+
+statement ok
+CREATE TABLE my_datalake.default.csv_{codec} (id INTEGER, v VARCHAR) WITH (format = 'csv');
+
+statement ok
+COPY (SELECT i AS id, 'r' || (i % 7) AS v FROM generate_series(1,20000) t(i))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/csv_{codec}/data.csv.{codec}' (FORMAT csv, HEADER false, COMPRESSION gzip);
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.csv_{codec};
+----
+physical_plan	<REGEX>:.*Read Csv.*~1 row.*
+
+statement ok
+DROP TABLE my_datalake.default.csv_{codec};
+
+endloop
+
+# ----------------------------------------------------------------------------------------------------
 # avro -- SampleFile has no avro case, so no row count is ever measured and every shape below is
 # estimated at ~1 row. The five shapes are kept anyway: they are what shows the estimate is not merely
 # imprecise but entirely absent, and a fix has to move all five.
@@ -474,3 +548,9 @@ DROP TABLE my_datalake.default.avro_p3;
 
 statement ok
 DROP TABLE my_datalake.default.avro_skw;
+
+statement ok
+DROP TABLE my_datalake.default.csv_gz;
+
+statement ok
+DROP TABLE my_datalake.default.csv_zst;

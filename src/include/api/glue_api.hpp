@@ -55,6 +55,10 @@ public:
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
 	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                             const string &table_name, const string &location);
+	//! Replace the columns of a partition's StorageDescriptor
+	static void SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                const string &table_name, const vector<string> &values,
+	                                const vector<GlueColumn> &columns);
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const vector<string> &values, const string &location);

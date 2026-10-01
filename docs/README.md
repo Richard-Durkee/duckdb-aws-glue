@@ -83,6 +83,13 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
   Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
+- `ALTER TABLE ... [PARTITION (...)] REPLACE COLUMNS (col type [COMMENT '...'], ...)` (through the
+  `glue_hive_ddl` grammar extension below) replaces all data columns of the table, or the columns one partition
+  carries, with the ones listed. Types are DuckDB types, stored the way `CREATE TABLE` stores them. The partition keys
+  are kept and must not be listed; the bucketing and sort columns must be listed. A partition's own columns are only
+  read by other engines: DuckDB reads every partition with the table's columns. Nothing about the data files is
+  checked: parquet, json and avro files are matched by name (a renamed column reads as NULL), csv files by position
+  (so this renames columns).
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
@@ -151,11 +158,14 @@ ALTER TABLE my_datalake.default.orders DROP IF EXISTS PARTITION (dt = '2016-05-1
 ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-15', country = 'IN') RENAME TO PARTITION (dt = '2016-05-16', country = 'IN');
 ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-16', country = 'IN') SET LOCATION 's3://bucket/other/';
 ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
+ALTER TABLE my_datalake.default.orders REPLACE COLUMNS (id BIGINT COMMENT 'order id', amount DOUBLE, tags VARCHAR[]);
 ```
 
-Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
-becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
-statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
+Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`), except
+`REPLACE COLUMNS`, which must be the only action. The statement becomes `CALL glue_alter_table(table, [actions])` (a
+`replace_columns` action carries its columns as a list of `{name, type, comment}` structs in `columns`): every action
+is checked against Glue before any is applied, so a statement that fails changes nothing, and consecutive adds go out
+as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.
 
 Listing the partitions of a table - `glue_partitions`, and the binding of every scan of a partitioned table - pages

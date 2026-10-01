@@ -130,7 +130,7 @@ SELECT id, name FROM my_datalake.default.formats_csv_semicolon ORDER BY id;
 
 #---------------------------------------------------------------------------
 # quoting with the default dialect: values holding the delimiter, the quote character or a newline are quoted with
-# '"', a quote inside is doubled, an empty string is "" and NULL is an empty field
+# '"', a quote inside is doubled, an empty string is an empty field and NULL is \N
 #---------------------------------------------------------------------------
 statement ok
 CREATE TABLE my_datalake.default.formats_csv_quoted (id INTEGER, name VARCHAR, note VARCHAR) WITH (format = 'csv');
@@ -145,7 +145,7 @@ INSERT INTO my_datalake.default.formats_csv_quoted VALUES
 query I
 SELECT replace(content, chr(10), '<nl>') FROM read_text('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_quoted/*.csv');
 ----
-1,"a,b",plain<nl>2,"say ""hi""",""<nl>3,"two<nl>lines",<nl>4, padded ,""""<nl>
+1,"a,b",plain<nl>2,"say ""hi""",<nl>3,"two<nl>lines",\N<nl>4, padded ,""""<nl>
 
 query IIII
 SELECT id, replace(name, chr(10), '<nl>'), note, note IS NULL FROM my_datalake.default.formats_csv_quoted ORDER BY id;

@@ -32,11 +32,12 @@ struct HiveScanInfo : public TableFunctionInfo {
 	vector<LogicalType> types;
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
-	//! CSV only: the dialect and whether every file starts with a header line
+	//! CSV only: the dialect, the number of header lines every file starts with and the string NULL is written as
 	string delimiter = ",";
 	string quote = "\"";
 	string escape = "\"";
-	bool header = false;
+	idx_t skip_lines = 0;
+	string null_string;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,

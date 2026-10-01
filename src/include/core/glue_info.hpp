@@ -2,6 +2,7 @@
 
 #include "duckdb/common/enums/file_compression_type.hpp"
 #include "duckdb/common/string.hpp"
+#include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
@@ -108,10 +109,11 @@ public:
 	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
-	//! The field delimiter of a CSV table (field.delim / separatorChar), ',' when the SerDe does not say
+	bool IsOpenCSVSerde() const;
+	//! A SerDe property (case-insensitive key), a table parameter of that name first
+	bool TryGetSerdeProperty(const string &key, string &result) const;
+	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
-	//! Whether the data files of a CSV table start with a header line (skip.header.line.count)
-	bool HasHeader() const;
 	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
 	//! the table names none; throws for a codec DuckDB can not write. Files are read with the codec their extension
 	//! says, whatever the table records.
@@ -121,10 +123,20 @@ public:
 	string GetCodec(HiveFileFormat format) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
+	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
+	string GetNullFormat() const;
+	//! skip.header.line.count, 0 without
+	idx_t GetHeaderLineCount() const;
+	//! Throws for the text SerDe properties DuckDB can not read or write in a csv or json table: footer lines, header
+	//! lines in JSON files, escaped LazySimpleSerDe fields
+	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! The quote character of a CSV table (quoteChar of OpenCSVSerde), '"' when the SerDe does not say
 	string GetQuoteCharacter() const;
 	//! The escape character of a CSV table (escapeChar of OpenCSVSerde), else the quote character
 	string GetEscapeCharacter() const;
+
+private:
+	idx_t GetLineCount(const string &key) const;
 };
 
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB

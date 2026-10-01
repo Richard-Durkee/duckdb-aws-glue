@@ -300,6 +300,7 @@ GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char 
 PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                           optional_ptr<PhysicalOperator> plan) {
 	auto &glue_table = GetHiveTableForDML(op.table, "INSERT");
+	ThrowIfInExplicitTransaction(context);
 	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, plan);
 }
 

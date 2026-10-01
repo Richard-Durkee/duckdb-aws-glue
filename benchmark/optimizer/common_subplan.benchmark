@@ -1,0 +1,155 @@
+# name: benchmark/optimizer/common_subplan.benchmark
+# description: TPC-DS q88 on three months of store_returns (SF1) in the local Glue (moto) + S3 (MinIO): eight identical scans of a partitioned table that the common-subplan optimizer merges into one
+# group: [optimizer]
+
+# The eight subqueries share the store_returns / household_demographics join; the optimizer merges it into one common
+# subplan when the scans fingerprint alike, so store_returns is listed and read once instead of eight times. Three
+# months of returns (~90 partitions) keep a run short in the regression job. Like
+# benchmark/pushdown, the load needs a build without assertions (make release): store_returns has rows with a NULL
+# sr_returned_date_sk. The load skips tables that already exist in Glue.
+
+name Common subplan over a partitioned table (q88 on store_returns)
+group optimizer
+subgroup sf1
+
+require parquet
+
+require httpfs
+
+require glue
+
+require tpcds
+
+cache glue_optimizer_tpcds_sf1.duckdb
+
+load
+CALL dsdgen(sf=1);
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_optimizer_tpcds_sf1;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_optimizer_tpcds_sf1.store_returns PARTITIONED BY (sr_returned_date_sk) AS SELECT * FROM store_returns WHERE sr_returned_date_sk BETWEEN 2451545 AND 2451635;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_optimizer_tpcds_sf1.household_demographics AS SELECT * FROM household_demographics;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_optimizer_tpcds_sf1.time_dim AS SELECT * FROM time_dim;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_optimizer_tpcds_sf1.store AS SELECT * FROM store;
+DROP TABLE store_sales;
+DROP TABLE store_returns;
+DROP TABLE catalog_sales;
+DROP TABLE catalog_returns;
+DROP TABLE web_sales;
+DROP TABLE web_returns;
+DROP TABLE inventory;
+DROP TABLE call_center;
+DROP TABLE catalog_page;
+DROP TABLE customer;
+DROP TABLE customer_address;
+DROP TABLE customer_demographics;
+DROP TABLE date_dim;
+DROP TABLE household_demographics;
+DROP TABLE income_band;
+DROP TABLE item;
+DROP TABLE promotion;
+DROP TABLE reason;
+DROP TABLE ship_mode;
+DROP TABLE store;
+DROP TABLE time_dim;
+DROP TABLE warehouse;
+DROP TABLE web_page;
+DROP TABLE web_site;
+CREATE TABLE glue_optimizer_tpcds_sf1_loaded AS SELECT 1 AS loaded;
+USE my_datalake.bench_optimizer_tpcds_sf1;
+SET enable_external_file_cache=false;
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+USE my_datalake.bench_optimizer_tpcds_sf1;
+SET enable_external_file_cache=false;
+
+run
+SELECT *
+FROM
+  (SELECT count(*) h8_30_to_9
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 8 AND t_minute >= 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s1,
+  (SELECT count(*) h9_to_9_30
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 9 AND t_minute < 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s2,
+  (SELECT count(*) h9_30_to_10
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 9 AND t_minute >= 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s3,
+  (SELECT count(*) h10_to_10_30
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 10 AND t_minute < 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s4,
+  (SELECT count(*) h10_30_to_11
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 10 AND t_minute >= 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s5,
+  (SELECT count(*) h11_to_11_30
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 11 AND t_minute < 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s6,
+  (SELECT count(*) h11_30_to_12
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 11 AND t_minute >= 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s7,
+  (SELECT count(*) h12_to_12_30
+   FROM store_returns, household_demographics, time_dim, store
+   WHERE sr_return_time_sk = t_time_sk AND sr_hdemo_sk = hd_demo_sk AND sr_store_sk = s_store_sk
+     AND t_hour = 12 AND t_minute < 30
+     AND ((hd_dep_count = 4 AND hd_vehicle_count <= 6) OR (hd_dep_count = 2 AND hd_vehicle_count <= 4)
+          OR (hd_dep_count = 0 AND hd_vehicle_count <= 2))
+     AND s_store_name = 'ese') s8;
+
+
+
+result IIIIIIII
+38	40	43	49	33	50	44	44

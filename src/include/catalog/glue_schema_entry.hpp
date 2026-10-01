@@ -21,6 +21,10 @@ struct GlueCreateTableOptions {
 	string csv_delimiter = ",";
 	string csv_quote;
 	string csv_escape;
+	//! BucketColumns / NumberOfBuckets / SortColumns, named as in Glue's StorageDescriptor
+	vector<string> bucket_columns;
+	int32_t number_of_buckets = -1;
+	vector<GlueColumn> sort_columns;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
 };
@@ -57,6 +61,8 @@ public:
 	EvaluateOptions(ClientContext &context, const case_insensitive_map_t<unique_ptr<ParsedExpression>> &options,
 	                const string &statement);
 	static GlueCreateTableOptions ParseCreateTableOptions(ClientContext &context, const CreateTableInfo &create_info);
+	//! BucketColumns, NumberOfBuckets or SortColumns (case-insensitive)
+	static bool IsBucketingOption(const string &key);
 
 private:
 	static bool CatalogTypeIsSupported(CatalogType type);

@@ -319,11 +319,19 @@ PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPla
 
 PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                     LogicalCreateTable &op, PhysicalOperator &plan) {
+	for (auto &option : op.info->Base().options) {
+		if (GlueSchemaEntry::IsBucketingOption(option.first)) {
+			throw NotImplementedException(
+			    "CREATE TABLE ... AS with option '%s' is not supported: it creates a bucketed "
+			    "Glue table, and DuckDB does not write a bucketed layout",
+			    option.first);
+		}
+	}
 	// Create the table in Glue first (Glue has no transactions, the table exists from here on even if the insert
 	// fails), then write the query result into it
 	auto &glue_catalog = op.schema.catalog.Cast<GlueCatalog>();
 	auto transaction = glue_catalog.GetCatalogTransaction(context);
-	auto entry = op.schema.CreateTable(transaction, *op.info);
+	auto entry = glue_catalog.CreateTable(transaction, op.schema, *op.info);
 
 	vector<Identifier> names;
 	vector<LogicalType> types;

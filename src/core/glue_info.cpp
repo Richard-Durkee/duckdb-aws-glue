@@ -2,6 +2,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
@@ -121,38 +122,127 @@ HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	                              database_name, name, serde_library);
 }
 
-string GlueTableInfo::GetFieldDelimiter() const {
-	// LazySimpleSerDe: field.delim, OpenCSVSerde: separatorChar
-	auto delimiter = GetSerdeParameter("field.delim");
-	if (delimiter.empty()) {
-		delimiter = GetSerdeParameter("separatorChar");
-	}
-	if (delimiter.empty()) {
-		return ",";
-	}
-	return delimiter;
+bool GlueTableInfo::IsOpenCSVSerde() const {
+	return StringUtil::Contains(StringUtil::Lower(serde_library), "opencsvserde");
 }
 
-bool GlueTableInfo::HasHeader() const {
-	return GetParameter("skip.header.line.count") == "1";
+bool GlueTableInfo::TryGetSerdeProperty(const string &key, string &result) const {
+	// Hive hands the SerDe its parameters with the table's on top
+	for (auto properties : {&parameters, &serde_parameters}) {
+		for (auto &entry : *properties) {
+			if (StringUtil::CIEquals(entry.first, key)) {
+				result = entry.second;
+				return true;
+			}
+		}
+	}
+	return false;
+}
+
+//! OpenCSVSerde reads only the first character of its separator, quote and escape characters
+static string FirstCharacter(const string &value) {
+	idx_t length = 1;
+	auto lead = static_cast<uint8_t>(value[0]);
+	if (lead >= 0xF0) {
+		length = 4;
+	} else if (lead >= 0xE0) {
+		length = 3;
+	} else if (lead >= 0xC0) {
+		length = 2;
+	}
+	return value.substr(0, length);
+}
+
+//! LazySimpleSerDe's separator byte, as Hive's LazyUtils.getByte reads it: a number from -128 to 127 is a byte code
+//! ('1' is '\001'), anything else its first character
+static string LazySimpleSeparator(const GlueTableInfo &table, const string &value) {
+	if (value.empty()) {
+		return "\x01";
+	}
+	int64_t number;
+	uint8_t separator;
+	auto digits = value[0] == '-' || value[0] == '+' ? value.substr(1) : value;
+	bool is_digits = !digits.empty();
+	for (auto c : digits) {
+		is_digits = is_digits && StringUtil::CharacterIsDigit(c);
+	}
+	if (is_digits && TryCast::Operation<string_t, int64_t>(string_t(value), number) && number >= -128 &&
+	    number <= 127) {
+		separator = static_cast<uint8_t>(number & 0xFF);
+	} else {
+		separator = static_cast<uint8_t>(value[0]);
+	}
+	if (separator == 0 || separator >= 0x80) {
+		throw NotImplementedException("Hive table '%s.%s' has the field delimiter '%s', a byte DuckDB can not split "
+		                              "fields on; only ASCII delimiters other than NUL are supported",
+		                              table.database_name, table.name, value);
+	}
+	return string(1, static_cast<char>(separator));
+}
+
+string GlueTableInfo::GetFieldDelimiter() const {
+	string delimiter;
+	if (IsOpenCSVSerde()) {
+		return TryGetSerdeProperty("separatorChar", delimiter) && !delimiter.empty() ? FirstCharacter(delimiter) : ",";
+	}
+	if (!TryGetSerdeProperty("field.delim", delimiter)) {
+		TryGetSerdeProperty("serialization.format", delimiter);
+	}
+	return LazySimpleSeparator(*this, delimiter);
+}
+
+string GlueTableInfo::GetNullFormat() const {
+	string null_format;
+	if (IsOpenCSVSerde()) {
+		return null_format;
+	}
+	return TryGetSerdeProperty("serialization.null.format", null_format) ? null_format : "\\N";
+}
+
+idx_t GlueTableInfo::GetLineCount(const string &key) const {
+	string value;
+	TryGetSerdeProperty(key, value);
+	StringUtil::Trim(value);
+	if (value.empty()) {
+		return 0;
+	}
+	uint64_t lines;
+	if (!TryCast::Operation<string_t, uint64_t>(string_t(value), lines)) {
+		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected a number of lines",
+		                            database_name, name, key, value);
+	}
+	return lines;
+}
+
+idx_t GlueTableInfo::GetHeaderLineCount() const {
+	return GetLineCount("skip.header.line.count");
+}
+
+void GlueTableInfo::CheckTextSerdeSupported() const {
+	if (GetLineCount("skip.footer.line.count") > 0) {
+		throw NotImplementedException(
+		    "Hive table '%s.%s' has 'skip.footer.line.count' set, files with footer lines are "
+		    "not supported",
+		    database_name, name);
+	}
+	string escape;
+	if (!IsOpenCSVSerde() && TryGetSerdeProperty("escape.delim", escape)) {
+		throw NotImplementedException("Hive table '%s.%s' has 'escape.delim' set, escaped LazySimpleSerDe files are "
+		                              "not supported",
+		                              database_name, name);
+	}
 }
 
 string GlueTableInfo::GetQuoteCharacter() const {
 	// OpenCSVSerde: quoteChar. LazySimpleSerDe does not quote at all, but DuckDB writes (and reads) quoted fields
 	// with the '"' it defaults to, which is also OpenCSVSerde's default
-	auto quote = GetSerdeParameter("quoteChar");
-	if (quote.empty()) {
-		return "\"";
-	}
-	return quote;
+	string quote;
+	return TryGetSerdeProperty("quoteChar", quote) && !quote.empty() ? FirstCharacter(quote) : "\"";
 }
 
 string GlueTableInfo::GetEscapeCharacter() const {
-	auto escape = GetSerdeParameter("escapeChar");
-	if (escape.empty()) {
-		return GetQuoteCharacter();
-	}
-	return escape;
+	string escape;
+	return TryGetSerdeProperty("escapeChar", escape) && !escape.empty() ? FirstCharacter(escape) : GetQuoteCharacter();
 }
 
 GlueTableFormat GlueTableInfo::GetFormat() const {

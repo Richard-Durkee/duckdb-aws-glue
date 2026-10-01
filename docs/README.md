@@ -43,10 +43,25 @@ Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet`
   a different type in the file is cast, and file columns Glue does not list are ignored.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
-OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
-from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per line, keys by
+OpenCSVSerde with `read_csv` (columns by position) and JsonSerDe with `read_json` (one object per line, keys by
 name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
-...) are not supported.
+...) are not supported. Text tables are read the way their SerDe reads them:
+
+- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
+  is a byte code (`'1'` is `\001`, `'9'` a tab), and only ASCII delimiters other than NUL are supported. NULL is
+  `serialization.null.format`, `\N` by default. An empty string field stays an empty string. A value that does not
+  parse as its column type (an empty numeric field, `abc` in an `int` column) fails the scan, where Hive reads NULL.
+  LazySimpleSerDe does not quote, but a field in `"` is read and written quoted; tables with `escape.delim` can not be
+  read or written.
+- OpenCSVSerde: `separatorChar` (`,` by default), `quoteChar` and `escapeChar`. OpenCSVSerde has no NULL: a quoted
+  empty field (`""`, what it writes for an empty string) is an empty string, while an unquoted empty field reads as
+  NULL, since DuckDB's reader needs a NULL string. A value that does not parse fails the scan.
+- `skip.header.line.count` lines are skipped at the start of every file. Tables with `skip.footer.line.count` can not
+  be read or written.
+- As in Hive, a table property overrides the SerDe property of the same name.
+
+Tables created by earlier versions of this extension (`WITH (format = 'csv')`) store NULL as an empty field
+and do not record a NULL string; to read them as before, set `serialization.null.format` to `''` on the table.
 
 ## Writing
 
@@ -70,15 +85,17 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   table, Hive's `CLUSTERED BY (...) SORTED BY (...) INTO n BUCKETS`: bucket and sort columns are columns of the table
   that are not partition keys, and `BucketColumns` needs a positive `NumberOfBuckets`. The setting is off by default
   because DuckDB does not write to such a table (see below).
-- `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition
-  touched, partition columns are not stored in the files) and register new partition directories in Glue with
-  BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
-  its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
-  into a partition whose location is not below the table location fails; the rows of other partitions can still be
-  inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
-  column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
-  fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
-  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
+- `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per
+  partition touched, partition columns are not stored in the files; text files use the table's delimiter and NULL
+  string, `\N` for LazySimpleSerDe unless `serialization.null.format` says otherwise, and at most one header line) and
+  register new partition directories in Glue with BatchCreatePartition. New partitions get `<key>=<value>` directories;
+  rows of an existing partition are written to its registered location, which may be any directory below the table
+  location (e.g. `<table>/2024/01`). Inserting into a partition whose location is not below the table location fails;
+  the rows of other partitions can still be inserted. Because the partition keys are the last columns of the table,
+  `INSERT ... VALUES` without a column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the
+  query runs; if the query fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with
+  `BucketColumns`, are refused; they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the
+  table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
   Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
@@ -116,7 +133,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
 - `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
-  `quote := '"'` and `escape := '\'` describe the files; csv columns are matched by position, json keys by name.
+  `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
+  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name.
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is

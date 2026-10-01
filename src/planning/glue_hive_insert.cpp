@@ -176,13 +176,22 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	case HiveFileFormat::AVRO:
 		ExtensionHelper::AutoLoadExtension(context, "avro");
 		break;
-	case HiveFileFormat::CSV:
-		// Hive CSV files: the table's dialect, a header line only when the table says so
-		copy_options[Identifier("header")] = {Value::BOOLEAN(table_info.HasHeader())};
+	case HiveFileFormat::CSV: {
+		// Hive CSV files: the table's dialect and NULL string, a header line only when the table says so
+		table_info.CheckTextSerdeSupported();
+		auto header_lines = table_info.GetHeaderLineCount();
+		if (header_lines > 1) {
+			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: its files start with %d "
+			                              "header lines, DuckDB writes at most one",
+			                              table_info.database_name, table_info.name, header_lines);
+		}
+		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
 		copy_options[Identifier("delimiter")] = {Value(table_info.GetFieldDelimiter())};
 		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
 		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		copy_options[Identifier("nullstr")] = {Value(table_info.GetNullFormat())};
 		break;
+	}
 	case HiveFileFormat::JSON: {
 		// DuckDB writes JSON the way COPY ... (FORMAT json) does: every row becomes one JSON object (to_json over a
 		// struct of the data columns) and the objects are written line by line with the CSV writer. The partition

@@ -59,6 +59,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_create_bucketed_tables",
+	                          "Allow CREATE TABLE ... WITH (BucketColumns = [...], NumberOfBuckets = n, SortColumns = "
+	                          "[...]) to create a bucketed (clustered) Hive table. DuckDB reads such a table but does "
+	                          "not write one: INSERT into it and CREATE TABLE ... AS with these options are refused. "
+	                          "Default false.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption("hive_partition_listing_threshold",
 	                          "When a scan reads at least this many partitions below the table location, the location "
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
@@ -77,6 +84,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
 
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
+	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());
 	loader.RegisterFunction(GetGluePartitionsFunction());
 	loader.RegisterFunction(GetGlueAddPartitionFunction());
 	loader.RegisterFunction(GetGlueDropPartitionFunction());

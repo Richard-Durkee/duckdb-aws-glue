@@ -46,16 +46,17 @@ bool GlueSchemaEntry::CatalogTypeIsSupported(CatalogType type) {
 //===--------------------------------------------------------------------===//
 // Create / Drop / Alter
 //===--------------------------------------------------------------------===//
-GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &context,
-                                                                const CreateTableInfo &create_info) {
-	GlueCreateTableOptions result;
-	if (create_info.options.empty()) {
+vector<pair<string, Value>>
+GlueSchemaEntry::EvaluateOptions(ClientContext &context,
+                                 const case_insensitive_map_t<unique_ptr<ParsedExpression>> &options,
+                                 const string &statement) {
+	vector<pair<string, Value>> result;
+	if (options.empty()) {
 		return result;
 	}
 	auto binder = Binder::CreateBinder(context);
-	TableFunctionBinder option_binder(*binder, context, "CREATE TABLE options");
-	for (auto &option : create_info.options) {
-		auto &key = option.first;
+	TableFunctionBinder option_binder(*binder, context, statement + " options");
+	for (auto &option : options) {
 		auto expr_copy = option.second->Copy();
 		auto bound_expr = option_binder.Bind(expr_copy);
 		if (bound_expr->HasParameter()) {
@@ -63,8 +64,191 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 		}
 		auto value = ExpressionExecutor::EvaluateScalar(context, *bound_expr, true);
 		if (value.IsNull()) {
-			throw BinderException("NULL is not a valid value for CREATE TABLE option '%s'", key);
+			throw BinderException("NULL is not a valid value for %s option '%s'", statement, option.first);
 		}
+		result.emplace_back(option.first, std::move(value));
+	}
+	return result;
+}
+
+bool GlueSchemaEntry::IsBucketingOption(const string &key) {
+	return StringUtil::CIEquals(key, "BucketColumns") || StringUtil::CIEquals(key, "NumberOfBuckets") ||
+	       StringUtil::CIEquals(key, "SortColumns");
+}
+
+//! The Glue option another spelling of a bucketing option stands for, empty if the key is none of them
+static string BucketingOptionFor(const string &key) {
+	static const pair<const char *, const char *> SPELLINGS[] = {
+	    {"bucket_columns", "BucketColumns"}, {"bucketed_by", "BucketColumns"},
+	    {"clustered_by", "BucketColumns"},   {"number_of_buckets", "NumberOfBuckets"},
+	    {"bucket_count", "NumberOfBuckets"}, {"sort_columns", "SortColumns"},
+	    {"sorted_by", "SortColumns"}};
+	for (auto &spelling : SPELLINGS) {
+		if (StringUtil::CIEquals(key, spelling.first)) {
+			return spelling.second;
+		}
+	}
+	return string();
+}
+
+static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
+	Value enabled;
+	if (context.TryGetCurrentSetting("glue_create_bucketed_tables", enabled) && !enabled.IsNull() &&
+	    enabled.GetValue<bool>()) {
+		return;
+	}
+	throw BinderException("CREATE TABLE option '%s' creates a bucketed Glue table, which DuckDB can read but not "
+	                      "write (INSERT into it is refused). SET glue_create_bucketed_tables = true to create one",
+	                      key);
+}
+
+static optional<int32_t> ToInteger(const Value &value) {
+	if (!value.type().IsIntegral()) {
+		return nullopt;
+	}
+	auto integer = value.DefaultTryCastAs(LogicalType::INTEGER);
+	if (!integer) {
+		return nullopt;
+	}
+	return integer->GetValue<int32_t>();
+}
+
+static vector<string> ParseBucketColumns(const string &key, const Value &value) {
+	if (value.type().id() != LogicalTypeId::LIST) {
+		throw BinderException("CREATE TABLE option '%s' must be a list of column names, e.g. ['id'], got '%s'", key,
+		                      value.ToString());
+	}
+	vector<string> result;
+	for (auto &entry : ListValue::GetChildren(value)) {
+		if (entry.IsNull()) {
+			throw BinderException("CREATE TABLE option '%s' can not contain NULL", key);
+		}
+		result.push_back(entry.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+	}
+	if (result.empty()) {
+		throw BinderException("CREATE TABLE option '%s' needs at least one column", key);
+	}
+	return result;
+}
+
+static int32_t ParseNumberOfBuckets(const string &key, const Value &value) {
+	auto count = ToInteger(value);
+	if (!count || *count <= 0) {
+		throw BinderException("CREATE TABLE option '%s' must be a positive integer, got '%s'", key, value.ToString());
+	}
+	return *count;
+}
+
+static GlueSortOrder ParseSortOrder(const string &key, const Value &value) {
+	// Glue's SortOrder is 1 for ascending, 0 for descending
+	auto sort_order = ToInteger(value);
+	if (sort_order && *sort_order == 1) {
+		return GlueSortOrder::ASCENDING;
+	}
+	if (sort_order && *sort_order == 0) {
+		return GlueSortOrder::DESCENDING;
+	}
+	throw BinderException("SortOrder in CREATE TABLE option '%s' must be 1 (ascending) or 0 (descending), got '%s'",
+	                      key, value.ToString());
+}
+
+static vector<GlueColumn> ParseSortColumns(const string &key, const Value &value) {
+	auto &type = value.type();
+	if (type.id() != LogicalTypeId::LIST || ListType::GetChildType(type).id() != LogicalTypeId::STRUCT) {
+		throw BinderException(
+		    "CREATE TABLE option '%s' must be a list of {'Column': name, 'SortOrder': 1 or 0}, got '%s'", key,
+		    value.ToString());
+	}
+	vector<GlueColumn> result;
+	for (auto &entry : ListValue::GetChildren(value)) {
+		if (entry.IsNull()) {
+			throw BinderException("CREATE TABLE option '%s' can not contain NULL", key);
+		}
+		auto &fields = StructType::GetChildTypes(entry.type());
+		auto &values = StructValue::GetChildren(entry);
+		GlueColumn sort_column;
+		for (idx_t i = 0; i < fields.size(); i++) {
+			auto &field = fields[i].first.GetIdentifierName();
+			auto is_column = StringUtil::CIEquals(field, "Column");
+			if (!is_column && !StringUtil::CIEquals(field, "SortOrder")) {
+				throw BinderException("CREATE TABLE option '%s' takes structs of 'Column' and 'SortOrder', got '%s'",
+				                      key, field);
+			}
+			if (values[i].IsNull()) {
+				continue;
+			}
+			if (is_column) {
+				sort_column.name = values[i].DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
+			} else {
+				sort_column.sort_order = ParseSortOrder(key, values[i]);
+			}
+		}
+		if (sort_column.name.empty() || sort_column.sort_order == GlueSortOrder::UNSORTED) {
+			throw BinderException(
+			    "Every entry of CREATE TABLE option '%s' needs a 'Column' and a 'SortOrder', got '%s'", key,
+			    entry.ToString());
+		}
+		result.push_back(std::move(sort_column));
+	}
+	if (result.empty()) {
+		throw BinderException("CREATE TABLE option '%s' needs at least one column", key);
+	}
+	return result;
+}
+
+static void CheckNoDuplicates(const char *option, const vector<string> &names) {
+	for (idx_t i = 0; i < names.size(); i++) {
+		for (idx_t j = 0; j < i; j++) {
+			if (StringUtil::CIEquals(names[i], names[j])) {
+				throw BinderException("%s lists column '%s' twice", option, names[i]);
+			}
+		}
+	}
+}
+
+//! Hive's CLUSTERED BY (...) [SORTED BY (...)] INTO n BUCKETS, over columns that are not partition columns
+static void ResolveBucketing(GlueCreateTableOptions &options, const ColumnList &columns,
+                             const vector<string> &partition_columns, const string &table_name) {
+	if (options.bucket_columns.empty()) {
+		if (options.number_of_buckets != -1 || !options.sort_columns.empty()) {
+			throw BinderException("CREATE TABLE options NumberOfBuckets and SortColumns need BucketColumns");
+		}
+		return;
+	}
+	if (options.number_of_buckets == -1) {
+		throw BinderException("CREATE TABLE option BucketColumns needs NumberOfBuckets");
+	}
+	auto resolve = [&](const char *option, const string &name) -> string {
+		for (auto &partition_column : partition_columns) {
+			if (StringUtil::CIEquals(partition_column, name)) {
+				throw BinderException("%s column '%s' is a partition column of table '%s'", option, name, table_name);
+			}
+		}
+		for (auto &column : columns.Physical()) {
+			if (StringUtil::CIEquals(column.Name().GetIdentifierName(), name)) {
+				return column.Name().GetIdentifierName();
+			}
+		}
+		throw BinderException("%s column '%s' is not a column of table '%s'", option, name, table_name);
+	};
+	for (auto &name : options.bucket_columns) {
+		name = resolve("BucketColumns", name);
+	}
+	vector<string> sort_names;
+	for (auto &sort_column : options.sort_columns) {
+		sort_column.name = resolve("SortColumns", sort_column.name);
+		sort_names.push_back(sort_column.name);
+	}
+	CheckNoDuplicates("BucketColumns", options.bucket_columns);
+	CheckNoDuplicates("SortColumns", sort_names);
+}
+
+GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &context,
+                                                                const CreateTableInfo &create_info) {
+	GlueCreateTableOptions result;
+	for (auto &option : EvaluateOptions(context, create_info.options, "CREATE TABLE")) {
+		auto &key = option.first;
+		auto &value = option.second;
 		auto string_value = value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
 
 		if (StringUtil::CIEquals(key, "type")) {
@@ -97,6 +281,19 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			if (value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>()) {
 				result.parameters["skip.header.line.count"] = "1";
 			}
+		} else if (IsBucketingOption(key)) {
+			CheckBucketedTablesEnabled(context, key);
+			if (StringUtil::CIEquals(key, "BucketColumns")) {
+				result.bucket_columns = ParseBucketColumns(key, value);
+			} else if (StringUtil::CIEquals(key, "NumberOfBuckets")) {
+				result.number_of_buckets = ParseNumberOfBuckets(key, value);
+			} else {
+				result.sort_columns = ParseSortColumns(key, value);
+			}
+		} else if (!BucketingOptionFor(key).empty()) {
+			// stored as a table parameter this would silently leave the table unbucketed
+			throw BinderException("Unknown CREATE TABLE option '%s', a bucketed Glue table is created with option '%s'",
+			                      key, BucketingOptionFor(key));
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
@@ -172,6 +369,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction trans
 		}
 		return false;
 	};
+	ResolveBucketing(options, base.columns, partition_columns, table_name);
 
 	GlueTableInfo table;
 	table.name = table_name;
@@ -183,6 +381,9 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction trans
 	table.csv_delimiter = options.csv_delimiter;
 	table.csv_quote = options.csv_quote;
 	table.csv_escape = options.csv_escape;
+	table.bucket_columns = options.bucket_columns;
+	table.number_of_buckets = options.number_of_buckets;
+	table.sort_columns = options.sort_columns;
 	for (auto &column : base.columns.Physical()) {
 		if (is_partition_column(column.Name().GetIdentifierName())) {
 			continue;
@@ -430,6 +631,19 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 				return;
 			}
 			throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
+		}
+		// Glue keeps BucketColumns and SortColumns as they are, naming a column the table no longer has
+		for (auto &bucket_column : current.bucket_columns) {
+			if (StringUtil::CIEquals(bucket_column, name)) {
+				throw CatalogException("Column \"%s\" is a bucket column of table \"%s\" and can not be dropped", name,
+				                       table_name);
+			}
+		}
+		for (auto &sort_column : current.sort_columns) {
+			if (StringUtil::CIEquals(sort_column.name, name)) {
+				throw CatalogException("Column \"%s\" is a sort column of table \"%s\" and can not be dropped", name,
+				                       table_name);
+			}
 		}
 		if (columns.size() == 1) {
 			throw CatalogException("Can not drop column \"%s\": table \"%s\" needs at least one column", name,

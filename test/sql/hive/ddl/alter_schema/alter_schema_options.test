@@ -1,0 +1,130 @@
+# name: test/sql/hive/ddl/alter_schema/alter_schema_options.test
+# description: ALTER SCHEMA ... SET (...) / RESET (...) on a Glue catalog: SET merges into the Glue database (Hive's
+# group: [alter_schema]
+
+#              ALTER DATABASE SET DBPROPERTIES), RESET removes options; 'comment' and 'location' are the Description
+#              and LocationUri
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.ddl_alter_schema CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.ddl_alter_schema WITH (comment = 'first', owner = 'a', Team = 'x');
+
+statement ok
+CREATE TABLE my_datalake.ddl_alter_schema.events (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.ddl_alter_schema.events VALUES (1);
+
+#---------------------------------------------------------------------------
+# SET merges: changed keys are replaced, new keys added, the rest is kept
+#---------------------------------------------------------------------------
+statement ok
+ALTER SCHEMA my_datalake.ddl_alter_schema SET (owner = 'b', 'stage' = 'prod', comment = 'second');
+
+query IIIII
+SELECT description, map_extract_value(parameters, 'owner'), map_extract_value(parameters, 'Team'),
+       map_extract_value(parameters, 'stage'), cardinality(parameters)
+FROM glue_get_database_response('my_datalake.ddl_alter_schema');
+----
+second	b	x	prod	3
+
+# option keys are case insensitive: this replaces 'Team' instead of adding 'team'
+statement ok
+ALTER SCHEMA my_datalake.ddl_alter_schema SET (team = 'y');
+
+query II
+SELECT map_extract_value(parameters, 'team'), cardinality(parameters) FROM glue_get_database_response('my_datalake.ddl_alter_schema');
+----
+y	3
+
+statement ok
+ALTER SCHEMA my_datalake.ddl_alter_schema SET (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved/ddl_alter_schema/');
+
+query I
+SELECT location_uri = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/moved/ddl_alter_schema' FROM glue_get_database_response('my_datalake.ddl_alter_schema');
+----
+true
+
+# the tables of the database are still there and readable
+query I
+SELECT id FROM my_datalake.ddl_alter_schema.events;
+----
+1
+
+#---------------------------------------------------------------------------
+# RESET removes options; resetting one that is not set is a no-op
+#---------------------------------------------------------------------------
+statement ok
+ALTER SCHEMA my_datalake.ddl_alter_schema RESET (OWNER, comment, not_set);
+
+query III
+SELECT description, map_extract_value(parameters, 'owner'), cardinality(parameters)
+FROM glue_get_database_response('my_datalake.ddl_alter_schema');
+----
+NULL	NULL	2
+
+statement ok
+ALTER SCHEMA my_datalake.ddl_alter_schema RESET (location);
+
+query I
+SELECT location_uri FROM glue_get_database_response('my_datalake.ddl_alter_schema');
+----
+NULL
+
+#---------------------------------------------------------------------------
+# errors
+#---------------------------------------------------------------------------
+statement error
+ALTER SCHEMA my_datalake.ddl_alter_schema SET (owner = NULL);
+----
+<REGEX>:.*NULL is not a valid value for ALTER SCHEMA option 'owner'.*
+
+statement error
+ALTER SCHEMA my_datalake.ddl_alter_schema SET (location = '');
+----
+<REGEX>:.*The location of Glue database "ddl_alter_schema" must not be empty.*
+
+# a failed SET changes nothing
+query II
+SELECT map_extract_value(parameters, 'stage'), cardinality(parameters) FROM glue_get_database_response('my_datalake.ddl_alter_schema');
+----
+prod	2
+
+statement error
+ALTER SCHEMA my_datalake.ddl_schema_missing SET (owner = 'a');
+----
+<REGEX>:.*ddl_schema_missing.*
+
+statement ok
+ALTER SCHEMA IF EXISTS my_datalake.ddl_schema_missing SET (owner = 'a');
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as ro_datalake (
+    TYPE glue,
+    READ_ONLY,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+ALTER SCHEMA ro_datalake.ddl_alter_schema SET (owner = 'c');
+----
+read-only mode
+
+statement ok
+DROP SCHEMA my_datalake.ddl_alter_schema CASCADE;

@@ -120,7 +120,73 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 	output.SetCardinality(1);
 }
 
+struct GlueGetDatabaseResponseBindData : public TableFunctionData {
+	GlueDatabaseInfo database;
+	string raw_json;
+};
+
+unique_ptr<FunctionData> GlueGetDatabaseResponseBind(ClientContext &context, TableFunctionBindInput &input,
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto components = QualifiedName::ParseComponents(input.inputs[0].GetValue<string>());
+	if (components.size() != 2) {
+		throw BinderException("glue_get_database_response expects a qualified database name: "
+		                      "'<catalog>.<database>', got '%s'",
+		                      input.inputs[0].GetValue<string>());
+	}
+	auto &catalog_name = components[0];
+	auto database_name = components[1].GetIdentifierName();
+	auto catalog = Catalog::GetCatalogEntry(context, catalog_name);
+	if (!catalog) {
+		throw BinderException("Catalog '%s' does not exist", catalog_name.GetIdentifierName());
+	}
+	if (catalog->GetCatalogType() != "glue") {
+		throw BinderException("glue_get_database_response only works on a Glue catalog, '%s' is a %s catalog",
+		                      catalog_name.GetIdentifierName(), catalog->GetCatalogType());
+	}
+	auto result = make_uniq<GlueGetDatabaseResponseBindData>();
+	if (!GlueAPI::GetDatabase(context, catalog->Cast<GlueCatalog>(), database_name, result->database,
+	                          &result->raw_json)) {
+		throw CatalogException("Database '%s' does not exist in Glue catalog '%s'", database_name,
+		                       catalog_name.GetIdentifierName());
+	}
+	names = {"database_name", "description", "location_uri", "parameters", "response"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR), LogicalType::VARIANT()};
+	return std::move(result);
+}
+
+void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueGetTableResponseState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	auto &bind_data = data.bind_data->Cast<GlueGetDatabaseResponseBindData>();
+	auto &database = bind_data.database;
+	auto optional_string = [](const string &value) {
+		return value.empty() ? Value(LogicalType::VARCHAR) : Value(value);
+	};
+
+	output.SetValue(0, 0, Value(database.name));
+	output.SetValue(1, 0, optional_string(database.description));
+	output.SetValue(2, 0, optional_string(database.location_uri));
+	output.SetValue(3, 0, MapToValue(database.parameters));
+
+	// The complete Glue Database object: JSON as serialized by the AWS SDK, cast to VARIANT
+	Vector json(LogicalType::JSON(), 1);
+	json.SetValue(0, Value(bind_data.raw_json));
+	VectorOperations::Cast(context, json, output.data[4], 1);
+
+	output.SetCardinality(1);
+}
+
 } // namespace
+
+TableFunction GetGlueGetDatabaseResponseFunction() {
+	TableFunction function("glue_get_database_response", {LogicalType::VARCHAR}, GlueGetDatabaseResponseScan,
+	                       GlueGetDatabaseResponseBind, GlueGetTableResponseInit);
+	return function;
+}
 
 TableFunction GetGlueGetTableResponseFunction() {
 	TableFunction function("glue_get_table_response", {LogicalType::VARCHAR}, GlueGetTableResponseScan,

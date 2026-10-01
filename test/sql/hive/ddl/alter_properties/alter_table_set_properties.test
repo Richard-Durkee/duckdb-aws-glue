@@ -169,7 +169,7 @@ can not be changed with ALTER TABLE
 statement error
 ALTER TABLE my_datalake.default.ddl_properties SET (owner = NULL);
 ----
-NULL is not a valid value for table property 'owner'
+NULL is not a valid value for ALTER TABLE SET option 'owner'
 
 statement error
 ALTER TABLE my_datalake.default.ddl_missing SET (owner = 'x');

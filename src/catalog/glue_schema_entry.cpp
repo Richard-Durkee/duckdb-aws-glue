@@ -568,20 +568,10 @@ void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInf
 	vector<string> unset;
 	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS) {
 		auto &options = alter_table.Cast<SetTableOptionsInfo>();
-		auto binder = Binder::CreateBinder(context);
-		TableFunctionBinder option_binder(*binder, context, "ALTER TABLE SET");
-		for (auto &option : options.table_options) {
+		for (auto &option : EvaluateOptions(context, options.table_options, "ALTER TABLE SET")) {
 			CheckTablePropertyChangeable(option.first);
-			auto expr_copy = option.second->Copy();
-			auto bound_expr = option_binder.Bind(expr_copy);
-			if (bound_expr->HasParameter()) {
-				throw ParameterNotResolvedException();
-			}
-			auto value = ExpressionExecutor::EvaluateScalar(context, *bound_expr, true);
-			if (value.IsNull()) {
-				throw BinderException("NULL is not a valid value for table property '%s'", option.first);
-			}
-			set.emplace_back(option.first, value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+			// Glue stores every parameter as a string
+			set.emplace_back(option.first, option.second.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
 		}
 	} else {
 		for (auto &option : alter_table.Cast<ResetTableOptionsInfo>().table_options) {

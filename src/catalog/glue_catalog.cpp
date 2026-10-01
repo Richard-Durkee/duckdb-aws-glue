@@ -6,6 +6,7 @@
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/parser/parsed_data/alter_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
@@ -81,6 +82,10 @@ ErrorData GlueCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	return ErrorData();
 }
 
+ErrorData GlueCatalog::SupportsCreateSchema(CreateSchemaInfo &info) {
+	return ErrorData();
+}
+
 optional<Identifier> GlueCatalog::GetDefaultSchema() const {
 	if (options.default_schema.empty()) {
 		return nullopt;
@@ -115,6 +120,9 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 	GlueDatabaseInfo database;
 	database.name = schema_name;
 	database.location_uri = GetDatabaseLocation(schema_name);
+	for (auto &option : GlueSchemaEntry::EvaluateOptions(context, info.options, "CREATE SCHEMA")) {
+		SetDatabaseOption(database, option.first, option.second);
+	}
 	GlueAPI::CreateDatabase(context, *this, database);
 
 	// re-fetch so the cached entry reflects what Glue stored
@@ -135,9 +143,85 @@ void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
 		throw CatalogException("Schema with name \"%s\" does not exist in Glue catalog \"%s\"", schema_name,
 		                       GetName().GetIdentifierName());
 	}
-	// NOTE: Glue deletes every table in the database along with it, regardless of CASCADE
+	// Glue deletes every table of the database along with it, so without CASCADE only an empty database is dropped
+	string table_name;
+	if (!info.cascade && GlueAPI::GetAnyTableName(context, *this, schema_name, table_name)) {
+		throw DependencyException("Cannot drop Glue database \"%s\" because it still contains tables (e.g. \"%s\"). "
+		                          "Use DROP SCHEMA ... CASCADE to drop the database together with all of its tables",
+		                          schema_name, table_name);
+	}
 	GlueAPI::DeleteDatabase(context, *this, schema_name);
 	schemas.RemoveEntry(schema_name);
+}
+
+static void EraseDatabaseParameter(GlueDatabaseInfo &database, const string &key) {
+	for (auto it = database.parameters.begin(); it != database.parameters.end();) {
+		if (StringUtil::CIEquals(it->first, key)) {
+			it = database.parameters.erase(it);
+		} else {
+			++it;
+		}
+	}
+}
+
+void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value) {
+	auto string_value = value.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>();
+	if (StringUtil::CIEquals(key, "comment")) {
+		database.description = string_value;
+	} else if (StringUtil::CIEquals(key, "location")) {
+		StringUtil::RTrim(string_value, "/");
+		if (string_value.empty()) {
+			throw BinderException("The location of Glue database \"%s\" must not be empty", database.name);
+		}
+		database.location_uri = string_value;
+	} else {
+		// everything else is a database property, stored in Glue's database parameters (like Hive's DBPROPERTIES)
+		EraseDatabaseParameter(database, key);
+		database.parameters[key] = string_value;
+	}
+}
+
+void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
+	auto &context = transaction.GetContext();
+	auto schema_name = schema.Cast<GlueSchemaEntry>().database_info.name;
+	// work on the current Glue definition, not the cached one
+	GlueDatabaseInfo database;
+	if (!GlueAPI::GetDatabase(context, *this, schema_name, database)) {
+		throw CatalogException("Schema with name \"%s\" does not exist in Glue catalog \"%s\"", schema_name,
+		                       GetName().GetIdentifierName());
+	}
+	switch (info.alter_schema_type) {
+	case AlterSchemaType::SET_SCHEMA_OPTIONS: {
+		auto &set_info = info.Cast<SetSchemaOptionsInfo>();
+		for (auto &option : GlueSchemaEntry::EvaluateOptions(context, set_info.options, "ALTER SCHEMA")) {
+			SetDatabaseOption(database, option.first, option.second);
+		}
+		break;
+	}
+	case AlterSchemaType::RESET_SCHEMA_OPTIONS: {
+		auto &reset_info = info.Cast<ResetSchemaOptionsInfo>();
+		for (auto &option : reset_info.options) {
+			auto key = option.GetIdentifierName();
+			if (StringUtil::CIEquals(key, "comment")) {
+				database.description.clear();
+			} else if (StringUtil::CIEquals(key, "location")) {
+				database.location_uri.clear();
+			} else {
+				EraseDatabaseParameter(database, key);
+			}
+		}
+		break;
+	}
+	default:
+		throw InternalException("Unrecognized alter schema type!");
+	}
+	GlueAPI::UpdateDatabase(context, *this, database);
+
+	GlueDatabaseInfo updated;
+	if (!GlueAPI::GetDatabase(context, *this, schema_name, updated)) {
+		throw CatalogException("Glue database \"%s\" was updated but could not be fetched afterwards", schema_name);
+	}
+	schemas.CreateEntry(schemas.CreateSchemaEntry(updated));
 }
 
 string GlueCatalog::GetDatabaseLocation(const string &database_name) const {

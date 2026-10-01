@@ -50,8 +50,12 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
 
 ## Writing
 
-- `CREATE SCHEMA` creates a Glue database with LocationUri `<DEFAULT_LOCATION>/<schema>`, or without a LocationUri
-  when the catalog was attached without `DEFAULT_LOCATION`.
+- `CREATE SCHEMA [IF NOT EXISTS] ... [WITH (comment = '...', location = '...', <property> = '...')]` creates a Glue
+  database. `comment` is its Description, `location` its LocationUri (default `<DEFAULT_LOCATION>/<schema>`, or none
+  when the catalog was attached without `DEFAULT_LOCATION`), and any other key a database parameter (Hive's
+  `DBPROPERTIES`). A `DEFAULT_LOCATION` on ATTACH still decides where new tables go, over the database's LocationUri.
+- `ALTER SCHEMA ... SET (<key> = '...', ...)` merges options into the Glue database (UpdateDatabase), with the same
+  keys as `CREATE SCHEMA`; `ALTER SCHEMA ... RESET (<key>, ...)` removes them. Keys are case-insensitive.
 - `CREATE TABLE ... [PARTITIONED BY (col, ...)] [WITH (format = 'parquet' | 'csv' | 'json' | 'avro', location = '...',
   <property> = '...')]` creates a parquet (default), csv (LazySimpleSerDe, `,` delimited, no header), json
   (JsonSerDe, one object per line) or avro (AvroSerDe)
@@ -80,7 +84,8 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
-  a database when the database is dropped.
+  a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
+  `CASCADE` is given.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported.
@@ -176,6 +181,9 @@ SELECT response.StorageDescriptor.Location FROM glue_get_table_response('my_data
 
 It returns one row with the classification, the Glue table type, location, SerDe, columns, partition keys and
 parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`.
+
+`glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
+description, location and parameters as columns and the complete Glue `Database` object in `response`.
 
 ## HTTP transport and logging
 

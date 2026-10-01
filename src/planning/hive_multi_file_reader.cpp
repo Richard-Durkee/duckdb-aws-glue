@@ -370,7 +370,7 @@ static unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, co
 
 //! Serialize the fields that identify a scan; CommonSubplanOptimizer uses them to decide whether sub-plans are equal
 static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
-                              const TableFunction &function) {
+                              const BoundTableFunction &function) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = list.ScanInfo();
@@ -391,7 +391,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(107, "names", bind_data.names);
 }
 
-static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, TableFunction &function) {
+static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
 	throw NotImplementedException("HiveScan deserialization not implemented");
 }
 
@@ -404,7 +404,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 			data_columns.emplace_back(scan_info->names[i], Value(scan_info->types[i].ToString()));
 		}
 	}
-	named_parameter_map_t param_map;
+	named_argument_map_t param_map;
 	string function_name;
 	switch (scan_info->file_format) {
 	case HiveFileFormat::PARQUET:
@@ -451,8 +451,10 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	TableFunctionRef empty_ref;
 	vector<Value> inputs = {Value::LIST(LogicalType::VARCHAR, {Value(scan_info->root_location)})};
 	// the JSON reader's multi-file wrapper reads its wrapped function from the bind input's info
+	scan_function.GetSignature().FillNamedDefaults(context, param_map);
+	BoundTableFunction bound_function(scan_function);
 	TableFunctionBindInput bind_input(inputs, param_map, return_types, names, scan_function.function_info.get(),
-	                                  nullptr, scan_function, empty_ref);
+	                                  nullptr, bound_function, empty_ref);
 	HiveScanInfoScope scope(scan_info);
 	bind_data = scan_function.bind(context, bind_input, return_types, names);
 	return scan_function;
@@ -464,13 +466,13 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 HiveMultiFileReader::HiveMultiFileReader(shared_ptr<HiveScanInfo> scan_info_p) : scan_info(std::move(scan_info_p)) {
 }
 
-unique_ptr<MultiFileReader> HiveMultiFileReader::CreateInstance(const TableFunction &table) {
+unique_ptr<MultiFileReader> HiveMultiFileReader::CreateInstance(const BoundTableFunction &table) {
 	shared_ptr<HiveScanInfo> info;
 	if (current_scan_info) {
 		info = *current_scan_info;
 	}
 	auto result = make_uniq<HiveMultiFileReader>(std::move(info));
-	result->function_name = table.name;
+	result->function_name = table.GetDefinition()->name;
 	return std::move(result);
 }
 

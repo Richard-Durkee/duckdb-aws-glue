@@ -128,7 +128,7 @@ class HiveMultiFileReader : public MultiFileReader {
 public:
 	explicit HiveMultiFileReader(shared_ptr<HiveScanInfo> scan_info);
 
-	static unique_ptr<MultiFileReader> CreateInstance(const TableFunction &table);
+	static unique_ptr<MultiFileReader> CreateInstance(const BoundTableFunction &table);
 
 	unique_ptr<MultiFileReader> Copy() const override;
 	shared_ptr<MultiFileList> CreateFileList(ClientContext &context, const vector<string> &paths,

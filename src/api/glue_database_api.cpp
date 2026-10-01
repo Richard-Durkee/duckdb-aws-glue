@@ -86,7 +86,6 @@ void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const
 }
 
 void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
-	CheckWritable(catalog, "UpdateDatabase");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest get_request;

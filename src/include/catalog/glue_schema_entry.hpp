@@ -63,6 +63,8 @@ public:
 	static GlueCreateTableOptions ParseCreateTableOptions(ClientContext &context, const CreateTableInfo &create_info);
 	//! BucketColumns, NumberOfBuckets or SortColumns (case-insensitive)
 	static bool IsBucketingOption(const string &key);
+	//! Replace the data columns of a table in Glue and refresh its cached entry
+	void SetTableColumns(ClientContext &context, const string &table_name, const vector<GlueColumn> &columns);
 
 private:
 	static bool CatalogTypeIsSupported(CatalogType type);

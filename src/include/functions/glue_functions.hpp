@@ -34,10 +34,10 @@ TableFunction GetGlueRenamePartitionFunction();
 TableFunction GetGlueSetPartitionLocationFunction();
 //! glue_set_table_location(table, location): ALTER TABLE ... SET LOCATION; existing partitions keep theirs
 TableFunction GetGlueSetTableLocationFunction();
-//! glue_alter_table(table, [{action, if_not_exists, if_exists, partition, new_partition, location}, ...]): the
-//! partition DDL of one ALTER TABLE statement (what the glue_hive_ddl grammar extension turns the SQL into).
-//! 'partition' and 'new_partition' are lists of {key, value}; the actions are validated against Glue before any
-//! of them is applied, consecutive adds go out as one BatchCreatePartition call.
+//! glue_alter_table(table, [{action, if_not_exists, if_exists, partition, new_partition, location, columns}, ...]):
+//! the Hive DDL of one ALTER TABLE statement (what the glue_hive_ddl grammar extension turns the SQL into).
+//! 'partition' and 'new_partition' are lists of {key, value}, 'columns' a list of {name, type, comment}; the actions
+//! are validated against Glue before any of them is applied, consecutive adds go out as one BatchCreatePartition call.
 TableFunction GetGlueAlterTableFunction();
 
 //! hive_scan('s3://root', schema := {col: 'TYPE', ...}, partitions := [{key: value, ..., location: '...'}, ...],

@@ -58,6 +58,46 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 	}
 }
 
+void GlueAPI::SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                  const string &table_name, const vector<string> &values,
+                                  const vector<GlueColumn> &columns) {
+	CheckWritable(catalog, "UpdatePartition");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	Aws::Glue::Model::GetPartitionRequest get_request;
+	SetCatalogId(get_request, catalog);
+	get_request.SetDatabaseName(database_name);
+	get_request.SetTableName(table_name);
+	get_request.SetPartitionValues(ToAwsValues(values));
+	auto get_outcome = client->GetPartition(get_request);
+	if (!get_outcome.IsSuccess()) {
+		if (IsEntityNotFound(get_outcome)) {
+			throw CatalogException("Partition [%s] does not exist in Glue table '%s.%s'",
+			                       PartitionValuesToString(values), database_name, table_name);
+		}
+		ThrowGlueError(get_outcome, StringUtil::Format("GetPartition '%s.%s' [%s]", database_name, table_name,
+		                                               PartitionValuesToString(values)));
+	}
+	auto &partition = get_outcome.GetResult().GetPartition();
+	auto storage_descriptor = partition.GetStorageDescriptor();
+	storage_descriptor.SetColumns(ToAwsColumns(columns));
+	Aws::Glue::Model::PartitionInput input;
+	input.SetValues(partition.GetValues());
+	input.SetStorageDescriptor(storage_descriptor);
+	input.SetParameters(partition.GetParameters());
+	Aws::Glue::Model::UpdatePartitionRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetTableName(table_name);
+	request.SetPartitionValueList(ToAwsValues(values));
+	request.SetPartitionInput(input);
+	auto outcome = client->UpdatePartition(request);
+	if (!outcome.IsSuccess()) {
+		ThrowGlueError(outcome, StringUtil::Format("UpdatePartition '%s.%s' [%s]", database_name, table_name,
+		                                           PartitionValuesToString(values)));
+	}
+}
+
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                            const string &table_name, const vector<string> &values, GluePartitionInfo &result) {
 	GlueHttpClientContextScope http_scope(context);

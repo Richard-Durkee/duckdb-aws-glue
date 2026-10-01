@@ -728,8 +728,13 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		                              EnumUtil::ToString(alter_table.alter_table_type));
 	}
 
-	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	SetTableColumns(context, table_name, columns);
+}
 
+void GlueSchemaEntry::SetTableColumns(ClientContext &context, const string &table_name,
+                                      const vector<GlueColumn> &columns) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
 	// refresh the cached entry from what Glue stored
 	GlueTableInfo updated;
 	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, updated)) {

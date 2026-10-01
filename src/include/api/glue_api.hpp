@@ -63,6 +63,10 @@ public:
 	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<pair<string, string>> &set,
 	                                  const vector<string> &unset);
+	//! Replace the columns of a partition's StorageDescriptor
+	static void SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                const string &table_name, const vector<string> &values,
+	                                const vector<GlueColumn> &columns);
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const vector<string> &values, const string &location);

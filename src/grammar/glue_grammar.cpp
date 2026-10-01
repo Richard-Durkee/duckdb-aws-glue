@@ -63,7 +63,8 @@ unique_ptr<ParsedExpression> TransformLocation(PEGTransformer &transformer, Pars
 unique_ptr<ParsedExpression> MakeAction(const char *action, bool if_not_exists, bool if_exists,
                                         unique_ptr<ParsedExpression> partition,
                                         unique_ptr<ParsedExpression> new_partition,
-                                        unique_ptr<ParsedExpression> location) {
+                                        unique_ptr<ParsedExpression> location,
+                                        unique_ptr<ParsedExpression> columns = nullptr) {
 	vector<FunctionArgument> fields;
 	fields.emplace_back(Identifier("action"), Constant(Value(action)));
 	fields.emplace_back(Identifier("if_not_exists"), Constant(Value::BOOLEAN(if_not_exists)));
@@ -71,7 +72,36 @@ unique_ptr<ParsedExpression> MakeAction(const char *action, bool if_not_exists, 
 	fields.emplace_back(Identifier("partition"), partition ? std::move(partition) : Constant(Value()));
 	fields.emplace_back(Identifier("new_partition"), new_partition ? std::move(new_partition) : Constant(Value()));
 	fields.emplace_back(Identifier("location"), location ? std::move(location) : Constant(Value()));
+	fields.emplace_back(Identifier("columns"), columns ? std::move(columns) : Constant(Value()));
 	return Call("struct_pack", std::move(fields));
+}
+
+//! GlueReplaceColumns <- 'REPLACE' 'COLUMNS' Parens(List(GlueColumnDefinition))
+//! GlueColumnDefinition <- ColIdOrString Type GlueColumnComment?
+//! -> list_value(struct_pack(name := 'id', type := 'BIGINT', comment := '...'), ...)
+unique_ptr<ParsedExpression> TransformReplaceColumns(PEGTransformer &transformer, ParseResult &parse_result) {
+	auto &replace = parse_result.Cast<ListParseResult>();
+	auto definitions = PEGTransformerFactory::ExtractParseResultsFromList(
+	    PEGTransformerFactory::ExtractResultFromParens(replace.GetChild(2)));
+	vector<FunctionArgument> columns;
+	for (auto &entry : definitions) {
+		auto &definition = entry.get().Cast<ListParseResult>();
+		auto name = transformer.Transform<Identifier>(definition.GetChild(0));
+		auto type = transformer.Transform<LogicalType>(definition.GetChild(1));
+		Value comment(LogicalType::VARCHAR);
+		auto &optional_comment = definition.Child<OptionalParseResult>(2);
+		if (optional_comment.HasResult()) {
+			// GlueColumnComment <- 'COMMENT' StringLiteral
+			auto &comment_clause = optional_comment.GetResult().Cast<ListParseResult>();
+			comment = Value(transformer.Transform<string>(comment_clause.GetChild(1)));
+		}
+		vector<FunctionArgument> fields;
+		fields.emplace_back(Identifier("name"), Constant(Value(name.GetIdentifierName())));
+		fields.emplace_back(Identifier("type"), Constant(Value(type.ToString())));
+		fields.emplace_back(Identifier("comment"), Constant(comment));
+		columns.emplace_back(Call("struct_pack", std::move(fields)));
+	}
+	return Call("list_value", std::move(columns));
 }
 
 void TransformAction(PEGTransformer &transformer, ParseResult &action_result, vector<FunctionArgument> &actions) {
@@ -120,13 +150,25 @@ void TransformAction(PEGTransformer &transformer, ParseResult &action_result, ve
 		    MakeAction("set_partition_location", false, false, std::move(partition), nullptr, std::move(location)));
 		return;
 	}
+	if (IsRule(action, "GlueReplaceColumns")) {
+		actions.emplace_back(MakeAction("replace_columns", false, false, nullptr, nullptr, nullptr,
+		                                TransformReplaceColumns(transformer, action)));
+		return;
+	}
+	if (IsRule(action, "GluePartitionReplaceColumns")) {
+		// GluePartitionSpec GlueReplaceColumns
+		auto partition = TransformPartitionSpec(transformer, list.GetChild(0));
+		actions.emplace_back(MakeAction("replace_columns", false, false, std::move(partition), nullptr, nullptr,
+		                                TransformReplaceColumns(transformer, list.GetChild(1))));
+		return;
+	}
 	if (IsRule(action, "GlueTableSetLocation")) {
 		// 'SET' GlueLocation
 		auto location = TransformLocation(transformer, list.GetChild(1));
 		actions.emplace_back(MakeAction("set_table_location", false, false, nullptr, nullptr, std::move(location)));
 		return;
 	}
-	throw InternalException("Unknown Glue partition action rule '%s'", action.name);
+	throw InternalException("Unknown Glue ALTER TABLE action rule '%s'", action.name);
 }
 
 //! GlueAlterTableStatement <- 'ALTER' 'TABLE' BaseTableName GluePartitionAction+
@@ -154,8 +196,8 @@ unique_ptr<TransformProcess> StartGlueAlterTableTransform(PEGTransformer &transf
 class GlueHiveDDLGrammar final : public GrammarExtension {
 public:
 	GlueHiveDDLGrammar()
-	    : GrammarExtension("glue_hive_ddl", "Hive partition DDL for Hive tables in Glue: ALTER TABLE ... "
-	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION") {
+	    : GrammarExtension("glue_hive_ddl", "Hive DDL for Hive tables in Glue: ALTER TABLE ... "
+	                                        "ADD / DROP PARTITION, RENAME PARTITION, SET LOCATION, REPLACE COLUMNS") {
 	}
 
 	vector<GrammarChange> GetChanges() const override {
@@ -165,7 +207,7 @@ public:
 		                           StartGlueAlterTableTransform));
 		changes.push_back(GrammarChange::AddRule(
 		    "GluePartitionAction <- GlueAddPartitions / GlueDropPartitions / GlueRenamePartition / "
-		    "GluePartitionSetLocation / GlueTableSetLocation"));
+		    "GluePartitionSetLocation / GluePartitionReplaceColumns / GlueTableSetLocation / GlueReplaceColumns"));
 		changes.push_back(GrammarChange::AddRule("GlueAddPartitions <- 'ADD' IfNotExists? GluePartitionWithLocation+"));
 		changes.push_back(GrammarChange::AddRule("GluePartitionWithLocation <- GluePartitionSpec GlueLocation?"));
 		changes.push_back(GrammarChange::AddRule("GlueDropPartitions <- 'DROP' IfExists? List(GluePartitionSpec)"));
@@ -173,10 +215,16 @@ public:
 		    GrammarChange::AddRule("GlueRenamePartition <- GluePartitionSpec 'RENAME' 'TO' GluePartitionSpec"));
 		changes.push_back(GrammarChange::AddRule("GluePartitionSetLocation <- GluePartitionSpec 'SET' GlueLocation"));
 		changes.push_back(GrammarChange::AddRule("GlueTableSetLocation <- 'SET' GlueLocation"));
+		changes.push_back(
+		    GrammarChange::AddRule("GluePartitionReplaceColumns <- GluePartitionSpec GlueReplaceColumns"));
+		changes.push_back(
+		    GrammarChange::AddRule("GlueReplaceColumns <- 'REPLACE' 'COLUMNS' Parens(List(GlueColumnDefinition))"));
+		changes.push_back(GrammarChange::AddRule("GlueColumnDefinition <- ColIdOrString Type GlueColumnComment?"));
+		changes.push_back(GrammarChange::AddRule("GlueColumnComment <- 'COMMENT' StringLiteral"));
 		changes.push_back(GrammarChange::AddRule("GluePartitionSpec <- 'PARTITION' Parens(List(GluePartitionValue))"));
 		changes.push_back(GrammarChange::AddRule("GluePartitionValue <- ColumnName '=' Expression"));
 		changes.push_back(GrammarChange::AddRule("GlueLocation <- 'LOCATION' StringLiteral"));
-		// tried before the built-in ALTER statement; it fails on anything that is not a partition action, so the
+		// tried before the built-in ALTER statement; it fails on anything that is not one of these actions, so the
 		// built-in ALTER TABLE forms are unaffected
 		changes.push_back(GrammarChange::PrependChoice("Statement", "GlueAlterTableStatement"));
 		return changes;

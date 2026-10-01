@@ -1,6 +1,7 @@
 #include "functions/glue_functions.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/optional.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -10,6 +11,7 @@
 #include "api/glue_api.hpp"
 #include "core/glue_types.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_schema_entry.hpp"
 
 namespace duckdb {
 
@@ -441,9 +443,9 @@ void GlueSetTableLocationScan(ClientContext &context, TableFunctionInput &data, 
 }
 
 //===--------------------------------------------------------------------===//
-// glue_alter_table: the SQL partition DDL, several actions in one statement
+// glue_alter_table: the Hive DDL of one ALTER TABLE statement, several actions in one statement
 //===--------------------------------------------------------------------===//
-enum class GlueAlterAction : uint8_t { ADD, DROP, RENAME, SET_PARTITION_LOCATION, SET_TABLE_LOCATION };
+enum class GlueAlterAction : uint8_t { ADD, DROP, RENAME, SET_PARTITION_LOCATION, SET_TABLE_LOCATION, REPLACE_COLUMNS };
 
 struct GlueAlterStep {
 	GlueAlterAction action;
@@ -452,6 +454,8 @@ struct GlueAlterStep {
 	vector<string> values;
 	vector<string> new_values;
 	string location;
+	//! REPLACE_COLUMNS: the new data columns
+	vector<GlueColumn> columns;
 };
 
 struct GlueAlterTableBindData : public TableFunctionData {
@@ -515,6 +519,61 @@ vector<string> ParsePartitionPairsValue(const string &function_name, const GlueP
 	return ParsePartitionPairs(function_name, target, result);
 }
 
+//! The new data columns, given as a list of {name, type, comment} structs; types are stored the way CREATE TABLE
+//! stores them, the partition keys are kept and must not be listed, the bucketing and sort columns must be listed
+vector<GlueColumn> ParseReplaceColumns(ClientContext &context, const string &function_name,
+                                       const GluePartitionTarget &target, const Value &columns) {
+	if (columns.IsNull() || columns.type().id() != LogicalTypeId::LIST || ListValue::GetChildren(columns).empty()) {
+		throw BinderException("%s needs a list of {name, type, comment} columns", function_name);
+	}
+	vector<GlueColumn> result;
+	case_insensitive_set_t names;
+	for (auto &entry : ListValue::GetChildren(columns)) {
+		if (entry.IsNull() || entry.type().id() != LogicalTypeId::STRUCT) {
+			throw BinderException("%s needs a list of {name, type, comment} columns", function_name);
+		}
+		auto name = GetStructField(entry, "name");
+		auto type = GetStructField(entry, "type");
+		if (name.IsNull() || type.IsNull()) {
+			throw BinderException("%s: every column needs a name and a type", function_name);
+		}
+		GlueColumn column;
+		column.name = name.GetValue<string>();
+		if (column.name.empty()) {
+			throw BinderException("%s: a column needs a name", function_name);
+		}
+		column.type = GlueTypes::FromLogicalType(TransformStringToLogicalType(type.GetValue<string>(), context));
+		auto comment = GetStructField(entry, "comment");
+		if (!comment.IsNull()) {
+			column.comment = comment.GetValue<string>();
+		}
+		if (!names.insert(column.name).second) {
+			throw BinderException("%s: column '%s' is given twice", function_name, column.name);
+		}
+		for (auto &key : target.table.partition_keys) {
+			if (StringUtil::CIEquals(key.name, column.name)) {
+				throw BinderException("%s: '%s' is a partition key of table '%s', the column list only holds the "
+				                      "data columns",
+				                      function_name, column.name, target.TableName());
+			}
+		}
+		result.push_back(std::move(column));
+	}
+	auto require_kept = [&](const string &column) {
+		if (names.find(column) == names.end()) {
+			throw BinderException("%s: table '%s' is %s, the columns must keep '%s'", function_name, target.TableName(),
+			                      target.table.DescribeBucketing(), column);
+		}
+	};
+	for (auto &column : target.table.bucket_columns) {
+		require_kept(column);
+	}
+	for (auto &column : target.table.sort_columns) {
+		require_kept(column.name);
+	}
+	return result;
+}
+
 unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctionBindInput &input,
                                             vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto result = make_uniq<GlueAlterTableBindData>();
@@ -526,7 +585,9 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 	bool needs_partitions = false;
 	for (auto &action : ListValue::GetChildren(actions)) {
 		auto name = StringUtil::Lower(GetStructField(action, "action").ToString());
-		if (name != "set_table_location") {
+		auto table_level =
+		    name == "set_table_location" || (name == "replace_columns" && GetStructField(action, "partition").IsNull());
+		if (!table_level) {
 			needs_partitions = true;
 		}
 	}
@@ -563,6 +624,18 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		} else if (name == "set_table_location") {
 			step.action = GlueAlterAction::SET_TABLE_LOCATION;
 			step.location = ParseLocation("ALTER TABLE SET LOCATION", location);
+		} else if (name == "replace_columns") {
+			if (ListValue::GetChildren(actions).size() > 1) {
+				throw BinderException("ALTER TABLE REPLACE COLUMNS can not be combined with other ALTER TABLE actions");
+			}
+			step.action = GlueAlterAction::REPLACE_COLUMNS;
+			auto function_name =
+			    partition.IsNull() ? "ALTER TABLE REPLACE COLUMNS" : "ALTER TABLE PARTITION REPLACE COLUMNS";
+			if (!partition.IsNull()) {
+				step.values = ParsePartitionPairsValue(function_name, result->target, partition);
+			}
+			step.columns =
+			    ParseReplaceColumns(context, function_name, result->target, GetStructField(action, "columns"));
 		} else {
 			throw BinderException("glue_alter_table: unknown action '%s'", name);
 		}
@@ -585,6 +658,8 @@ string DescribeAction(GlueAlterAction action) {
 		return "set partition location";
 	case GlueAlterAction::SET_TABLE_LOCATION:
 		return "set table location";
+	case GlueAlterAction::REPLACE_COLUMNS:
+		return "replace columns";
 	}
 	return "unknown";
 }
@@ -629,6 +704,7 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			}
 			break;
 		case GlueAlterAction::SET_TABLE_LOCATION:
+		case GlueAlterAction::REPLACE_COLUMNS:
 			break;
 		}
 	}
@@ -673,6 +749,18 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			break;
 		case GlueAlterAction::SET_TABLE_LOCATION:
 			GlueAPI::SetTableLocation(context, catalog, table.database_name, table.name, step.location);
+			break;
+		case GlueAlterAction::REPLACE_COLUMNS:
+			if (step.values.empty()) {
+				auto schema = catalog.GetSchemas().GetEntry(context, table.database_name);
+				if (!schema) {
+					throw CatalogException("Glue database '%s' does not exist", table.database_name);
+				}
+				schema->Cast<GlueSchemaEntry>().SetTableColumns(context, table.name, step.columns);
+			} else {
+				GlueAPI::SetPartitionColumns(context, catalog, table.database_name, table.name, step.values,
+				                             step.columns);
+			}
 			break;
 		}
 		emit(step);

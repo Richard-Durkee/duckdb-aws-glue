@@ -1,6 +1,7 @@
 #include "functions/glue_functions.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -26,9 +27,10 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto qualified = QualifiedName::Parse(input.inputs[0].GetValue<string>());
 	if (qualified.Catalog().empty() || qualified.Schema().empty()) {
-		throw BinderException("glue_get_table_response expects a fully qualified table name: "
-		                      "'<catalog>.<schema>.<table>', got '%s'",
-		                      input.inputs[0].GetValue<string>());
+		// a partially qualified name: resolve it the way a query would (search path, default catalog)
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qualified);
+		auto &entry = Catalog::GetEntry(context, lookup);
+		qualified = QualifiedName(entry.ParentCatalog().GetName(), entry.ParentSchema().name, entry.name);
 	}
 	auto catalog = Catalog::GetCatalogEntry(context, qualified.Catalog());
 	if (!catalog) {

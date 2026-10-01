@@ -5,8 +5,8 @@
 namespace duckdb {
 
 //! glue_get_table_response('<catalog>.<schema>.<table>'): the Glue GetTable response for a table of an attached
-//! Glue catalog, for inspecting what Glue knows about a table. One row with the most useful fields as columns and
-//! the complete Glue Table object as VARIANT.
+//! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
+//! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
 //! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (schema) of an
 //! attached Glue catalog. One row with the description, location and parameters as columns and the complete Glue

@@ -180,7 +180,10 @@ SELECT response.StorageDescriptor.Location FROM glue_get_table_response('my_data
 ```
 
 It returns one row with the classification, the Glue table type, location, SerDe, columns, partition keys and
-parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`.
+parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`. A partially qualified name
+(`'default.some_table'`, or `'some_table'` after `USE my_datalake.default`) is resolved like in a query, through the
+table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
+name.
 
 `glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
 description, location and parameters as columns and the complete Glue `Database` object in `response`.

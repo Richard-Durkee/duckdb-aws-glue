@@ -604,10 +604,12 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		function_name = "read_csv";
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["auto_detect"] = Value::BOOLEAN(false);
-		param_map["header"] = Value::BOOLEAN(scan_info->header);
+		param_map["header"] = Value::BOOLEAN(false);
+		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->skip_lines));
 		param_map["delim"] = Value(scan_info->delimiter);
 		param_map["quote"] = Value(scan_info->quote);
 		param_map["escape"] = Value(scan_info->escape);
+		param_map["nullstr"] = Value(scan_info->null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
 		break;

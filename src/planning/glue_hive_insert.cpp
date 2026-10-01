@@ -194,10 +194,11 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		}
 	}
 
-	// For INSERT, derive the file format from Glue's current SerDe. For CTAS the
-	// table does not exist yet, so use the validated CREATE TABLE option stored in
-	// the local definition.
-	auto file_format = creating_table ? table_info.file_format : table_info.GetFileFormat();
+	// the files are written in the table's format (from its SerDe)
+	auto file_format = table_info.GetFileFormat();
+	if (IsTextFileFormat(file_format)) {
+		table_info.CheckTextSerdeSupported(file_format);
+	}
 	auto format_name = HiveFileFormatToString(file_format);
 	// the operator feeding the copy and the columns it produces
 	optional_ptr<PhysicalOperator> source = &plan;
@@ -224,22 +225,18 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		ExtensionHelper::AutoLoadExtension(context, "avro");
 		break;
 	case HiveFileFormat::CSV: {
-		// Hive CSV files: the table's dialect, a header line only when the table says so. For CTAS, take the dialect
-		// from the CREATE TABLE options because there is no fetched SerDe yet; apply the same defaults as
-		// CreateHiveTable + the fetched GlueTableInfo getters.
-		auto delimiter = creating_table ? table_info.csv_delimiter : table_info.GetFieldDelimiter();
-		auto quote = creating_table ? table_info.csv_quote : table_info.GetQuoteCharacter();
-		if (quote.empty()) {
-			quote = "\"";
+		// Hive CSV files: the table's dialect and NULL string, a header line only when the table says so
+		auto header_lines = table_info.GetHeaderLineCount();
+		if (header_lines > 1) {
+			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: its files start with %d "
+			                              "header lines, DuckDB writes at most one",
+			                              table_info.database_name, table_info.name, header_lines);
 		}
-		auto escape = creating_table ? table_info.csv_escape : table_info.GetEscapeCharacter();
-		if (escape.empty()) {
-			escape = quote;
-		}
-		copy_options[Identifier("header")] = {Value::BOOLEAN(table_info.HasHeader())};
-		copy_options[Identifier("delimiter")] = {Value(delimiter)};
-		copy_options[Identifier("quote")] = {Value(quote)};
-		copy_options[Identifier("escape")] = {Value(escape)};
+		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
+		copy_options[Identifier("delimiter")] = {Value(table_info.GetFieldDelimiter())};
+		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
+		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		copy_options[Identifier("nullstr")] = {Value(table_info.GetNullFormat())};
 		break;
 	}
 	case HiveFileFormat::JSON: {

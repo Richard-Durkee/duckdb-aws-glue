@@ -143,7 +143,9 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 		} else if (name == "escape") {
 			scan_info->escape = option.second.GetValue<string>();
 		} else if (name == "header") {
-			scan_info->header = option.second.GetValue<bool>();
+			scan_info->skip_lines = option.second.GetValue<bool>() ? 1 : 0;
+		} else if (name == "nullstr") {
+			scan_info->null_string = option.second.GetValue<string>();
 		}
 	}
 	if (!schema) {
@@ -228,6 +230,7 @@ TableFunctionSet GetHiveScanFunction(DatabaseInstance &db) {
 		options.Add("quote", LogicalType::VARCHAR);
 		options.Add("escape", LogicalType::VARCHAR);
 		options.Add("header", LogicalType::BOOLEAN);
+		options.Add("nullstr", LogicalType::VARCHAR);
 	});
 	function.GetSignature() = std::move(signature);
 	function.bind = HiveScanBind;

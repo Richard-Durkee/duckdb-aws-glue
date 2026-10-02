@@ -292,8 +292,8 @@ void GlueAddPartitionScan(ClientContext &context, TableFunctionInput &data, Data
 	partition.location = bind_data.location;
 	GlueAPI::CreatePartition(context, *bind_data.target.catalog, table.database_name, table.name, partition,
 	                         bind_data.if_not_exists);
-	output.SetValue(0, 0, Value(bind_data.location));
-	output.SetCardinality(1);
+	output.data[0].Append(Value(bind_data.location));
+	output.CheckCardinality(1);
 }
 
 //===--------------------------------------------------------------------===//
@@ -329,8 +329,8 @@ void GlueDropPartitionScan(ClientContext &context, TableFunctionInput &data, Dat
 		throw CatalogException("Partition [%s] does not exist in Glue table '%s'",
 		                       StringUtil::Join(bind_data.values, ", "), bind_data.target.TableName());
 	}
-	output.SetValue(0, 0, Value::BOOLEAN(dropped));
-	output.SetCardinality(1);
+	output.data[0].Append(Value::BOOLEAN(dropped));
+	output.CheckCardinality(1);
 }
 
 //===--------------------------------------------------------------------===//
@@ -362,8 +362,8 @@ void GlueRenamePartitionScan(ClientContext &context, TableFunctionInput &data, D
 	if (GlueAPI::GetPartition(context, catalog, table.database_name, table.name, bind_data.new_values, renamed)) {
 		location = renamed.location;
 	}
-	output.SetValue(0, 0, Value(location));
-	output.SetCardinality(1);
+	output.data[0].Append(Value(location));
+	output.CheckCardinality(1);
 }
 
 //===--------------------------------------------------------------------===//
@@ -406,8 +406,8 @@ void GlueSetPartitionLocationScan(ClientContext &context, TableFunctionInput &da
 	auto &table = bind_data.target.table;
 	GlueAPI::SetPartitionLocation(context, *bind_data.target.catalog, table.database_name, table.name, bind_data.values,
 	                              bind_data.location);
-	output.SetValue(0, 0, Value(bind_data.location));
-	output.SetCardinality(1);
+	output.data[0].Append(Value(bind_data.location));
+	output.CheckCardinality(1);
 }
 
 unique_ptr<FunctionData> GlueSetTableLocationBind(ClientContext &context, TableFunctionBindInput &input,
@@ -429,8 +429,8 @@ void GlueSetTableLocationScan(ClientContext &context, TableFunctionInput &data, 
 	auto &bind_data = data.bind_data->Cast<GluePartitionChangeBindData>();
 	auto &table = bind_data.target.table;
 	GlueAPI::SetTableLocation(context, *bind_data.target.catalog, table.database_name, table.name, bind_data.location);
-	output.SetValue(0, 0, Value(bind_data.location));
-	output.SetCardinality(1);
+	output.data[0].Append(Value(bind_data.location));
+	output.CheckCardinality(1);
 }
 
 //===--------------------------------------------------------------------===//

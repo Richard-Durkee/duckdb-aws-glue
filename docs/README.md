@@ -128,7 +128,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 
 DuckDB has no `ALTER TABLE ... PARTITION` syntax, so the Hive partition statements are table functions. The
 partition is given as a struct naming every partition key; values are stored as strings in Glue, in partition key
-order.
+order. The table name may be partially qualified (`'db.t'`, or `'t'` after `USE cat.db`); it is resolved like in a
+query.
 
 | function | Hive statement |
 |----------|------------------|
@@ -186,7 +187,8 @@ table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported c
 name.
 
 `glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
-description, location and parameters as columns and the complete Glue `Database` object in `response`.
+description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
+`'<database>'` is resolved like in a query, through the search path.
 
 ## HTTP transport and logging
 

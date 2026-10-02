@@ -27,6 +27,13 @@ struct GluePartitionTarget {
 	}
 };
 
+void ThrowIsView(const string &function_name, const string &table_name, bool require_partitions) {
+	if (require_partitions) {
+		throw BinderException("%s: Glue view '%s' has no partitions", function_name, table_name);
+	}
+	throw BinderException("%s: '%s' is a Glue view, not a table", function_name, table_name);
+}
+
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
                                      bool require_partitions = true) {
 	auto name = ResolveGlueTableName(context, function_name, table_name.GetValue<string>());
@@ -38,7 +45,7 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
 	}
 	if (result.table.IsView()) {
-		throw BinderException("%s: Glue view '%s' has no partitions", function_name, result.TableName());
+		ThrowIsView(function_name, result.TableName(), require_partitions);
 	}
 	if (result.table.GetFormat() != GlueTableFormat::HIVE) {
 		throw NotImplementedException("%s only works on Hive tables, '%s' is a %s table", function_name,

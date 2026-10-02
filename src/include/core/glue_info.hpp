@@ -93,6 +93,8 @@ public:
 	}
 	//! Derive the open table format from the table parameters
 	GlueTableFormat GetFormat() const;
+	//! Whether 'key' is one of the table parameters GetFormat() derives the format from
+	static bool IsFormatParameter(const string &key);
 	//! Human readable description of the table type, used in error messages
 	string GetFormatName() const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)

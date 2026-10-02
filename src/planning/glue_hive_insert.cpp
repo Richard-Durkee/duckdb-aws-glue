@@ -454,8 +454,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 SourceResultType GlueHiveInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                  OperatorSourceInput &input) const {
 	auto &state = sink_state->Cast<GlueHiveInsertGlobalState>();
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(state.insert_count)));
+	chunk.data[0].Append(Value::BIGINT(NumericCast<int64_t>(state.insert_count)));
+	chunk.CheckCardinality(1);
 	return SourceResultType::FINISHED;
 }
 

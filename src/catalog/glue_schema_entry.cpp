@@ -547,6 +547,49 @@ bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
 
 } // namespace
 
+//! The parameters GlueTableInfo::GetFormat() derives the table format from can not be set or reset: changing
+//! table_type on a Hive table would relabel it as Iceberg or Delta without a metadata file behind it.
+static void CheckTablePropertyChangeable(const string &key) {
+	if (key.empty()) {
+		throw InvalidInputException("A table property needs a name");
+	}
+	if (GlueTableInfo::IsFormatParameter(key)) {
+		throw InvalidInputException("Table property '%s' decides how the table is read and can not be changed "
+		                            "with ALTER TABLE",
+		                            key);
+	}
+}
+
+//! ALTER TABLE t SET (key = value, ...) / RESET (key, ...): Hive's SET / UNSET TBLPROPERTIES
+void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto table_name = alter_table.GetQualifiedName().Name().GetIdentifierName();
+	vector<pair<string, string>> set;
+	vector<string> unset;
+	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS) {
+		auto &options = alter_table.Cast<SetTableOptionsInfo>();
+		for (auto &option : EvaluateOptions(context, options.table_options, "ALTER TABLE SET")) {
+			CheckTablePropertyChangeable(option.first);
+			// Glue stores every parameter as a string
+			set.emplace_back(option.first, option.second.DefaultCastAs(LogicalType::VARCHAR).GetValue<string>());
+		}
+	} else {
+		for (auto &option : alter_table.Cast<ResetTableOptionsInfo>().table_options) {
+			auto key = option.GetIdentifierName();
+			CheckTablePropertyChangeable(key);
+			unset.push_back(std::move(key));
+		}
+	}
+	GlueAPI::UpdateTableParameters(context, glue_catalog, database_info.name, table_name, set, unset);
+
+	GlueTableInfo updated;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, updated)) {
+		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
+		                       table_name);
+	}
+	tables.CreateEntry(tables.CreateEntry(updated));
+}
+
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &context = transaction.GetContext();
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -579,6 +622,11 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		throw NotImplementedException("Only ALTER TABLE is supported for Glue tables");
 	}
 	auto &alter_table = info.Cast<AlterTableInfo>();
+	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS ||
+	    alter_table.alter_table_type == AlterTableType::RESET_TABLE_OPTIONS) {
+		AlterTableProperties(context, alter_table);
+		return;
+	}
 
 	// Work on the current Glue definition, not the cached one
 	GlueTableInfo current;

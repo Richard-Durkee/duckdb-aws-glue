@@ -91,6 +91,11 @@ avro files carry their codec themselves.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
   codec is an error.
+- `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
+  `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
+  parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`
+  becomes `'4'`); a key may be quoted (`'parquet.compression' = 'ZSTD'`). The parameters the table format is read
+  from (`table_type`, `spark.sql.sources.provider`, `metadata_location`) can not be changed this way.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
@@ -136,7 +141,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 
 DuckDB has no `ALTER TABLE ... PARTITION` syntax, so the Hive partition statements are table functions. The
 partition is given as a struct naming every partition key; values are stored as strings in Glue, in partition key
-order.
+order. The table name may be partially qualified (`'db.t'`, or `'t'` after `USE cat.db`); it is resolved like in a
+query.
 
 | function | Hive statement |
 |----------|------------------|
@@ -188,10 +194,14 @@ SELECT response.StorageDescriptor.Location FROM glue_get_table_response('my_data
 ```
 
 It returns one row with the classification, the Glue table type, location, SerDe, columns, partition keys and
-parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`.
+parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`. A partially qualified name
+(`'default.some_table'`, or `'some_table'` after `USE my_datalake.default`) is resolved like in a query, through the
+table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
+name.
 
 `glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
-description, location and parameters as columns and the complete Glue `Database` object in `response`.
+description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
+`'<database>'` is resolved like in a query, through the search path.
 
 ## HTTP transport and logging
 

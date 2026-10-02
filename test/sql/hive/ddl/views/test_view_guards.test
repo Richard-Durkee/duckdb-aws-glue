@@ -60,7 +60,7 @@ USE my_datalake.default;
 statement error
 SELECT * FROM glue_partitions('vg_view');
 ----
-Glue view 'vg_view' has no partitions
+Glue view 'default.vg_view' has no partitions
 
 statement ok
 USE memory;

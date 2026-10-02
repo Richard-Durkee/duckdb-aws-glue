@@ -6,13 +6,10 @@
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/parser/qualified_name.hpp"
 
 #include "api/glue_api.hpp"
 #include "core/glue_types.hpp"
 #include "catalog/glue_catalog.hpp"
-#include "catalog/glue_table.hpp"
-#include "duckdb/catalog/entry_lookup_info.hpp"
 
 namespace duckdb {
 
@@ -32,37 +29,13 @@ struct GluePartitionTarget {
 
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
                                      bool require_partitions = true) {
-	auto qualified = QualifiedName::Parse(table_name.GetValue<string>());
-	if (qualified.Catalog().empty() || qualified.Schema().empty()) {
-		// a partially qualified name: resolve it the way a query would (search path, default catalog)
-		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qualified);
-		auto &entry = Catalog::GetEntry(context, lookup);
-		if (entry.ParentCatalog().GetCatalogType() != "glue") {
-			throw BinderException("%s only works on tables of a Glue catalog, '%s' is a table of a %s catalog",
-			                      function_name, table_name.GetValue<string>(), entry.ParentCatalog().GetCatalogType());
-		}
-		if (entry.type == CatalogType::VIEW_ENTRY) {
-			throw BinderException("%s: Glue view '%s' has no partitions", function_name, table_name.GetValue<string>());
-		}
-		auto &glue_table = entry.Cast<GlueTable>();
-		qualified = QualifiedName(entry.ParentCatalog().GetName(), Identifier(glue_table.table_info.database_name),
-		                          Identifier(glue_table.table_info.name));
-	}
-	auto catalog = Catalog::GetCatalogEntry(context, qualified.Catalog());
-	if (!catalog) {
-		throw BinderException("Catalog '%s' does not exist", qualified.Catalog().GetIdentifierName());
-	}
-	if (catalog->GetCatalogType() != "glue") {
-		throw BinderException("%s only works on tables of a Glue catalog, '%s' is a %s catalog", function_name,
-		                      qualified.Catalog().GetIdentifierName(), catalog->GetCatalogType());
-	}
+	auto name = ResolveGlueTableName(context, function_name, table_name.GetValue<string>());
 	GluePartitionTarget result;
-	result.catalog = &catalog->Cast<GlueCatalog>();
-	if (!GlueAPI::GetTable(context, *result.catalog, qualified.Schema().GetIdentifierName(),
-	                       qualified.Name().GetIdentifierName(), result.table)) {
-		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'",
-		                       qualified.Schema().GetIdentifierName(), qualified.Name().GetIdentifierName(),
-		                       qualified.Catalog().GetIdentifierName());
+	result.catalog = &Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
+	if (!GlueAPI::GetTable(context, *result.catalog, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
+	                       result.table)) {
+		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
+		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
 	}
 	if (result.table.IsView()) {
 		throw BinderException("%s: Glue view '%s' has no partitions", function_name, result.TableName());

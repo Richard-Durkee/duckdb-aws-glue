@@ -197,7 +197,8 @@ TableFunction GetHiveScanFunction(DatabaseInstance &db) {
 	shared_ptr<const TableFunction> base;
 	for (idx_t i = 0; i < function_set.functions.Size(); i++) {
 		auto candidate = function_set.functions.GetFunctionByOffset(i);
-		if (candidate->arguments.size() == 1 && candidate->arguments[0].id() == LogicalTypeId::LIST) {
+		auto &signature = candidate->GetSignature();
+		if (signature.GetParameterCount() >= 1 && signature.GetParameter(0).GetType().id() == LogicalTypeId::LIST) {
 			base = candidate;
 		}
 	}
@@ -206,16 +207,20 @@ TableFunction GetHiveScanFunction(DatabaseInstance &db) {
 	}
 	TableFunction function = *base;
 	function.name = "hive_scan";
-	function.arguments = {LogicalType::VARCHAR};
-	function.named_parameters.clear();
-	function.named_parameters["schema"] = LogicalType::ANY;
-	function.named_parameters["partition_keys"] = LogicalType::LIST(LogicalType::VARCHAR);
-	function.named_parameters["partitions"] = LogicalType::ANY;
-	function.named_parameters["format"] = LogicalType::VARCHAR;
-	function.named_parameters["delim"] = LogicalType::VARCHAR;
-	function.named_parameters["quote"] = LogicalType::VARCHAR;
-	function.named_parameters["escape"] = LogicalType::VARCHAR;
-	function.named_parameters["header"] = LogicalType::BOOLEAN;
+	FunctionSignature signature;
+	signature.SetReturnType(base->GetReturnType());
+	signature.AddParameter(LogicalType::VARCHAR);
+	signature.WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("schema", LogicalType::ANY);
+		options.Add("partition_keys", LogicalType::LIST(LogicalType::VARCHAR));
+		options.Add("partitions", LogicalType::ANY);
+		options.Add("format", LogicalType::VARCHAR);
+		options.Add("delim", LogicalType::VARCHAR);
+		options.Add("quote", LogicalType::VARCHAR);
+		options.Add("escape", LogicalType::VARCHAR);
+		options.Add("header", LogicalType::BOOLEAN);
+	});
+	function.GetSignature() = std::move(signature);
 	function.bind = HiveScanBind;
 	function.bind_replace = nullptr;
 	function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;

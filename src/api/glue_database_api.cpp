@@ -3,10 +3,12 @@
 
 #include "duckdb/common/string_util.hpp"
 
+#include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreateDatabaseRequest.h>
 #include <aws/glue/model/DeleteDatabaseRequest.h>
 #include <aws/glue/model/GetDatabaseRequest.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
+#include <aws/glue/model/UpdateDatabaseRequest.h>
 
 namespace duckdb {
 
@@ -35,7 +37,7 @@ vector<GlueDatabaseInfo> GlueAPI::GetDatabases(ClientContext &context, GlueCatal
 }
 
 bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                          GlueDatabaseInfo &result) {
+                          GlueDatabaseInfo &result, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest request;
@@ -48,7 +50,11 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 		}
 		ThrowGlueError(outcome, StringUtil::Format("GetDatabase '%s'", database_name));
 	}
-	result = ToDatabaseInfo(outcome.GetResult().GetDatabase());
+	auto &database = outcome.GetResult().GetDatabase();
+	result = ToDatabaseInfo(database);
+	if (raw_json) {
+		*raw_json = ToStdString(database.Jsonize().View().WriteReadable());
+	}
 	return true;
 }
 
@@ -76,6 +82,45 @@ void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const
 			throw CatalogException("Glue database with name \"%s\" already exists", database.name);
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateDatabase '%s'", database.name));
+	}
+}
+
+void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	Aws::Glue::Model::GetDatabaseRequest get_request;
+	SetCatalogId(get_request, catalog);
+	get_request.SetName(database.name);
+	auto get_outcome = client->GetDatabase(get_request);
+	if (!get_outcome.IsSuccess()) {
+		if (IsEntityNotFound(get_outcome)) {
+			throw CatalogException("Glue database with name \"%s\" does not exist", database.name);
+		}
+		ThrowGlueError(get_outcome, StringUtil::Format("GetDatabase '%s'", database.name));
+	}
+	// UpdateDatabase replaces the whole definition: carry over what is not changed here
+	auto &current = get_outcome.GetResult().GetDatabase();
+	Aws::Glue::Model::DatabaseInput input;
+	input.SetName(database.name);
+	input.SetDescription(database.description);
+	input.SetLocationUri(database.location_uri);
+	input.SetParameters(ToAwsMap(database.parameters));
+	if (current.CreateTableDefaultPermissionsHasBeenSet()) {
+		input.SetCreateTableDefaultPermissions(current.GetCreateTableDefaultPermissions());
+	}
+	if (current.TargetDatabaseHasBeenSet()) {
+		input.SetTargetDatabase(current.GetTargetDatabase());
+	}
+	if (current.FederatedDatabaseHasBeenSet()) {
+		input.SetFederatedDatabase(current.GetFederatedDatabase());
+	}
+	Aws::Glue::Model::UpdateDatabaseRequest request;
+	SetCatalogId(request, catalog);
+	request.SetName(database.name);
+	request.SetDatabaseInput(input);
+	auto outcome = client->UpdateDatabase(request);
+	if (!outcome.IsSuccess()) {
+		ThrowGlueError(outcome, StringUtil::Format("UpdateDatabase '%s'", database.name));
 	}
 }
 

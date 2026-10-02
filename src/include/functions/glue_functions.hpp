@@ -1,13 +1,22 @@
 #pragma once
 
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/parser/qualified_name.hpp"
 
 namespace duckdb {
 
+//! Resolve the table argument of a glue_* function to a fully qualified name in a Glue catalog; a partially qualified
+//! name is resolved like in a query (search path, default catalog)
+QualifiedName ResolveGlueTableName(ClientContext &context, const string &function_name, const string &table_name);
+
 //! glue_get_table_response('<catalog>.<schema>.<table>'): the Glue GetTable response for a table of an attached
-//! Glue catalog, for inspecting what Glue knows about a table. One row with the most useful fields as columns and
-//! the complete Glue Table object as VARIANT.
+//! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
+//! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
+//! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (schema) of an
+//! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and
+//! parameters as columns and the complete Glue Database object as VARIANT.
+TableFunction GetGlueGetDatabaseResponseFunction();
 
 //! glue_partitions('<catalog>.<schema>.<table>'): the partitions of a Hive table as registered in Glue, one row
 //! per partition with a typed column per partition key and the partition's location

@@ -319,11 +319,19 @@ PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPla
 
 PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
                                                     LogicalCreateTable &op, PhysicalOperator &plan) {
+	for (auto &option : op.info->Base().options) {
+		if (GlueSchemaEntry::IsBucketingOption(option.first)) {
+			throw NotImplementedException(
+			    "CREATE TABLE ... AS with option '%s' is not supported: it creates a bucketed "
+			    "Glue table, and DuckDB does not write a bucketed layout",
+			    option.first);
+		}
+	}
 	// Create the table in Glue first (Glue has no transactions, the table exists from here on even if the insert
 	// fails), then write the query result into it
 	auto &glue_catalog = op.schema.catalog.Cast<GlueCatalog>();
 	auto transaction = glue_catalog.GetCatalogTransaction(context);
-	auto entry = op.schema.CreateTable(transaction, *op.info);
+	auto entry = glue_catalog.CreateTable(transaction, op.schema, *op.info);
 
 	vector<Identifier> names;
 	vector<LogicalType> types;
@@ -376,6 +384,9 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
+//! Case sensitive, like S3 paths
+using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
+
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
@@ -386,7 +397,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 
 	// Register the partition directories the files were written to: the locations of existing partitions, or
 	// <key>=<value> directories in partition key order below the table location
-	case_insensitive_map_t<GluePartitionInput> partitions;
+	FilePathToGluePartition partitions;
 	for (auto &file : state.written_files) {
 		auto directory = file.substr(0, file.find_last_of('/'));
 		if (partitions.find(directory) != partitions.end()) {
@@ -406,7 +417,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			if (value == parsed.end()) {
 				throw InternalException("Written file '%s' has no value for partition key '%s'", file, key.name);
 			}
-			partition.values.push_back(value->second);
+			partition.values.push_back(HivePartitioning::Unescape(value->second));
 		}
 		partitions.emplace(directory, std::move(partition));
 	}
@@ -422,8 +433,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 SourceResultType GlueHiveInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                  OperatorSourceInput &input) const {
 	auto &state = sink_state->Cast<GlueHiveInsertGlobalState>();
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(state.insert_count)));
+	chunk.data[0].Append(Value::BIGINT(NumericCast<int64_t>(state.insert_count)));
+	chunk.CheckCardinality(1);
 	return SourceResultType::FINISHED;
 }
 

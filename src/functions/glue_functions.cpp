@@ -101,23 +101,23 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 	auto &bind_data = data.bind_data->Cast<GlueGetTableResponseBindData>();
 	auto &table = bind_data.table;
 
-	output.SetValue(0, 0, Value(table.database_name));
-	output.SetValue(1, 0, Value(table.name));
-	output.SetValue(2, 0, Value(GlueTableFormatToString(table.GetFormat())));
-	output.SetValue(3, 0, Value(table.glue_table_type));
-	output.SetValue(4, 0, Value(table.location));
-	output.SetValue(5, 0, Value(table.serde_library));
-	output.SetValue(6, 0, ColumnsToValue(table.columns, output.data[6].GetType()));
-	output.SetValue(7, 0, ColumnsToValue(table.partition_keys, output.data[7].GetType()));
-	output.SetValue(8, 0, MapToValue(table.parameters));
-	output.SetValue(9, 0, MapToValue(table.serde_parameters));
+	output.data[0].Append(Value(table.database_name));
+	output.data[1].Append(Value(table.name));
+	output.data[2].Append(Value(GlueTableFormatToString(table.GetFormat())));
+	output.data[3].Append(Value(table.glue_table_type));
+	output.data[4].Append(Value(table.location));
+	output.data[5].Append(Value(table.serde_library));
+	output.data[6].Append(ColumnsToValue(table.columns, output.data[6].GetType()));
+	output.data[7].Append(ColumnsToValue(table.partition_keys, output.data[7].GetType()));
+	output.data[8].Append(MapToValue(table.parameters));
+	output.data[9].Append(MapToValue(table.serde_parameters));
 
 	// The complete Glue Table object: JSON as serialized by the AWS SDK, cast to VARIANT
 	Vector json(LogicalType::JSON(), 1);
 	json.SetValue(0, Value(bind_data.raw_json));
 	VectorOperations::Cast(context, json, output.data[10], 1);
 
-	output.SetCardinality(1);
+	output.CheckCardinality(1);
 }
 
 struct GlueGetDatabaseResponseBindData : public TableFunctionData {
@@ -167,17 +167,17 @@ void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &dat
 		return value.empty() ? Value(LogicalType::VARCHAR) : Value(value);
 	};
 
-	output.SetValue(0, 0, Value(database.name));
-	output.SetValue(1, 0, optional_string(database.description));
-	output.SetValue(2, 0, optional_string(database.location_uri));
-	output.SetValue(3, 0, MapToValue(database.parameters));
+	output.data[0].Append(Value(database.name));
+	output.data[1].Append(optional_string(database.description));
+	output.data[2].Append(optional_string(database.location_uri));
+	output.data[3].Append(MapToValue(database.parameters));
 
 	// The complete Glue Database object: JSON as serialized by the AWS SDK, cast to VARIANT
 	Vector json(LogicalType::JSON(), 1);
 	json.SetValue(0, Value(bind_data.raw_json));
 	VectorOperations::Cast(context, json, output.data[4], 1);
 
-	output.SetCardinality(1);
+	output.CheckCardinality(1);
 }
 
 } // namespace

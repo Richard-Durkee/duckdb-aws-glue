@@ -72,6 +72,16 @@ ALTER TABLE ro_datalake.default.ro_orders ADD COLUMN extra INTEGER;
 read-only mode
 
 statement error
+ALTER TABLE ro_datalake.default.ro_orders SET (owner = 'analytics');
+----
+read-only mode
+
+statement error
+ALTER TABLE ro_datalake.default.ro_orders RESET (owner);
+----
+read-only mode
+
+statement error
 CREATE SCHEMA ro_datalake.ro_schema;
 ----
 read-only mode

@@ -240,11 +240,19 @@ INSERT INTO my_datalake.default.pp_orders_twin VALUES (8, 50.0, '2016-05-14', 'I
 statement ok
 CALL truncate_duckdb_logs();
 
-statement ok
-SELECT sum(c) FROM (
-SELECT count(*) c FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'IN' GROUP BY o.dt
-UNION ALL
-SELECT count(*) FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
+query II
+EXPLAIN SELECT sum(c) FROM (
+    SELECT count(*) c FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt
+    UNION ALL
+    SELECT count(*) FROM my_datalake.default.pp_orders o JOIN my_datalake.default.pp_orders_twin t ON o.dt = t.dt WHERE o.country = 'US' GROUP BY o.dt);
+----
+physical_plan	<REGEX>:.*CTE Name: __common_subplan.*
+
+# only the costing lists, one partition directory of each table: the common subplan optimizer lists nothing
+query I
+SELECT count(*) FROM listed_dirs();
+----
+2
 
 statement ok
 CALL truncate_duckdb_logs();

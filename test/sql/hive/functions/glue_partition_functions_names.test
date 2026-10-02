@@ -1,0 +1,139 @@
+# name: test/sql/hive/functions/glue_partition_functions_names.test
+# description: the glue partition functions resolve a partially qualified table name like a query does
+# group: [functions]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.names_orders;
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.names_view;
+
+statement ok
+CREATE TABLE my_datalake.default.names_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CREATE VIEW my_datalake.default.names_view AS SELECT 1 AS one;
+
+statement ok
+CREATE TABLE memory.main.names_local (id INTEGER);
+
+statement ok
+USE my_datalake.default;
+
+statement ok
+CALL glue_add_partition('names_orders', {dt: 'a'});
+
+statement ok
+CALL glue_add_partition('default.names_orders', {dt: 'b'});
+
+query I
+SELECT dt FROM glue_partitions('names_orders') ORDER BY dt;
+----
+a
+b
+
+query I
+SELECT dt FROM glue_partitions('default.names_orders') ORDER BY dt;
+----
+a
+b
+
+statement ok
+CALL glue_rename_partition('names_orders', {dt: 'b'}, {dt: 'c'});
+
+statement ok
+CALL glue_set_partition_location('names_orders', {dt: 'c'}, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/names_moved');
+
+query II
+SELECT dt, location FROM glue_partitions('names_orders') WHERE dt = 'c';
+----
+c	{DEFAULT_S3_LOCATION}/{TEST_DIR}/names_moved
+
+statement ok
+CALL glue_drop_partition('default.names_orders', {dt: 'a'});
+
+statement ok
+CALL glue_alter_table('names_orders',
+    [{action: 'add', if_not_exists: false, if_exists: NULL::BOOLEAN,
+      partition: [{key: 'dt', value: 'd'}],
+      new_partition: NULL::STRUCT(key VARCHAR, value VARCHAR)[], location: NULL::VARCHAR}]);
+
+query I
+SELECT dt FROM glue_partitions('names_orders') ORDER BY dt;
+----
+c
+d
+
+statement ok
+CALL glue_set_table_location('names_orders', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/names_table');
+
+query I
+SELECT location FROM glue_get_table_response('names_orders');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/names_table
+
+# the SQL form passes the table name as written
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+ALTER TABLE names_orders ADD PARTITION (dt = 'e');
+
+statement ok
+ALTER TABLE "default".names_orders DROP PARTITION (dt = 'c');
+
+query I
+SELECT dt FROM glue_partitions('names_orders') ORDER BY dt;
+----
+d
+e
+
+statement ok
+RESET active_grammar_extensions;
+
+statement error
+SELECT * FROM glue_partitions('names_view');
+----
+has no partitions
+
+statement error
+SELECT * FROM glue_partitions('names_missing');
+----
+does not exist
+
+statement ok
+USE memory;
+
+statement error
+SELECT * FROM glue_partitions('names_local');
+----
+glue_partitions only works on tables of a Glue catalog
+
+statement error
+CALL glue_add_partition('names_local', {id: 1});
+----
+glue_add_partition only works on tables of a Glue catalog
+
+statement error
+SELECT * FROM glue_partitions('names_orders');
+----
+does not exist
+
+statement ok
+DROP VIEW my_datalake.default.names_view;
+
+statement ok
+DROP TABLE my_datalake.default.names_orders;

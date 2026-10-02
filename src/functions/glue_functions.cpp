@@ -1,6 +1,7 @@
 #include "functions/glue_functions.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
+#include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -24,28 +25,13 @@ struct GlueGetTableResponseState : public GlobalTableFunctionState {
 
 unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto qualified = QualifiedName::Parse(input.inputs[0].GetValue<string>());
-	if (qualified.Catalog().empty() || qualified.Schema().empty()) {
-		throw BinderException("glue_get_table_response expects a fully qualified table name: "
-		                      "'<catalog>.<schema>.<table>', got '%s'",
-		                      input.inputs[0].GetValue<string>());
-	}
-	auto catalog = Catalog::GetCatalogEntry(context, qualified.Catalog());
-	if (!catalog) {
-		throw BinderException("Catalog '%s' does not exist", qualified.Catalog().GetIdentifierName());
-	}
-	if (catalog->GetCatalogType() != "glue") {
-		throw BinderException("glue_get_table_response only works on tables of a Glue catalog, '%s' is a %s catalog",
-		                      qualified.Catalog().GetIdentifierName(), catalog->GetCatalogType());
-	}
-	auto &glue_catalog = catalog->Cast<GlueCatalog>();
-
+	auto name = ResolveGlueTableName(context, "glue_get_table_response", input.inputs[0].GetValue<string>());
+	auto &catalog = Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
 	auto result = make_uniq<GlueGetTableResponseBindData>();
-	if (!GlueAPI::GetTable(context, glue_catalog, qualified.Schema().GetIdentifierName(),
-	                       qualified.Name().GetIdentifierName(), result->table, &result->raw_json)) {
-		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'",
-		                       qualified.Schema().GetIdentifierName(), qualified.Name().GetIdentifierName(),
-		                       qualified.Catalog().GetIdentifierName());
+	if (!GlueAPI::GetTable(context, catalog, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
+	                       result->table, &result->raw_json)) {
+		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
+		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
 	}
 
 	auto column_type = LogicalType::LIST(LogicalType::STRUCT(
@@ -101,26 +87,117 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 	auto &bind_data = data.bind_data->Cast<GlueGetTableResponseBindData>();
 	auto &table = bind_data.table;
 
-	output.SetValue(0, 0, Value(table.database_name));
-	output.SetValue(1, 0, Value(table.name));
-	output.SetValue(2, 0, Value(GlueTableFormatToString(table.GetFormat())));
-	output.SetValue(3, 0, Value(table.glue_table_type));
-	output.SetValue(4, 0, Value(table.location));
-	output.SetValue(5, 0, Value(table.serde_library));
-	output.SetValue(6, 0, ColumnsToValue(table.columns, output.data[6].GetType()));
-	output.SetValue(7, 0, ColumnsToValue(table.partition_keys, output.data[7].GetType()));
-	output.SetValue(8, 0, MapToValue(table.parameters));
-	output.SetValue(9, 0, MapToValue(table.serde_parameters));
+	output.data[0].Append(Value(table.database_name));
+	output.data[1].Append(Value(table.name));
+	output.data[2].Append(Value(GlueTableFormatToString(table.GetFormat())));
+	output.data[3].Append(Value(table.glue_table_type));
+	output.data[4].Append(Value(table.location));
+	output.data[5].Append(Value(table.serde_library));
+	output.data[6].Append(ColumnsToValue(table.columns, output.data[6].GetType()));
+	output.data[7].Append(ColumnsToValue(table.partition_keys, output.data[7].GetType()));
+	output.data[8].Append(MapToValue(table.parameters));
+	output.data[9].Append(MapToValue(table.serde_parameters));
 
 	// The complete Glue Table object: JSON as serialized by the AWS SDK, cast to VARIANT
 	Vector json(LogicalType::JSON(), 1);
 	json.SetValue(0, Value(bind_data.raw_json));
 	VectorOperations::Cast(context, json, output.data[10], 1);
 
-	output.SetCardinality(1);
+	output.CheckCardinality(1);
+}
+
+struct GlueGetDatabaseResponseBindData : public TableFunctionData {
+	GlueDatabaseInfo database;
+	string raw_json;
+};
+
+unique_ptr<FunctionData> GlueGetDatabaseResponseBind(ClientContext &context, TableFunctionBindInput &input,
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto components = QualifiedName::ParseComponents(input.inputs[0].GetValue<string>());
+	if (components.size() == 1) {
+		// an unqualified database name: resolve it the way a query would (search path, default catalog)
+		auto &schema = Catalog::GetSchema(context, Identifier(), components[0]);
+		components = {schema.ParentCatalog().GetName(), Identifier(schema.name)};
+	}
+	if (components.size() != 2) {
+		throw BinderException("glue_get_database_response expects a database name: '<catalog>.<database>' or "
+		                      "'<database>', got '%s'",
+		                      input.inputs[0].GetValue<string>());
+	}
+	auto &catalog_name = components[0];
+	auto database_name = components[1].GetIdentifierName();
+	auto catalog = Catalog::GetCatalogEntry(context, catalog_name);
+	if (!catalog) {
+		throw BinderException("Catalog '%s' does not exist", catalog_name.GetIdentifierName());
+	}
+	if (catalog->GetCatalogType() != "glue") {
+		throw BinderException("glue_get_database_response only works on a Glue catalog, '%s' is a %s catalog",
+		                      catalog_name.GetIdentifierName(), catalog->GetCatalogType());
+	}
+	auto result = make_uniq<GlueGetDatabaseResponseBindData>();
+	if (!GlueAPI::GetDatabase(context, catalog->Cast<GlueCatalog>(), database_name, result->database,
+	                          &result->raw_json)) {
+		throw CatalogException("Database '%s' does not exist in Glue catalog '%s'", database_name,
+		                       catalog_name.GetIdentifierName());
+	}
+	names = {"database_name", "description", "location_uri", "parameters", "response"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR,
+	                LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR), LogicalType::VARIANT()};
+	return std::move(result);
+}
+
+void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueGetTableResponseState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	auto &bind_data = data.bind_data->Cast<GlueGetDatabaseResponseBindData>();
+	auto &database = bind_data.database;
+	auto optional_string = [](const string &value) {
+		return value.empty() ? Value(LogicalType::VARCHAR) : Value(value);
+	};
+
+	output.data[0].Append(Value(database.name));
+	output.data[1].Append(optional_string(database.description));
+	output.data[2].Append(optional_string(database.location_uri));
+	output.data[3].Append(MapToValue(database.parameters));
+
+	// The complete Glue Database object: JSON as serialized by the AWS SDK, cast to VARIANT
+	Vector json(LogicalType::JSON(), 1);
+	json.SetValue(0, Value(bind_data.raw_json));
+	VectorOperations::Cast(context, json, output.data[4], 1);
+
+	output.CheckCardinality(1);
 }
 
 } // namespace
+
+QualifiedName ResolveGlueTableName(ClientContext &context, const string &function_name, const string &table_name) {
+	auto qualified = QualifiedName::Parse(table_name);
+	if (qualified.Catalog().empty() || qualified.Schema().empty()) {
+		// a partially qualified name: resolve it the way a query would (search path, default catalog)
+		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, qualified);
+		auto &entry = Catalog::GetEntry(context, lookup);
+		qualified = QualifiedName(entry.ParentCatalog().GetName(), Identifier(entry.ParentSchema().name),
+		                          Identifier(entry.name));
+	}
+	auto catalog = Catalog::GetCatalogEntry(context, qualified.Catalog());
+	if (!catalog) {
+		throw BinderException("Catalog '%s' does not exist", qualified.Catalog().GetIdentifierName());
+	}
+	if (catalog->GetCatalogType() != "glue") {
+		throw BinderException("%s only works on tables of a Glue catalog, '%s' is a %s catalog", function_name,
+		                      qualified.Catalog().GetIdentifierName(), catalog->GetCatalogType());
+	}
+	return qualified;
+}
+
+TableFunction GetGlueGetDatabaseResponseFunction() {
+	TableFunction function("glue_get_database_response", {LogicalType::VARCHAR}, GlueGetDatabaseResponseScan,
+	                       GlueGetDatabaseResponseBind, GlueGetTableResponseInit);
+	return function;
+}
 
 TableFunction GetGlueGetTableResponseFunction() {
 	TableFunction function("glue_get_table_response", {LogicalType::VARCHAR}, GlueGetTableResponseScan,

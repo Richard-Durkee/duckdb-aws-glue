@@ -1,7 +1,9 @@
 #pragma once
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
+#include "duckdb/parser/parsed_expression.hpp"
 
 #include "core/glue_info.hpp"
 #include "catalog/glue_table_set.hpp"
@@ -19,6 +21,10 @@ struct GlueCreateTableOptions {
 	string csv_delimiter = ",";
 	string csv_quote;
 	string csv_escape;
+	//! BucketColumns / NumberOfBuckets / SortColumns, named as in Glue's StorageDescriptor
+	vector<string> bucket_columns;
+	int32_t number_of_buckets = -1;
+	vector<GlueColumn> sort_columns;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
 };
@@ -50,10 +56,17 @@ public:
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 
+	//! Bind and evaluate the constant expressions of a WITH (<key> = <value>, ...) option list
+	static vector<pair<string, Value>>
+	EvaluateOptions(ClientContext &context, const case_insensitive_map_t<unique_ptr<ParsedExpression>> &options,
+	                const string &statement);
 	static GlueCreateTableOptions ParseCreateTableOptions(ClientContext &context, const CreateTableInfo &create_info);
+	//! BucketColumns, NumberOfBuckets or SortColumns (case-insensitive)
+	static bool IsBucketingOption(const string &key);
 
 private:
 	static bool CatalogTypeIsSupported(CatalogType type);
+	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
 
 public:
 	//! The database definition as returned by Glue

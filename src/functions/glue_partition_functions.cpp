@@ -193,15 +193,9 @@ string DefaultPartitionLocation(const GluePartitionTarget &target, const vector<
 	return location;
 }
 
-//! The typed value of a partition key for the glue_partitions() listing. The conversion is shared with the scan, the
-//! partition pruning and the partition-column statistics (GlueTypes::PartitionValue) so that all four surfaces agree on
-//! every value they can both represent -- a second, nearly-identical converter living here is what let them drift
-//! apart.
-//!
-//! They differ in exactly one place, and the difference is the point. The shared conversion THROWS on a value the
-//! declared type cannot hold, which is right for the scan: it cannot produce a correct row. This function exists to
-//! report what Glue holds, and a table with one bad partition among thousands is when it is most needed, so the typed
-//! column reads NULL rather than the whole listing becoming unusable.
+//! GlueTypes::PartitionValue, but a partition value that can't be cast to the key's type is NULL instead of throwing,
+//! so one bad partition doesn't make the whole glue_partitions() listing fail (e.g. 'abc' for an INT key lists as
+//! NULL).
 static Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
                                    const LogicalType &type) {
 	try {

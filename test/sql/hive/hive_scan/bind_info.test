@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/bind_info.test
-# description: Hive scan get_bind_info: a filtered catalog scan plans without crashing; hive_scan() selects external
+# description: Hive scan get_bind_info: a filtered catalog scan plans without crashing; hive_scan() delegates
 # group: [hive_scan]
 
 require httpfs
@@ -47,7 +47,7 @@ SELECT id FROM my_datalake.default.bi_orders WHERE dt = '2016-05-15';
 ----
 2
 
-# hive_scan() has no catalog entry: get_bind_info selects the external (null-table) branch; reads unchanged
+# hive_scan() has no catalog entry, so the delegated bind info carries the format reader's scan type with a null table
 query III
 SELECT id, amount, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bi_orders',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},

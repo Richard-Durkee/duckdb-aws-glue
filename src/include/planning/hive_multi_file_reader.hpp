@@ -135,6 +135,9 @@ public:
 
 	static unique_ptr<MultiFileReader> CreateInstance(const BoundTableFunction &table);
 
+	//! The scan info behind this reader, which the Hive scan's bind info delegates to the format reader and extends
+	const HiveScanInfo &ScanInfo() const;
+
 	unique_ptr<MultiFileReader> Copy() const override;
 	shared_ptr<MultiFileList> CreateFileList(ClientContext &context, const vector<string> &paths,
 	                                         const FileGlobInput &glob_input) override;
@@ -149,9 +152,6 @@ public:
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
 	                  optional_ptr<MultiFileReaderGlobalState> global_state) override;
-
-private:
-	const HiveScanInfo &ScanInfo() const;
 
 private:
 	shared_ptr<HiveScanInfo> scan_info;

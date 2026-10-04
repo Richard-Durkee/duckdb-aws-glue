@@ -16,7 +16,8 @@ class FileSystem;
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
 struct HiveScanInfo : public TableFunctionInfo {
-	//! Where the table comes from, for error messages: a Glue table or a hive_scan root
+	//! Where the table comes from: a Glue table in the attached catalog catalog_name, or a hive_scan root
+	string catalog_name;
 	string database_name;
 	string table_name;
 	//! The Glue catalog table this scan reads, or null when the scan is a hive_scan over a location: reported
@@ -67,6 +68,9 @@ public:
 
 	const vector<idx_t> &PartitionIndexes() const {
 		return partition_indexes;
+	}
+	const HiveScanInfo &ScanInfo() const {
+		return *scan_info;
 	}
 	FileExpandResult GetExpandResult() const override;
 	//! Prune on the table filters pushed in when the scan starts
@@ -129,7 +133,7 @@ class HiveMultiFileReader : public MultiFileReader {
 public:
 	explicit HiveMultiFileReader(shared_ptr<HiveScanInfo> scan_info);
 
-	static unique_ptr<MultiFileReader> CreateInstance(const TableFunction &table);
+	static unique_ptr<MultiFileReader> CreateInstance(const BoundTableFunction &table);
 
 	unique_ptr<MultiFileReader> Copy() const override;
 	shared_ptr<MultiFileList> CreateFileList(ClientContext &context, const vector<string> &paths,

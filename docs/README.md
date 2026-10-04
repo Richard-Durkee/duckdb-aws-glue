@@ -50,8 +50,12 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
 
 ## Writing
 
-- `CREATE SCHEMA` creates a Glue database with LocationUri `<DEFAULT_LOCATION>/<schema>`, or without a LocationUri
-  when the catalog was attached without `DEFAULT_LOCATION`.
+- `CREATE SCHEMA [IF NOT EXISTS] ... [WITH (comment = '...', location = '...', <property> = '...')]` creates a Glue
+  database. `comment` is its Description, `location` its LocationUri (default `<DEFAULT_LOCATION>/<schema>`, or none
+  when the catalog was attached without `DEFAULT_LOCATION`), and any other key a database parameter (Hive's
+  `DBPROPERTIES`). A `DEFAULT_LOCATION` on ATTACH still decides where new tables go, over the database's LocationUri.
+- `ALTER SCHEMA ... SET (<key> = '...', ...)` merges options into the Glue database (UpdateDatabase), with the same
+  keys as `CREATE SCHEMA`; `ALTER SCHEMA ... RESET (<key>, ...)` removes them. Keys are case-insensitive.
 - `CREATE TABLE ... [PARTITIONED BY (col, ...)] [WITH (format = 'parquet' | 'csv' | 'json' | 'avro', location = '...',
   <property> = '...')]` creates a parquet (default), csv (LazySimpleSerDe, `,` delimited, no header), json
   (JsonSerDe, one object per line) or avro (AvroSerDe)
@@ -79,8 +83,14 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
   Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
+- `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
+  `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
+  parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`
+  becomes `'4'`); a key may be quoted (`'parquet.compression' = 'ZSTD'`). The parameters the table format is read
+  from (`table_type`, `spark.sql.sources.provider`, `metadata_location`) can not be changed this way.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
-  a database when the database is dropped.
+  a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
+  `CASCADE` is given.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
 is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported.
@@ -123,7 +133,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 
 DuckDB has no `ALTER TABLE ... PARTITION` syntax, so the Hive partition statements are table functions. The
 partition is given as a struct naming every partition key; values are stored as strings in Glue, in partition key
-order.
+order. The table name may be partially qualified (`'db.t'`, or `'t'` after `USE cat.db`); it is resolved like in a
+query.
 
 | function | Hive statement |
 |----------|------------------|
@@ -175,7 +186,14 @@ SELECT response.StorageDescriptor.Location FROM glue_get_table_response('my_data
 ```
 
 It returns one row with the classification, the Glue table type, location, SerDe, columns, partition keys and
-parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`.
+parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`. A partially qualified name
+(`'default.some_table'`, or `'some_table'` after `USE my_datalake.default`) is resolved like in a query, through the
+table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
+name.
+
+`glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
+description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
+`'<database>'` is resolved like in a query, through the search path.
 
 ## HTTP transport and logging
 

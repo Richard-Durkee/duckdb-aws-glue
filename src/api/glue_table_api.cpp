@@ -41,6 +41,33 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 	return result;
 }
 
+bool GlueAPI::GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                              string &table_name) {
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	Aws::String next_token;
+	do {
+		Aws::Glue::Model::GetTablesRequest request;
+		SetCatalogId(request, catalog);
+		request.SetDatabaseName(database_name);
+		request.SetMaxResults(1);
+		if (!next_token.empty()) {
+			request.SetNextToken(next_token);
+		}
+		auto outcome = client->GetTables(request);
+		if (!outcome.IsSuccess()) {
+			ThrowGlueError(outcome, StringUtil::Format("GetTables (database '%s')", database_name));
+		}
+		auto &tables = outcome.GetResult();
+		if (!tables.GetTableList().empty()) {
+			table_name = ToStdString(tables.GetTableList()[0].GetName());
+			return true;
+		}
+		next_token = tables.GetNextToken();
+	} while (!next_token.empty());
+	return false;
+}
+
 bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                        const string &table_name, GlueTableInfo &result, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
@@ -324,6 +351,24 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetLocation(location);
 		table_input.SetStorageDescriptor(storage_descriptor);
+	});
+}
+
+void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                    const string &table_name, const vector<pair<string, string>> &set,
+                                    const vector<string> &unset) {
+	// Reached only through ALTER TABLE, which the binder refuses on a read-only attach before it gets here.
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+		auto parameters = table_input.GetParameters();
+		for (auto &key : unset) {
+			parameters.erase(key);
+		}
+		for (auto &entry : set) {
+			parameters[entry.first] = entry.second;
+		}
+		table_input.SetParameters(parameters);
 	});
 }
 

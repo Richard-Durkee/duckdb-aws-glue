@@ -213,4 +213,9 @@ string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
 }
 
+bool GlueTableInfo::IsFormatParameter(const string &key) {
+	return StringUtil::CIEquals(key, "table_type") || StringUtil::CIEquals(key, "spark.sql.sources.provider") ||
+	       StringUtil::CIEquals(key, "metadata_location");
+}
+
 } // namespace duckdb

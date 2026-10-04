@@ -2,6 +2,8 @@
 
 #include "core/glue_info.hpp"
 
+#include "duckdb/common/pair.hpp"
+
 #include <memory>
 
 namespace Aws {
@@ -22,11 +24,15 @@ public:
 
 	//! List all databases of the catalog
 	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog);
-	//! Fetch a single database, returns false if it does not exist
+	//! Fetch a single database, returns false if it does not exist. 'raw_json' (optional) receives the Glue Database
+	//! object of the response as JSON.
 	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                        GlueDatabaseInfo &result);
+	                        GlueDatabaseInfo &result, string *raw_json = nullptr);
 	//! List all tables of a database
 	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name);
+	//! Returns false if the database holds no tables (or views), otherwise true with the name of one of them
+	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                            string &table_name);
 	//! Fetch a single table, returns false if it does not exist. 'raw_json' (optional) receives the Glue Table
 	//! object of the response as JSON.
 	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -34,6 +40,8 @@ public:
 
 	//! Create a database, throws a CatalogException if it already exists
 	static void CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database);
+	//! Replace the description, location and parameters of a database, keeping everything else of its Glue definition
+	static void UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database);
 	//! Delete a database (and all of its tables), throws a CatalogException if it does not exist
 	static void DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name);
 	//! Create a standard (Hive style) Glue table storing parquet files at 'table.location', with the columns and
@@ -49,6 +57,12 @@ public:
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
 	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                             const string &table_name, const string &location);
+	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
+	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
+	//! table format is derived from (GlueTableInfo::IsFormatParameter) are refused.
+	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                  const string &table_name, const vector<pair<string, string>> &set,
+	                                  const vector<string> &unset);
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const vector<string> &values, const string &location);

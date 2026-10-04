@@ -69,6 +69,8 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 			StringUtil::RTrim(attach_options.default_location, "/");
 		} else if (lower_name == "default_schema") {
 			attach_options.default_schema = Identifier(entry.second.ToString());
+		} else if (lower_name == "verify_connection") {
+			attach_options.verify_connection = entry.second.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else {
 			throw InvalidConfigurationException("Unrecognized option for Glue attach: '%s'", entry.first);
 		}
@@ -88,8 +90,10 @@ unique_ptr<Catalog> GlueAttach::Attach(optional_ptr<StorageExtensionInfo> storag
 	}
 
 	auto catalog = make_uniq<GlueCatalog>(db, options.access_mode, std::move(attach_options));
-	// Fail early when the catalog can not be reached with these credentials
-	GlueAPI::VerifyConnection(context, *catalog);
+	// Fail early when the catalog can not be reached with these credentials (unless opted out)
+	if (catalog->options.verify_connection) {
+		GlueAPI::VerifyConnection(context, *catalog);
+	}
 	if (!catalog->options.default_schema.empty()) {
 		GlueDatabaseInfo database;
 		if (!GlueAPI::GetDatabase(context, *catalog, catalog->options.default_schema.GetIdentifierName(), database)) {

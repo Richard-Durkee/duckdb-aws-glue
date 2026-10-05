@@ -354,6 +354,24 @@ void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, con
 	});
 }
 
+void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                    const string &table_name, const vector<pair<string, string>> &set,
+                                    const vector<string> &unset) {
+	// Reached only through ALTER TABLE, which the binder refuses on a read-only attach before it gets here.
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+		auto parameters = table_input.GetParameters();
+		for (auto &key : unset) {
+			parameters.erase(key);
+		}
+		for (auto &entry : set) {
+			parameters[entry.first] = entry.second;
+		}
+		table_input.SetParameters(parameters);
+	});
+}
+
 void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           const string &table_name) {
 	CheckWritable(catalog, "DeleteTable");

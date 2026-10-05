@@ -279,7 +279,7 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	} else {
 		copy.file_path = location;
 		copy.partition_output = false;
-		// without it the copy also opens a file at the table location itself (unsupported with per-thread output)
+		// false makes the first Sink open a writer at the location itself, leaving an object at the table key
 		copy.write_empty_file = true;
 		copy.per_thread_output = true;
 	}
@@ -434,8 +434,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 SourceResultType GlueHiveInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,
                                                  OperatorSourceInput &input) const {
 	auto &state = sink_state->Cast<GlueHiveInsertGlobalState>();
-	chunk.SetCardinality(1);
-	chunk.SetValue(0, 0, Value::BIGINT(NumericCast<int64_t>(state.insert_count)));
+	chunk.data[0].Append(Value::BIGINT(NumericCast<int64_t>(state.insert_count)));
+	chunk.CheckCardinality(1);
 	return SourceResultType::FINISHED;
 }
 

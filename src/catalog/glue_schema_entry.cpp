@@ -314,6 +314,7 @@ static void CheckEntryType(optional_ptr<CatalogEntry> existing, CatalogType expe
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) {
 	auto &context = transaction.GetContext();
+	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	auto &base = info.Base();
 	auto table_name = base.GetTableName().GetIdentifierName();
@@ -425,6 +426,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateIndex(CatalogTransaction trans
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transaction, CreateViewInfo &info) {
 	auto &context = transaction.GetContext();
+	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	auto view_name = info.GetQualifiedName().Name().GetIdentifierName();
 
@@ -592,6 +594,7 @@ void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInf
 
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &context = transaction.GetContext();
+	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	auto table_name = info.GetQualifiedName().Name().GetIdentifierName();
 
@@ -743,6 +746,7 @@ void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 	if (!CatalogTypeIsSupported(info.type)) {
 		throw NotImplementedException("Glue databases only support dropping tables");
 	}
+	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	auto table_name = info.GetQualifiedName().Name().GetIdentifierName();
 

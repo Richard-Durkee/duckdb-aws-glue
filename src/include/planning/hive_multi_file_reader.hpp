@@ -76,8 +76,9 @@ public:
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
 	//! The data files of one directory the scan reads, for measuring the table: the first partition's, or the location
-	//! of an unpartitioned table. Never the table root of a partitioned table, which is listed recursively. The listing
-	//! is kept until the query ends, and any scan listing the same directory in the query takes it from there.
+	//! of an unpartitioned table. The listing is kept until the query ends, and any scan listing the same directory in
+	//! the query takes it from there. When the scan lists the table root, the files of the first partition read in the
+	//! root's first page instead, and the scan continues that listing.
 	vector<OpenFileInfo> ListSampleDirectory() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
@@ -95,6 +96,8 @@ private:
 	void PlanListings() const;
 	void ListRoot(FileSystem &fs, const vector<idx_t> &partitions) const;
 	void ListPartition(FileSystem &fs, idx_t partition_index) const;
+	//! The files of the first of 'partitions' in the root listing, fetching no more of it than needed
+	vector<OpenFileInfo> SampleRootPartition(const vector<idx_t> &partitions) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than

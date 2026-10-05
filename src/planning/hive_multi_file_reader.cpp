@@ -225,8 +225,9 @@ void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions
 	if (root.empty()) {
 		throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 	}
-	// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request
-	auto files = fs.GlobFiles(root + "/**", FileGlobOptions::ALLOW_EMPTY);
+	// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request, continued
+	// from the pages the sample fetched
+	auto files = GetRootListing(client_context, root)->GetAllFiles();
 	unordered_set<idx_t> reading;
 	for (auto partition_index : partitions) {
 		auto &partition = scan_info->partitions[partition_index];
@@ -330,7 +331,9 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	if (jobs.empty()) {
 		return files;
 	}
-	// the partition the scan lists first, or the first of those a root listing would cover
+	if (jobs[0].root) {
+		return SampleRootPartition(jobs[0].partitions);
+	}
 	auto partition_index = jobs[0].partitions[0];
 	auto location = scan_info->partitions[partition_index].location;
 	StringUtil::RTrim(location, "/");
@@ -347,6 +350,55 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 		}
 		scan_info->file_partitions[file.path] = partition_index;
 		files.push_back(std::move(file));
+	}
+	return files;
+}
+
+vector<OpenFileInfo> HiveMultiFileList::SampleRootPartition(const vector<idx_t> &partitions) const {
+	auto root = scan_info->root_location;
+	StringUtil::RTrim(root, "/");
+	auto root_prefix = root + "/";
+	auto listing = GetRootListing(client_context, root);
+	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
+	BuildPartitionLocations();
+	optional_idx sampled;
+	string sampled_prefix;
+	bool in_sampled = false;
+	vector<OpenFileInfo> files;
+	MultiFileListScanData scan;
+	listing->InitializeScan(scan);
+	// the pages fetched so far, and more only to find a partition the scan reads or while it may continue
+	scan.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
+	OpenFileInfo file;
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	while (true) {
+		if (!listing->Scan(scan, file)) {
+			if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH || (sampled.IsValid() && !in_sampled)) {
+				break;
+			}
+			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
+			continue;
+		}
+		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
+			continue;
+		}
+		in_sampled = sampled.IsValid() && StringUtil::StartsWith(file.path, sampled_prefix);
+		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
+			// pages come in key order, so the sampled partition's files are all seen
+			break;
+		}
+		auto owner = OwningPartition(file.path, root_prefix.size());
+		if (!sampled.IsValid() && owner.IsValid() && reading.count(owner.GetIndex())) {
+			sampled = owner;
+			sampled_prefix = scan_info->partitions[owner.GetIndex()].location;
+			StringUtil::RTrim(sampled_prefix, "/");
+			sampled_prefix += "/";
+			in_sampled = true;
+		}
+		if (sampled.IsValid() && owner == sampled) {
+			scan_info->file_partitions[file.path] = sampled.GetIndex();
+			files.push_back(file);
+		}
 	}
 	return files;
 }

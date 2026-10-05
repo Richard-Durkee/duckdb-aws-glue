@@ -44,10 +44,11 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   location is listed once, recursively (one S3 request per 1000 keys), and the files are matched to their
   partitions by prefix; fewer partitions, and partitions at custom locations, are listed one directory each.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
-  of the table reads, or the location of an unpartitioned table, never the whole table) and reads the row count
-  of its largest file: the parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the
-  table in the query scales that one measurement by the partitions it reads, and a scan that lists the same
-  directory reuses the listing. Avro tables are not measured, so planning them lists nothing.
+  of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
+  first page of that listing, which the scan then continues) and reads the row count of its largest file: the
+  parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
+  that one measurement by the partitions it reads, and a scan that lists the same directory reuses the listing.
+  Avro tables are not measured, so planning them lists nothing.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.

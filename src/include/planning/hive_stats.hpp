@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/open_file_info.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/storage/statistics/node_statistics.hpp"
@@ -11,6 +12,10 @@ class BaseStatistics;
 void AddSampledListing(ClientContext &context, const string &location, const vector<OpenFileInfo> &files);
 //! The listing of 'location' taken by a sample in this query, appended to 'files'
 bool FindSampledListing(ClientContext &context, const string &location, vector<OpenFileInfo> &files);
+
+//! The recursive listing of a table root in this query, fetched page by page as it is read: the sample reads the
+//! first pages and the scan continues from there
+shared_ptr<MultiFileList> GetRootListing(ClientContext &context, const string &root);
 
 //! Cardinality of a Hive scan: one directory of the table, measured once per query, scaled by the partitions read
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p);

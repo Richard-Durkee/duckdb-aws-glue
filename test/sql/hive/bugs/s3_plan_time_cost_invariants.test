@@ -76,13 +76,13 @@ CALL truncate_duckdb_logs();
 statement ok
 EXPLAIN SELECT * FROM my_datalake.default.plancost_wide;
 
-# still ONE listing, for five times the partitions, and of one partition's directory: the table root is listed
-# recursively, so its cost grows with the table
+# still ONE listing, for five times the partitions: the scan reads at least hive_partition_listing_threshold
+# partitions, so the estimate takes the root listing the scan reuses rather than listing a partition on top
 query II
 SELECT count(*), count(*) FILTER (WHERE url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)) LIKE '%/plancost_wide/dt=%')
 FROM duckdb_logs_parsed('HTTP') WHERE request.url LIKE '%list-type=2%';
 ----
-1	1
+1	0
 
 query II
 SELECT request.headers['x-amz-target'], count(*) FROM duckdb_logs_parsed('HTTP')

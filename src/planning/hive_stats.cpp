@@ -57,6 +57,7 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		partition_listings.clear();
 		directory_listings.clear();
+		root_listings.clear();
 	}
 	shared_ptr<HiveTablePartitionListing> GetPartitionListing(const string &table) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
@@ -81,10 +82,21 @@ public:
 		return true;
 	}
 
+	shared_ptr<MultiFileList> GetRootListing(ClientContext &context, const string &root) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &listing = root_listings[root];
+		if (!listing) {
+			auto &fs = FileSystem::GetFileSystem(context);
+			listing = shared_ptr<MultiFileList>(fs.GlobFileList(root + "/**", FileGlobOptions::ALLOW_EMPTY));
+		}
+		return listing;
+	}
+
 private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<HiveTablePartitionListing>> partition_listings DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, vector<OpenFileInfo>> directory_listings DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<MultiFileList>> root_listings DUCKDB_GUARDED_BY(lock);
 };
 
 static string DirectoryKey(const string &location) {
@@ -101,6 +113,11 @@ void AddSampledListing(ClientContext &context, const string &location, const vec
 bool FindSampledListing(ClientContext &context, const string &location, vector<OpenFileInfo> &files) {
 	auto cache = context.registered_state->Get<HiveSampleCache>(HIVE_SAMPLE_CACHE);
 	return cache && cache->GetDirectoryListing(DirectoryKey(location), files);
+}
+
+shared_ptr<MultiFileList> GetRootListing(ClientContext &context, const string &root) {
+	auto cache = context.registered_state->GetOrCreate<HiveSampleCache>(HIVE_SAMPLE_CACHE);
+	return cache->GetRootListing(context, DirectoryKey(root));
 }
 
 //===--------------------------------------------------------------------===//

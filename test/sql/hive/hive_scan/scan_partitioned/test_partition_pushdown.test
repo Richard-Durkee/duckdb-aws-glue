@@ -297,17 +297,16 @@ SELECT id, dt, country FROM my_datalake.default.pp_orders WHERE dt = '2016-05-15
 3	2016-05-15	IN
 4	2016-05-15	US
 
-# the root once, and one of the partitions read, which the cardinality estimate lists while planning: a root
-# listing cannot take over a listing of one partition
+# the root once: the cardinality estimate lists it while planning and the scan reuses that listing
 query II
 SELECT count(*) FILTER (WHERE dir = 'default/pp_orders/'), count(*) FILTER (WHERE dir LIKE 'default/pp_orders/dt=2016-05-15/%') FROM listed_dirs();
 ----
-1	1
+1	0
 
 query I
 SELECT count(*) FROM listed_dirs();
 ----
-2
+1
 
 # the partition at the custom location is still listed on its own
 statement ok
@@ -324,11 +323,11 @@ SELECT dir FROM listed_dirs() WHERE dir NOT LIKE 'default/pp_orders/dt=%' ORDER 
 custom_in/
 default/pp_orders/
 
-# plus the partition the estimate listed
+# and no partition on top: the estimate took the root listing the scan reuses
 query I
 SELECT count(*) FROM listed_dirs() WHERE dir LIKE 'default/pp_orders/dt=%';
 ----
-1
+0
 
 # only the partitions read are matched: the listing sees every directory, the rows come from two
 statement ok
@@ -342,12 +341,12 @@ SELECT count(*) FROM my_datalake.default.pp_orders WHERE country = 'US';
 query II
 SELECT count(*) FILTER (WHERE dir = 'default/pp_orders/'), count(*) FILTER (WHERE dir LIKE 'default/pp_orders/dt=%/country=US/') FROM listed_dirs();
 ----
-1	1
+1	0
 
 query I
 SELECT count(*) FROM listed_dirs();
 ----
-2
+1
 
 statement ok
 RESET hive_partition_listing_threshold;

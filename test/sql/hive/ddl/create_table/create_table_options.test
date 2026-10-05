@@ -151,9 +151,52 @@ statement ok
 DROP TABLE my_datalake.default.ddl_opts_loc;
 
 #---------------------------------------------------------------------------
+# external_location = 's3://amzn-s3-demo-bucket/folder/': the same option
+#---------------------------------------------------------------------------
+# what Athena names the table location of a CREATE TABLE ... AS
+statement ok
+CREATE TABLE my_datalake.default.ddl_opts_ext_loc WITH (external_location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ext_folder/')
+AS SELECT 1 AS id;
+
+query II
+SELECT location, parameters['external_location'] IS NULL
+FROM glue_get_table_response('my_datalake.default.ddl_opts_ext_loc');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/ext_folder	true
+
+query I
+SELECT id FROM my_datalake.default.ddl_opts_ext_loc;
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.ddl_opts_ext_loc;
+
+# the key is case-insensitive, like every other CREATE TABLE option
+statement ok
+CREATE TABLE my_datalake.default.ddl_opts_ext_loc (id INTEGER) WITH (EXTERNAL_LOCATION = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ext_folder');
+
+query I
+SELECT location FROM glue_get_table_response('my_datalake.default.ddl_opts_ext_loc');
+----
+{DEFAULT_S3_LOCATION}/{TEST_DIR}/ext_folder
+
+statement ok
+DROP TABLE my_datalake.default.ddl_opts_ext_loc;
+
+# both name the location, so giving both is a mistake rather than one of them winning
+statement error
+CREATE TABLE my_datalake.default.ddl_opts_ext_loc (id INTEGER) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/one',
+    external_location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/two'
+);
+----
+<REGEX>:.*'location' and 'external_location' are the same option.*
+
+#---------------------------------------------------------------------------
 # TBLPROPERTIES ('classification'='parquet', 'has_encrypted_data'='false', ...)
 #---------------------------------------------------------------------------
-# every WITH key other than type and location becomes a table parameter
+# every WITH key other than type, format, location and the csv dialect becomes a table parameter
 statement ok
 CREATE TABLE my_datalake.default.ddl_opts_props (id INTEGER) WITH (
     'classification' = 'parquet',

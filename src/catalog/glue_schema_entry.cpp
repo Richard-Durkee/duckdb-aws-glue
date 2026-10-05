@@ -259,7 +259,13 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			}
 		} else if (StringUtil::CIEquals(key, "format")) {
 			result.format = HiveFileFormatFromString(string_value);
-		} else if (StringUtil::CIEquals(key, "location")) {
+		} else if (StringUtil::CIEquals(key, "location") || StringUtil::CIEquals(key, "external_location")) {
+			// 'external_location' is what Athena names the table location of a CREATE TABLE ... AS
+			if (!result.location.empty()) {
+				throw BinderException("CREATE TABLE option '%s' was given together with the table location '%s', "
+				                      "'location' and 'external_location' are the same option",
+				                      key, result.location);
+			}
 			result.location = string_value;
 			StringUtil::RTrim(result.location, "/");
 		} else if (StringUtil::CIEquals(key, "delimiter") || StringUtil::CIEquals(key, "quote") ||

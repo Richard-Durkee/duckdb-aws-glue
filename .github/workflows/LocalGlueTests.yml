@@ -48,7 +48,7 @@ jobs:
         run: make release
 
       - name: Run tests
-        run: ./build/release/test/unittest --test-config test/configs/local_glue.json 'test/sql/*'
+        run: make test-local TEST_BUILD=release
 
       - name: Server logs
         if: always()

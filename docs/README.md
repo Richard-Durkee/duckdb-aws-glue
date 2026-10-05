@@ -91,6 +91,12 @@ avro files carry their codec themselves.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
   codec is an error.
+- `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
+  avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
+  column with `glue_replace_columns` to do that deliberately). Partition keys, bucket and sort columns can not be
+  renamed.
+- `COMMENT ON COLUMN` sets the Glue column comment (`IS NULL` removes it); the comments of Glue columns show in
+  `duckdb_columns()`. Comments on partition keys and on views are not supported yet.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`

@@ -102,6 +102,7 @@ GlueSchemaSet &GlueCatalog::GetSchemas() {
 
 optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &context = transaction.GetContext();
+	ThrowIfInExplicitTransaction(context);
 	auto schema_name = info.SchemaName().GetIdentifierName();
 
 	auto existing = schemas.GetEntry(context, schema_name);
@@ -134,6 +135,7 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
+	ThrowIfInExplicitTransaction(context);
 	auto schema_name = info.GetQualifiedName().Name().GetIdentifierName();
 	auto existing = schemas.GetEntry(context, schema_name);
 	if (!existing) {
@@ -183,6 +185,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 
 void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry &schema, AlterSchemaInfo &info) {
 	auto &context = transaction.GetContext();
+	ThrowIfInExplicitTransaction(context);
 	auto schema_name = schema.Cast<GlueSchemaEntry>().database_info.name;
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
@@ -272,7 +275,7 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	if (!context.transaction.IsAutoCommit()) {
 		throw TransactionException("This connection is currently in a transaction. Transaction support is not "
-		                           "provided for Hive tables. Please call COMMIT, ABORT or ROLLBACK before trying "
+		                           "provided for Glue catalogs. Please call COMMIT, ABORT or ROLLBACK before trying "
 		                           "the query again");
 	}
 }

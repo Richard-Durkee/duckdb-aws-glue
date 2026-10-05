@@ -34,7 +34,7 @@ BEGIN;
 statement error
 ALTER TABLE my_datalake.default.txn_alter ADD COLUMN score DOUBLE;
 ----
-<REGEX>:TransactionContext Error.*This connection is currently in a transaction. Transaction support is not provided for Hive tables.*
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction. Transaction support is not provided for Glue catalogs.*
 
 statement ok
 ROLLBACK;

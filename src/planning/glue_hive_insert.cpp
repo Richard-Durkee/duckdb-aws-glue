@@ -279,7 +279,8 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	} else {
 		copy.file_path = location;
 		copy.partition_output = false;
-		copy.write_empty_file = false;
+		// false makes the first Sink open a writer at the location itself, leaving an object at the table key
+		copy.write_empty_file = true;
 		copy.per_thread_output = true;
 	}
 	copy.file_extension = format_name;

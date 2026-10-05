@@ -1,0 +1,37 @@
+# name: test/sql/hive/attach/verify_connection.test
+# description: VERIFY_CONNECTION is accepted as a boolean attach option (both values); unknown options are rejected
+# group: [attach]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+# VERIFY_CONNECTION false is accepted (attach succeeds with the reachability probe skipped)
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS novrfy_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    VERIFY_CONNECTION false
+);
+
+# VERIFY_CONNECTION true (the default) is accepted (attach succeeds with the probe run)
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS vrfy_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    VERIFY_CONNECTION true
+);
+
+# an unrecognized attach option is rejected
+statement error
+ATTACH '{GLUE_CATALOG_ID}' AS bad_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    NONEXISTENT_OPTION 'x'
+);
+----
+Unrecognized option for Glue attach

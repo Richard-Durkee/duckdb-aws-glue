@@ -66,6 +66,7 @@ public:
 
 private:
 	static bool CatalogTypeIsSupported(CatalogType type);
+	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
 
 public:
 	//! The database definition as returned by Glue

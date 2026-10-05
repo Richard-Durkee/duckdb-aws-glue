@@ -1,8 +1,9 @@
 # DuckDB Glue extension
 
 Experimental extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
-SDK Glue client and works with Hive (Glue native) tables stored as parquet on S3. Tables of other formats that Glue
-registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or written.
+SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
+formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
+written.
 
 ```sql
 CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');
@@ -24,8 +25,13 @@ Attach options:
 
 ## Reading
 
-Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet` through a custom
-`MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
+The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
+LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is
+1, delimiter from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per
+line, keys by name) and AvroSerDe with `read_avro` (columns by name) from the avro extension, which is loaded on
+demand. Other SerDes (ORC, Ion, ...) are not supported.
+
+Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
 - The data files are those below the location of every partition Glue lists (`GetPartitions`), at any depth, or
   below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
@@ -85,7 +91,7 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
-  Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
+  Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
@@ -228,7 +234,7 @@ which the tests use in their ATTACH; tests are skipped without a config (`requir
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
-make test-local          # unittest --test-config test/configs/local_glue.json 'test/sql/*'
+make test-local          # unittest --test-config test/configs/local_glue.json 'test/sql/*', with retries
 make glue-fixture-down
 
 AWS_PROFILE=... AWS_CONFIG_FILE=~/.aws/config AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials make test-cloud
@@ -237,6 +243,12 @@ AWS_PROFILE=... AWS_CONFIG_FILE=~/.aws/config AWS_SHARED_CREDENTIALS_FILE=~/.aws
 Both targets set `AWS_EC2_METADATA_DISABLED=true`: the test runner hides `~/.aws`, and without a region from the
 environment or a profile the AWS SDK asks the EC2 instance metadata service for one, which off EC2 hangs for
 minutes per client. A test config can not export process environment variables, so this stays on the command.
+
+`make test-local` runs the tests through DuckDB's `duckdb/scripts/ci/run_tests.py` (Python 3.10+; pick the
+interpreter with `PYTHON=python3.14`), one test per process and one at a time, and reruns a failing test up to twice:
+against the local servers a read right after a write occasionally comes back with no rows. Every retry is reported in
+the output. `TEST_BUILD=release` runs the `release` build instead of
+`relassert`.
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.

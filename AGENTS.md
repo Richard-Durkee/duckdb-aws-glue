@@ -36,7 +36,9 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
 `DEFAULT_S3_LOCATION` and creates the S3 secret; without one every test is skipped (`require-env GLUE_CATALOG_ID`).
 
 - `test/configs/local_glue.json`: moto (Glue, port 5555) + SeaweedFS (S3, port 9100) from `scripts/docker-compose.yml`.
-  `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything.
+  `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything through DuckDB's
+  `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially, retrying a failing test twice: against the local
+  servers a read right after a write occasionally comes back empty.
 - `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
   (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
 

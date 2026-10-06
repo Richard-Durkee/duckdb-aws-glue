@@ -30,7 +30,9 @@ Attach options:
 A table's format is read from its parameters (`table_type`, `spark.sql.sources.provider`, `metadata_location`) and
 otherwise from its InputFormat: Hudi tables (`HoodieParquetInputFormat`, ...) and symlink manifest tables
 (`SymlinkTextInputFormat`, e.g. a Delta `_symlink_format_manifest`) register a Parquet or text SerDe, so only the
-InputFormat tells them apart from a Hive table. They are listed but not read or written, like Iceberg and Delta.
+InputFormat tells them apart from a Hive table. Hudi tables are listed but not read or written, like Iceberg and
+Delta; symlink tables are read through their manifests (see below) but not written. A Delta table whose Glue
+parameters say `DELTA` is a Delta table even when its InputFormat is `SymlinkTextInputFormat`.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
@@ -130,6 +132,14 @@ Compression: every csv and json file is read with the codec DuckDB tells from it
 table records, so a table whose files use more than one codec is read correctly and a stale `write.compression` or
 `compressionType` does not matter. The codec a table records is what writes to it use. Parquet and avro files carry
 their codec themselves.
+
+Symlink tables (InputFormat `SymlinkTextInputFormat`) keep manifests in the table location (or the partition
+locations) instead of data: text files that list the data files, one entry per line, which the SerDe's reader then
+scans. An entry is a file, a glob (`s3://bucket/data/part-*.csv`) or a directory ending in `/` (the files directly
+below it); globs and directories skip hidden files (`_*`, `.*`), as Hadoop does. Every non-hidden file directly in
+the location (not in its subdirectories) is a manifest, blank lines are ignored, repeated `/` in a location or entry is collapsed, and the files a
+partition's manifests list belong to that partition wherever they are. Only S3 paths (`s3://`, `s3a://`, `s3n://`) are
+followed; any other entry fails the scan, so that a manifest can not make DuckDB read local files.
 
 ## Writing
 
@@ -262,6 +272,9 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
   `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
   says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name. For json,
   `ignore_errors := true` reads a line that is not valid JSON as a row of NULLs.
+- `input_format := 'symlink'` (or Hive's `'org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat'`): the root and
+  partition locations hold manifests listing the data files, read like the locations of a Glue symlink table (see
+  above).
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is

@@ -49,11 +49,12 @@ INSERT INTO my_datalake.default.fixture_hudi VALUES ('20240101000000000', 1, 1.0
 ----
 INSERT on Glue table 'fixture_hudi' with type HUDI (input format 'org.apache.hudi.hadoop.HoodieParquetInputFormat') is not supported, only Hive tables can be written
 
-# symlink manifest: the location holds text files listing the data files, not the data files
-statement error
-SELECT * FROM my_datalake.default.fixture_symlink;
+# symlink manifest: the location holds text files listing the data files, not the data files. The fixture's location
+# holds no manifests, so the scan reads no files (select_symlink_table.test reads tables with manifests)
+query I
+SELECT count(*) FROM my_datalake.default.fixture_symlink;
 ----
-<REGEX>:.*Glue table 'default.fixture_symlink' has table format SYMLINK \(input format 'org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat'\), which can not be read yet; use glue_get_table_response\(\) to inspect its definition.*
+0
 
 statement error
 INSERT INTO my_datalake.default.fixture_symlink VALUES (1, 1.0);

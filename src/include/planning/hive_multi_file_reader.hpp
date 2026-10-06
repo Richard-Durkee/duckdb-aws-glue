@@ -32,6 +32,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
 	HiveCSVOptions csv_options;
 	HiveJSONOptions json_options;
+	//! SymlinkTextInputFormat: the table and partition locations hold manifests, text files listing the data files
+	bool symlink = false;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
@@ -70,7 +72,8 @@ private:
 //! the files are matched to their partitions by prefix; otherwise, and for partitions elsewhere, every partition is
 //! one listing of its location. An unpartitioned table is one listing of the root location. A directory is listed once
 //! per query (scans and the sample share the listing); with glue_cache_listings the listings of Glue tables are kept
-//! for later statements of the connection as well.
+//! for later statements of the connection as well. For a symlink table every listed location holds manifests instead,
+//! and the data files are the ones the manifests list.
 class HiveMultiFileList : public LazyMultiFileList {
 public:
 	//! 'partition_indexes' are the partitions to read

@@ -245,6 +245,7 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 	auto format = latest_info->GetFormat();
 	switch (format.format) {
 	case GlueFormat::HIVE:
+	case GlueFormat::SYMLINK:
 		if (latest_info->IsPartitionProjected()) {
 			// Athena derives the partitions from the projection.* parameters and ignores the registered ones, which
 			// such a table usually has none of: reading the registered partitions would silently return no or wrong
@@ -291,6 +292,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 			                   latest_info.database_name, latest_info.name, property);
 		}
 	}
+	scan_info->symlink = latest_info.GetFormat().format == GlueFormat::SYMLINK;
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

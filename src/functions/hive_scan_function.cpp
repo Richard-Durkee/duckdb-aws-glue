@@ -148,6 +148,16 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 			scan_info->csv_options.null_string = option.second.GetValue<string>();
 		} else if (name == "ignore_errors") {
 			scan_info->json_options.ignore_errors = option.second.GetValue<bool>();
+		} else if (name == "input_format") {
+			// the Hive InputFormat of the locations, as Glue names it or by its short name
+			auto input_format = StringUtil::Lower(option.second.GetValue<string>());
+			if (input_format == "symlink" || input_format == "org.apache.hadoop.hive.ql.io.symlinktextinputformat") {
+				scan_info->symlink = true;
+			} else {
+				throw BinderException("hive_scan: unknown input_format '%s', the supported input format is 'symlink' "
+				                      "(SymlinkTextInputFormat)",
+				                      option.second.GetValue<string>());
+			}
 		}
 	}
 	if (!schema) {
@@ -234,6 +244,7 @@ TableFunctionSet GetHiveScanFunction(DatabaseInstance &db) {
 		options.Add("header", LogicalType::BOOLEAN);
 		options.Add("nullstr", LogicalType::VARCHAR);
 		options.Add("ignore_errors", LogicalType::BOOLEAN);
+		options.Add("input_format", LogicalType::VARCHAR);
 	});
 	function.GetSignature() = std::move(signature);
 	function.bind = HiveScanBind;

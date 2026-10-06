@@ -116,7 +116,7 @@ Glue view 'default.partition_response_view' has no partitions
 statement error
 SELECT * FROM glue_get_partition_response('my_datalake.default.fixture_delta_symlink', {dt: '2024-01-01'});
 ----
-glue_get_partition_response only works on Hive tables
+glue_get_partition_response only works on Hive and symlink tables
 
 statement error
 SELECT * FROM glue_get_partition_response('my_datalake.default.partition_response_missing', {dt: '2024-01-01'});

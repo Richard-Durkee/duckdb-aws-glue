@@ -53,8 +53,8 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 		ThrowIsView(function_name, result.TableName(), require_partitions);
 	}
 	auto format = result.table.GetFormat();
-	if (!format.IsHive()) {
-		throw NotImplementedException("%s only works on Hive tables, '%s' is a %s table", function_name,
+	if (!format.IsHive() && format.format != GlueFormat::SYMLINK) {
+		throw NotImplementedException("%s only works on Hive and symlink tables, '%s' is a %s table", function_name,
 		                              result.TableName(), format.Describe(result.table));
 	}
 	if (require_partitions && result.table.partition_keys.empty()) {

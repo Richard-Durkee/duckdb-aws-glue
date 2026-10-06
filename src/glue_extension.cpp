@@ -10,6 +10,7 @@
 #include "catalog/glue_attach.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "core/hive_compression.hpp"
 #include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
@@ -80,6 +81,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	if (!instance.ExtensionIsLoaded("parquet")) {
 		throw MissingExtensionException("The glue extension requires the parquet extension to be loaded!");
 	}
+	// bzip2, lz4 and snappy compressed text files, as Hive and Spark write them
+	RegisterHiveCompressionFileSystems(instance);
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
 

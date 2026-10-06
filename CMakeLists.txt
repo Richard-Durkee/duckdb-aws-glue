@@ -17,6 +17,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(OpenSSL REQUIRED)
 find_package(CURL REQUIRED)
 find_package(AWSSDK REQUIRED COMPONENTS core glue sts sso)
+# The codecs Hive writes text files with besides gzip and zstd
+find_package(BZip2 REQUIRED)
+find_package(lz4 CONFIG REQUIRED)
+find_package(Snappy CONFIG REQUIRED)
 
 # The AWS find_package can override TARGET_NAME, reset it
 set(TARGET_NAME glue)
@@ -35,12 +39,26 @@ build_loadable_extension(${TARGET_NAME} " " ${GLUE_EXTENSION_FILES})
 # extension
 target_include_directories(${EXTENSION_NAME}
                            PUBLIC $<BUILD_INTERFACE:${AWSSDK_INCLUDE_DIRS}>)
-target_link_libraries(${EXTENSION_NAME} ${AWSSDK_LINK_LIBRARIES}
-                      ${CURL_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(
+  ${EXTENSION_NAME}
+  ${AWSSDK_LINK_LIBRARIES}
+  ${CURL_LIBRARIES}
+  OpenSSL::SSL
+  OpenSSL::Crypto
+  BZip2::BZip2
+  lz4::lz4
+  Snappy::snappy)
 target_include_directories(${LOADABLE_EXTENSION_NAME}
                            PRIVATE $<BUILD_INTERFACE:${AWSSDK_INCLUDE_DIRS}>)
-target_link_libraries(${LOADABLE_EXTENSION_NAME} ${AWSSDK_LINK_LIBRARIES}
-                      ${CURL_LIBRARIES} OpenSSL::SSL OpenSSL::Crypto)
+target_link_libraries(
+  ${LOADABLE_EXTENSION_NAME}
+  ${AWSSDK_LINK_LIBRARIES}
+  ${CURL_LIBRARIES}
+  OpenSSL::SSL
+  OpenSSL::Crypto
+  BZip2::BZip2
+  lz4::lz4
+  Snappy::snappy)
 
 install(
   TARGETS ${EXTENSION_NAME}

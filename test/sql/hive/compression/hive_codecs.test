@@ -1,0 +1,127 @@
+# name: test/sql/hive/compression/hive_codecs.test
+# description: csv and json files compressed with bzip2, and with lz4 and snappy the way Hadoop writes them
+# group: [compression]
+
+# The files are written by scripts/generate_compression_fixtures.py. Hadoop's lz4 and snappy files are raw blocks with
+# big-endian lengths (BlockCompressorStream), not the codecs' own file formats.
+
+require json
+
+require glue
+
+#---------------------------------------------------------------------------
+# found by extension, like .gz and .zst
+#---------------------------------------------------------------------------
+query II
+SELECT * FROM read_csv('test/data/compression/hadoop.csv.lz4', header = false, columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+1	v1
+2	v2
+3	v3
+4	v4
+5	v5
+6	v6
+
+query I
+SELECT list(id ORDER BY id) FROM read_csv('test/data/compression/hadoop.csv.snappy', header = false,
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5, 6]
+
+query I
+SELECT list(id ORDER BY id) FROM read_csv('test/data/compression/data.csv.bz2', header = false,
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5, 6]
+
+# several blocks of several chunks each
+query I
+SELECT list(id ORDER BY id) FROM read_csv('test/data/compression/hadoop_multi.csv.lz4', header = false,
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5, 6]
+
+query I
+SELECT list(id ORDER BY id) FROM read_csv('test/data/compression/hadoop_multi.csv.snappy', header = false,
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5, 6]
+
+# the LZ4 frame format, what the lz4 tool writes, under the same extension
+query I
+SELECT list(id ORDER BY id) FROM read_csv('test/data/compression/frame.csv.lz4', header = false,
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5, 6]
+
+# concatenated bzip2 streams
+query I
+SELECT list(id ORDER BY id) FROM read_csv('test/data/compression/concatenated.csv.bz2', header = false,
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5, 6]
+
+# an empty file is an empty stream (without the sniffer, which rejects any empty csv file, as Hive scans read)
+query I
+SELECT count(*) FROM read_csv('test/data/compression/empty.csv.snappy', header = false, auto_detect = false,
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+0
+
+#---------------------------------------------------------------------------
+# json, and the codec named explicitly
+#---------------------------------------------------------------------------
+query II
+SELECT id, name FROM read_json('test/data/compression/hadoop.json.lz4', format = 'newline_delimited') ORDER BY id LIMIT 2;
+----
+1	v1
+2	v2
+
+query I
+SELECT count(*) FROM read_json('test/data/compression/hadoop.json.snappy', format = 'newline_delimited');
+----
+6
+
+query I
+SELECT count(*) FROM read_json('test/data/compression/data.json.bz2', format = 'newline_delimited', compression = 'bzip2');
+----
+6
+
+query I
+SELECT count(*) FROM read_csv('test/data/compression/hadoop.csv.lz4', header = false, compression = 'lz4',
+    columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+6
+
+#---------------------------------------------------------------------------
+# a Hive table directory whose files use different codecs
+#---------------------------------------------------------------------------
+query I
+SELECT list(id ORDER BY id) FROM hive_scan('test/data/compression/table', format := 'csv',
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6]
+
+#---------------------------------------------------------------------------
+# corrupt and unsupported files fail instead of returning partial or wrong data
+#---------------------------------------------------------------------------
+statement error
+SELECT * FROM read_csv('test/data/compression/truncated.csv.lz4', header = false, columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+Unexpected end of lz4 stream
+
+statement error
+SELECT * FROM read_csv('test/data/compression/truncated.csv.bz2', header = false, columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+Unexpected end of bzip2 stream
+
+statement error
+SELECT * FROM read_csv('test/data/compression/framed.csv.snappy', header = false, columns = {id: 'INTEGER', name: 'VARCHAR'});
+----
+snappy framing format
+
+# writing is not supported
+statement error
+COPY (SELECT 1 AS id) TO '__TEST_DIR__/out.csv.lz4' (FORMAT csv, COMPRESSION 'lz4');
+----
+not supported

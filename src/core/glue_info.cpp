@@ -141,6 +141,10 @@ bool GlueTableInfo::HasHeader() const {
 	return GetParameter("skip.header.line.count") == "1";
 }
 
+bool IsWritableTextCompression(const FileCompressionType &compression) {
+	return compression == FileCompressionType::GZIP || compression == FileCompressionType::ZSTD;
+}
+
 FileCompressionType GlueTableInfo::GetTextCompression() const {
 	auto codec = GetParameter("write.compression");
 	if (codec.empty()) {
@@ -150,10 +154,10 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 		return FileCompressionType::AUTO_DETECT;
 	}
 	FileCompressionType compression(codec);
-	if (compression.IsCompressed() && compression != FileCompressionType::GZIP &&
-	    compression != FileCompressionType::ZSTD) {
-		throw NotImplementedException("Hive table '%s.%s' is %s compressed, DuckDB reads and writes only gzip and zstd "
-		                              "compressed csv and json files",
+	if (compression.IsCompressed() && !IsWritableTextCompression(compression) && compression.ToString() != "bzip2" &&
+	    compression.ToString() != "lz4" && compression.ToString() != "snappy") {
+		throw NotImplementedException("Hive table '%s.%s' is %s compressed, DuckDB reads only gzip, zstd, bzip2, lz4 "
+		                              "and snappy compressed csv and json files",
 		                              database_name, name, compression.ToString());
 	}
 	return compression;

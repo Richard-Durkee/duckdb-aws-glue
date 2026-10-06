@@ -19,7 +19,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_deflate compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -148,19 +148,28 @@ SELECT id FROM my_datalake.default.compr_csv_plain ORDER BY id;
 1
 2
 
-# a codec DuckDB can not write
+# a codec DuckDB reads but can not write (test/sql/hive/compression reads such files)
 statement ok
 CREATE TABLE my_datalake.default.compr_csv_bzip2 (id INTEGER) WITH (format = 'csv', 'write.compression' = 'BZIP2');
 
 statement error
 INSERT INTO my_datalake.default.compr_csv_bzip2 VALUES (1);
 ----
-Hive table 'default.compr_csv_bzip2' is bzip2 compressed, DuckDB reads and writes only gzip and zstd compressed csv and json files
+Writing to Hive table 'default.compr_csv_bzip2' is not supported: its files are bzip2 compressed, DuckDB writes only gzip and zstd compressed csv and json files
+
+query I
+SELECT count(*) FROM my_datalake.default.compr_csv_bzip2;
+----
+0
+
+# a codec DuckDB can not read either
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_deflate (id INTEGER) WITH (format = 'csv', 'write.compression' = 'DEFLATE');
 
 statement error
-SELECT * FROM my_datalake.default.compr_csv_bzip2;
+SELECT * FROM my_datalake.default.compr_csv_deflate;
 ----
-Hive table 'default.compr_csv_bzip2' is bzip2 compressed
+Hive table 'default.compr_csv_deflate' is deflate compressed, DuckDB reads only gzip, zstd, bzip2, lz4 and snappy compressed csv and json files
 
 #---------------------------------------------------------------------------
 # parquet.compression and compression_level
@@ -238,7 +247,7 @@ INSERT INTO my_datalake.default.compr_parquet_lzo VALUES (1);
 ----
 Expected "compression" argument to be any of
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_deflate compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
 
 statement ok
 DROP TABLE my_datalake.default.{table};

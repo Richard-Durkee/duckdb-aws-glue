@@ -49,9 +49,16 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   cast, and file columns Glue does not list are ignored.
 
 Compression: a csv or json table is read with the codec it records (`write.compression`, else the `compressionType`
-Glue crawlers set), whatever the names of its files; DuckDB reads gzip and zstd, another codec is an error. A table
-that records none is read with DuckDB's default, which tells `.gz` and `.zst` files by their extension. Parquet and
-avro files carry their codec themselves.
+Glue crawlers set), whatever the names of its files: gzip, zstd, bzip2, lz4 or snappy, another codec is an error. A
+table that records none is read with DuckDB's default, which tells the codec by the file extension (`.gz`, `.zst`,
+`.bz2`, `.lz4`, `.snappy`). Parquet and avro files carry their codec themselves.
+
+The extension registers bzip2, lz4 and snappy with DuckDB, so `read_csv` and `read_json` read such files outside Glue
+tables too (`compression = 'auto'` or the codec's name). lz4 and snappy files are read the way Hadoop's Lz4Codec and
+SnappyCodec (what Hive, Spark and Athena use) write them: blocks of the big-endian uncompressed length followed by
+chunks of a big-endian compressed length and a raw lz4 / snappy block, not the codecs' own file formats. `.lz4` files
+in the LZ4 frame format (what the `lz4` tool writes) are read as well; the snappy framing format is not supported.
+Concatenated bzip2 streams are read as one. These codecs can not be written.
 
 ## Writing
 
@@ -90,7 +97,7 @@ avro files carry their codec themselves.
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
-  codec is an error.
+  codec, including bzip2, lz4 and snappy, which are only read, is an error.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`

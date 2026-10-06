@@ -256,6 +256,12 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	}
 	if (IsTextFileFormat(file_format)) {
 		auto codec = table_info.GetTextCompression();
+		if (codec.IsCompressed() && !IsWritableTextCompression(codec)) {
+			throw NotImplementedException(
+			    "Writing to Hive table '%s.%s' is not supported: its files are %s compressed, "
+			    "DuckDB writes only gzip and zstd compressed csv and json files",
+			    table_info.database_name, table_info.name, codec.ToString());
+		}
 		if (codec.IsCompressed()) {
 			copy_options[Identifier("compression")] = {Value(codec.ToString())};
 		}

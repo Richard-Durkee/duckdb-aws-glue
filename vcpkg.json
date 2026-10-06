@@ -4,6 +4,8 @@
 		"curl",
 		"zlib",
 		"snappy",
+		"lz4",
+		"bzip2",
 		"liblzma",
 		"jansson",
 		{

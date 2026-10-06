@@ -41,6 +41,8 @@ enum class HiveFileFormat : uint8_t { PARQUET, CSV, JSON, AVRO };
 string HiveFileFormatToString(HiveFileFormat format);
 //! Whether the data files are text files (csv, json), whose codec the table records rather than the files themselves
 bool IsTextFileFormat(HiveFileFormat format);
+//! Whether DuckDB writes csv / json files with this codec (it reads bzip2, lz4 and snappy as well)
+bool IsWritableTextCompression(const FileCompressionType &compression);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
@@ -113,7 +115,7 @@ public:
 	//! Whether the data files of a CSV table start with a header line (skip.header.line.count)
 	bool HasHeader() const;
 	//! The codec of a csv / json table's files (write.compression, else compressionType), auto-detection when the
-	//! table names none; throws for a codec DuckDB can not read and write
+	//! table names none; throws for a codec DuckDB can not read
 	FileCompressionType GetTextCompression() const;
 	//! parquet.compression, empty when the table does not say
 	string GetParquetCompression() const;

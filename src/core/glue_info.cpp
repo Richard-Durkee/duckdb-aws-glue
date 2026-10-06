@@ -105,6 +105,11 @@ string GlueTableInfo::DescribeBucketing() const {
 	return result;
 }
 
+bool GlueTableInfo::HasPositionalFields() const {
+	auto serde = StringUtil::Lower(serde_library);
+	return StringUtil::Contains(serde, "lazysimpleserde") || StringUtil::Contains(serde, "opencsvserde");
+}
+
 HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	auto serde = StringUtil::Lower(serde_library);
 	if (StringUtil::Contains(serde, "parquet")) {

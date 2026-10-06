@@ -699,6 +699,14 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			throw CatalogException("Can not drop column \"%s\": table \"%s\" needs at least one column", name,
 			                       table_name);
 		}
+		// the fields of the existing files would shift: every column after the dropped one would read its neighbour
+		if (current.HasPositionalFields()) {
+			throw CatalogException(
+			    "Can not drop column \"%s\" of csv table \"%s\": its files hold their fields by "
+			    "position, so the existing files would be read with the fields after it in the wrong "
+			    "columns. Write the table anew without the column instead (CREATE TABLE ... AS SELECT)",
+			    name, table_name);
+		}
 		columns.erase(std::remove_if(columns.begin(), columns.end(),
 		                             [&](const GlueColumn &column) { return StringUtil::CIEquals(column.name, name); }),
 		              columns.end());

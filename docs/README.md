@@ -85,7 +85,9 @@ avro files carry their codec themselves.
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
-  partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
+  partition key, bucket or sort column, and not on csv tables, whose files hold their fields by position so the fields
+  after the dropped column would be read into the wrong columns) and `ALTER COLUMN ... TYPE` update the Glue
+  definition with UpdateTable.
   Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`

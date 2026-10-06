@@ -99,3 +99,82 @@ FROM glue_get_table_response('my_datalake.default.ddl_drop_bucket_column');
 
 statement ok
 DROP TABLE my_datalake.default.ddl_drop_bucket_column;
+
+#---------------------------------------------------------------------------
+# csv tables: the files hold their fields by position, so dropping a column would shift every later field
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ddl_drop_csv;
+
+statement ok
+CREATE TABLE my_datalake.default.ddl_drop_csv (id INTEGER, name VARCHAR, score DOUBLE) WITH (format = 'csv');
+
+statement ok
+INSERT INTO my_datalake.default.ddl_drop_csv VALUES (1, 'a', 9.5), (2, 'b', 8.0);
+
+statement error
+ALTER TABLE my_datalake.default.ddl_drop_csv DROP COLUMN name;
+----
+<REGEX>:.*Can not drop column "name" of csv table "ddl_drop_csv": its files hold their fields by position.*
+
+# the trailing column too: the files would have a field more than the table
+statement error
+ALTER TABLE my_datalake.default.ddl_drop_csv DROP COLUMN score;
+----
+<REGEX>:.*Can not drop column "score" of csv table "ddl_drop_csv".*
+
+# a column that does not exist is still no error with IF EXISTS
+statement ok
+ALTER TABLE my_datalake.default.ddl_drop_csv DROP COLUMN IF EXISTS missing;
+
+# nothing changed: the table reads as written
+query III
+SELECT id, name, score FROM my_datalake.default.ddl_drop_csv ORDER BY id;
+----
+1	a	9.5
+2	b	8.0
+
+statement ok
+DROP TABLE my_datalake.default.ddl_drop_csv;
+
+# OpenCSVSerde as well
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ddl_drop_opencsv;
+
+statement ok
+CREATE TABLE my_datalake.default.ddl_drop_opencsv (id INTEGER, name VARCHAR) WITH (format = 'csv', quote = '"');
+
+query I
+SELECT serde_library FROM glue_get_table_response('my_datalake.default.ddl_drop_opencsv');
+----
+org.apache.hadoop.hive.serde2.OpenCSVSerde
+
+statement error
+ALTER TABLE my_datalake.default.ddl_drop_opencsv DROP COLUMN name;
+----
+<REGEX>:.*Can not drop column "name" of csv table "ddl_drop_opencsv".*
+
+statement ok
+DROP TABLE my_datalake.default.ddl_drop_opencsv;
+
+# json files hold their fields by name: dropping a column is fine, the other columns still read their own values
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ddl_drop_json;
+
+statement ok
+CREATE TABLE my_datalake.default.ddl_drop_json (id INTEGER, name VARCHAR, score DOUBLE) WITH (format = 'json');
+
+statement ok
+INSERT INTO my_datalake.default.ddl_drop_json VALUES (1, 'a', 9.5), (2, 'b', 8.0);
+
+statement ok
+ALTER TABLE my_datalake.default.ddl_drop_json DROP COLUMN name;
+
+query II
+SELECT id, score FROM my_datalake.default.ddl_drop_json ORDER BY id;
+----
+1	9.5
+2	8.0
+
+statement ok
+DROP TABLE my_datalake.default.ddl_drop_json;

@@ -38,6 +38,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	string escape = "\"";
 	idx_t skip_lines = 0;
 	string null_string;
+	//! CSV only: read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
+	bool serde_fields = false;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
@@ -178,6 +180,11 @@ public:
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
 	                  optional_ptr<MultiFileReaderGlobalState> global_state) override;
+	ReaderInitializeType InitializeReader(MultiFileReaderData &reader_data, const MultiFileBindData &bind_data,
+	                                      const vector<MultiFileColumnDefinition> &global_columns,
+	                                      const vector<ColumnIndex> &global_column_ids,
+	                                      optional_ptr<TableFilterSet> table_filters, ClientContext &context,
+	                                      MultiFileGlobalState &gstate) override;
 
 private:
 	shared_ptr<HiveScanInfo> scan_info;

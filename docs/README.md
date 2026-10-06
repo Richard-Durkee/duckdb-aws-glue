@@ -261,7 +261,8 @@ Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so
 factor) has no effect while the tables are in Glue: rebuild the fixture with
 `make glue-fixture-down && make glue-fixture` first.
 
-`.github/workflows/Regression.yml` runs them for a PR and for its merge base and compares the timings.
+`.github/workflows/Regression.yml` runs `benchmark/*.benchmark`, `benchmark/pushdown/`, `benchmark/optimizer/` and
+`benchmark/tpch/sf1/` for a PR and for its merge base and compares the timings. It does not run `benchmark/tpcds/`.
 
 ## Building
 

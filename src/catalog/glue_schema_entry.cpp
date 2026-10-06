@@ -515,10 +515,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateType(CatalogTransaction transa
 	throw BinderException("Glue databases do not support creating types");
 }
 
-namespace {
-
-//! Type changes Hive can read back from the existing parquet files: widening only
-bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
+bool GlueSchemaEntry::IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
 	if (from == to) {
 		return true;
 	}
@@ -548,8 +545,6 @@ bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to) {
 	}
 	return false;
 }
-
-} // namespace
 
 //! The parameters GlueTableInfo::GetFormat() derives the table format from can not be set or reset: changing
 //! table_type on a Hive table would relabel it as Iceberg or Delta without a metadata file behind it.
@@ -585,13 +580,7 @@ void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInf
 		}
 	}
 	GlueAPI::UpdateTableParameters(context, glue_catalog, database_info.name, table_name, set, unset);
-
-	GlueTableInfo updated;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, updated)) {
-		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
-		                       table_name);
-	}
-	tables.CreateEntry(tables.CreateEntry(updated));
+	RefreshTable(context, table_name);
 }
 
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
@@ -737,14 +726,16 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	}
 
 	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	RefreshTable(context, table_name);
+}
 
-	// refresh the cached entry from what Glue stored
+GlueTable &GlueSchemaEntry::RefreshTable(ClientContext &context, const string &table_name) {
 	GlueTableInfo updated;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, updated)) {
+	if (!GlueAPI::GetTable(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name, updated)) {
 		throw CatalogException("Table \"%s.%s\" was altered but could not be fetched afterwards", database_info.name,
 		                       table_name);
 	}
-	tables.CreateEntry(tables.CreateEntry(updated));
+	return tables.CreateEntry(tables.CreateEntry(updated))->Cast<GlueTable>();
 }
 
 void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {

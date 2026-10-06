@@ -17,6 +17,7 @@
 #include <aws/core/http/curl/CurlHttpClient.h>
 #endif
 
+#include <mutex>
 #include <sstream>
 
 // Bridge between the AWS SDK and DuckDB's HTTP layer, modeled after duckdb-aws PR #173: an aws-sdk-cpp
@@ -221,23 +222,27 @@ private:
 	DatabaseInstance &db;
 };
 
+//! The factory is process global and outlives any one DatabaseInstance, so it holds none: the database comes from the
+//! connection in the calling GlueHttpClientContextScope.
 class GlueDuckDBHttpClientFactory : public Aws::Http::HttpClientFactory {
 public:
-	explicit GlueDuckDBHttpClientFactory(DatabaseInstance &db_p) : db(db_p) {
-	}
-
 	std::shared_ptr<Aws::Http::HttpClient>
 	CreateHttpClient(const Aws::Client::ClientConfiguration &config) const override {
-		// Fall back to the SDK's own transport when disabled, or when there is no DuckDB HTTP transport yet
-		// (httpfs provides it)
-		if (!NetworkCallsViaDuckDB(db) || !db.ExtensionIsLoaded("httpfs")) {
-#ifdef _WIN32
-			return Aws::MakeShared<Aws::Http::WinHttpSyncHttpClient>("GlueDuckDBHttp", config);
-#else
-			return Aws::MakeShared<Aws::Http::CurlHttpClient>("GlueDuckDBHttp", config);
-#endif
+		// Use DuckDB's transport for clients built inside a GlueHttpClientContextScope, unless disabled or there is no
+		// DuckDB HTTP transport yet (httpfs provides it). Anything else, e.g. the SDK's own EC2 metadata client or
+		// other extensions' AWS clients, gets the SDK's own transport.
+		auto context = GlueHttpClientContextScope::Current();
+		if (context) {
+			auto &db = DatabaseInstance::GetDatabase(*context);
+			if (NetworkCallsViaDuckDB(db) && db.ExtensionIsLoaded("httpfs")) {
+				return Aws::MakeShared<GlueDuckDBHttpClient>("GlueDuckDBHttp", db);
+			}
 		}
-		return Aws::MakeShared<GlueDuckDBHttpClient>("GlueDuckDBHttp", db);
+#ifdef _WIN32
+		return Aws::MakeShared<Aws::Http::WinHttpSyncHttpClient>("GlueDuckDBHttp", config);
+#else
+		return Aws::MakeShared<Aws::Http::CurlHttpClient>("GlueDuckDBHttp", config);
+#endif
 	}
 
 	std::shared_ptr<Aws::Http::HttpRequest>
@@ -253,9 +258,6 @@ public:
 		request->SetResponseStreamFactory(stream_factory);
 		return request;
 	}
-
-private:
-	DatabaseInstance &db;
 };
 
 } // namespace
@@ -264,8 +266,13 @@ bool GlueNetworkCallsViaDuckDB(DatabaseInstance &db) {
 	return NetworkCallsViaDuckDB(db);
 }
 
-void RegisterGlueHttpClientFactory(DatabaseInstance &db) {
-	Aws::Http::SetHttpClientFactory(Aws::MakeShared<GlueDuckDBHttpClientFactory>("GlueDuckDBHttp", db));
+void RegisterGlueHttpClientFactory() {
+	// SetHttpClientFactory swaps process global SDK state and is not thread safe, so it must not run again for every
+	// database that loads the extension
+	static std::once_flag registered;
+	std::call_once(registered, [] {
+		Aws::Http::SetHttpClientFactory(Aws::MakeShared<GlueDuckDBHttpClientFactory>("GlueDuckDBHttp"));
+	});
 }
 
 } // namespace duckdb

@@ -1,0 +1,77 @@
+# name: test/sql/hive/hive_scan/scan/test_reader_callbacks.test
+# description: hive_scan of csv and json runs with that reader's callbacks, not read_parquet's
+# group: [scan]
+
+# count(*) without a filter lets the optimizer ask the scan for partition statistics, which read_parquet's callback
+# answers by reading its own bind data. hive_scan is declared as read_parquet, so over csv or json it has to use the
+# callbacks of the reader its bind picked. This is reached with zero files or more than one.
+
+require json
+
+require glue
+
+# two files each, one per directory (PARTITION_BY creates the directories; the column is not written)
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'a', 0), (2, 'b', 0), (3, 'c', 1)) t(id, name, f)) TO '{TEST_DIR}/callbacks_csv'
+(FORMAT csv, HEADER false, PARTITION_BY (f));
+
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'a', 0), (2, 'b', 0), (3, 'c', 0), (4, 'd', 1)) t(id, name, f)) TO '{TEST_DIR}/callbacks_json'
+(FORMAT json, PARTITION_BY (f));
+
+# more than one file
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/callbacks_csv', format := 'csv', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+3
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/callbacks_json', format := 'json', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+4
+
+query II
+SELECT count(*), sum(id) FROM hive_scan('{TEST_DIR}/callbacks_csv', format := 'csv', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+3	6
+
+# no file at all
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/callbacks_none', format := 'csv', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+0
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/callbacks_none', format := 'json', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+0
+
+# parquet is unchanged
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'a', 0), (2, 'b', 0), (3, 'c', 1)) t(id, name, f)) TO '{TEST_DIR}/callbacks_parquet'
+(FORMAT parquet, PARTITION_BY (f));
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/callbacks_parquet', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+3
+
+# the plan still names the scan, and a prepared statement re-binds through hive_scan
+query II
+EXPLAIN SELECT * FROM hive_scan('{TEST_DIR}/callbacks_csv', format := 'csv', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+physical_plan	<REGEX>:.*(?i)hive_scan.*
+
+statement ok
+PREPARE scan_csv AS SELECT count(*) FROM hive_scan('{TEST_DIR}/callbacks_csv', format := 'csv',
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+
+query I
+EXECUTE scan_csv;
+----
+3
+
+query I
+EXECUTE scan_csv;
+----
+3

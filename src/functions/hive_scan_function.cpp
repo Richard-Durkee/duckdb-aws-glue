@@ -177,7 +177,18 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 	names = scan_info->names;
 	return_types = scan_info->types;
 	unique_ptr<FunctionData> bind_data;
-	BindHiveScan(context, std::move(scan_info), bind_data);
+	auto reader = BindHiveScan(context, std::move(scan_info), bind_data);
+	// The bind data belongs to the reader the format picked (read_csv, read_json, ...): run the scan with that reader's
+	// callbacks rather than read_parquet's, which hive_scan is declared with (read_parquet's statistics callbacks cast
+	// the bind data to its own). The bind callbacks stay hive_scan's, for re-binding a prepared statement.
+	auto &function = input.table_function;
+	auto bind = function.bind;
+	auto bind_replace = function.bind_replace;
+	auto bind_operator = function.bind_operator;
+	static_cast<BaseTableFunction &>(function) = static_cast<const BaseTableFunction &>(reader);
+	function.bind = bind;
+	function.bind_replace = bind_replace;
+	function.bind_operator = bind_operator;
 	return bind_data;
 }
 

@@ -10,6 +10,8 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction_manager.hpp"
+#include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
 
@@ -67,6 +69,9 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 
 optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const EntryLookupInfo &lookup) {
 	auto &name = lookup.GetEntryName();
+	// the reader's Glue transaction keeps the entry alive while it is used (GlueTransactionManager::RetireEntry); it
+	// is started before entry_lock is taken, the order RetireEntry takes the locks in
+	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	auto entry = entries.find(name);
 	if (entry != entries.end()) {
@@ -85,6 +90,7 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 	// tables and views share the set and a scan of either type yields both, as in DuckDB's own schema: the catalog
 	// functions filter by entry type themselves, and duckdb_columns() collects the columns of views through a
 	// TABLE_ENTRY scan
+	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	LoadEntries(context);
 	for (auto &entry : entries) {
@@ -95,20 +101,23 @@ void GlueTableSet::Scan(ClientContext &context, const std::function<void(Catalog
 optional_ptr<CatalogEntry> GlueTableSet::CreateEntry(unique_ptr<CatalogEntry> entry) {
 	lock_guard<mutex> guard(entry_lock);
 	auto name = entry->name.GetIdentifierName();
-	entries.erase(name);
+	RetireEntry(name);
 	auto result = entries.emplace(name, std::move(entry));
 	return result.first->second.get();
 }
 
 void GlueTableSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
-	entries.erase(name);
+	RetireEntry(name);
 }
 
-void GlueTableSet::ClearEntries() {
-	lock_guard<mutex> guard(entry_lock);
-	entries.clear();
-	is_loaded = false;
+void GlueTableSet::RetireEntry(const string &name) {
+	auto entry = entries.find(name);
+	if (entry == entries.end()) {
+		return;
+	}
+	catalog.GetAttached().GetTransactionManager().Cast<GlueTransactionManager>().RetireEntry(std::move(entry->second));
+	entries.erase(entry);
 }
 
 } // namespace duckdb

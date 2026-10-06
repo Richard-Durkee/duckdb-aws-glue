@@ -96,6 +96,16 @@ avro files carry their codec themselves.
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`
   becomes `'4'`); a key may be quoted (`'parquet.compression' = 'ZSTD'`). The parameters the table format is read
   from (`table_type`, `spark.sql.sources.provider`, `metadata_location`) can not be changed this way.
+- `CALL glue_replace_columns('cat.db.t', {id: 'BIGINT', name: 'VARCHAR'}, comments := {id: '...'})` is Hive's
+  `ALTER TABLE ... REPLACE COLUMNS`: it replaces all data columns of the table at once, which can also rename and
+  reorder them. Types are DuckDB types, stored the way `CREATE TABLE` stores them; a column that stays (same name,
+  compared case-insensitively) keeps its stored name and may only be widened, as with `ALTER COLUMN ... TYPE`. As in
+  Hive, comments not given in `comments` are dropped; `keep_comments := true` keeps those of the columns that stay
+  (a NULL in `comments` then removes one). The partition keys are kept
+  and must not be listed; the bucketing and sort columns must be listed. It returns the columns as stored in Glue
+  (Glue type names). The data files are not rewritten: parquet, json and avro files are matched by name (a renamed
+  column reads as NULL), csv files by position, so a csv table keeps its number of columns, each may only be widened
+  and giving it a new name renames it.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.

@@ -1,0 +1,114 @@
+# name: test/sql/hive/dml/select_symlink_table.test
+# description: Glue tables with SymlinkTextInputFormat read the data files their manifests list, and are not written
+# group: [dml]
+
+# The tables are fixtures from scripts/docker-compose.yml (the extension does not create symlink tables); their
+# locations hold the manifests this test writes, the data files live below the test directory.
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_TEST_CONFIG local
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query II
+SELECT response.StorageDescriptor.InputFormat::VARCHAR, serde_library FROM glue_get_table_response('my_datalake.default.fixture_symlink_csv');
+----
+org.apache.hadoop.hive.ql.io.SymlinkTextInputFormat	org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+#---------------------------------------------------------------------------
+# unpartitioned, LazySimpleSerDe: the manifests are read, the files they list are scanned as csv
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/data1.csv' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 'c')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/data2.csv' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT unnest(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/data1.csv', '{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/data2.csv']))
+TO '{DEFAULT_S3_LOCATION}/fixture/fixture_symlink_csv/symlink.txt' (FORMAT csv, HEADER false);
+
+query II
+SELECT id, name FROM my_datalake.default.fixture_symlink_csv ORDER BY id;
+----
+1	a
+2	b
+3	c
+
+query I
+SELECT count(*) FROM my_datalake.default.fixture_symlink_csv WHERE name = 'b';
+----
+1
+
+# a manifest pointing at the local file system fails the scan instead of reading it
+statement ok
+COPY (SELECT '/etc/passwd') TO '{DEFAULT_S3_LOCATION}/fixture/fixture_symlink_csv/symlink.txt' (FORMAT csv, HEADER false);
+
+statement error
+SELECT * FROM my_datalake.default.fixture_symlink_csv;
+----
+<REGEX>:.*Hive table 'default.fixture_symlink_csv' is a symlink table whose manifest .* lists '/etc/passwd': symlink target paths must be S3 URIs.*
+
+# writing would put a data file next to the manifests
+statement error
+INSERT INTO my_datalake.default.fixture_symlink_csv VALUES (9, 'z');
+----
+<REGEX>:.*INSERT into Glue table 'fixture_symlink_csv' is not supported: it is a symlink table.*
+
+#---------------------------------------------------------------------------
+# partitioned, ParquetHiveSerDe: a partition owns the files its manifests list, wherever they are
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES (10, 'x'), (11, 'y')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/amer.parquet';
+
+statement ok
+COPY (SELECT * FROM (VALUES (20, 'z')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/apac.parquet';
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/amer.parquet') TO '{DEFAULT_S3_LOCATION}/fixture/fixture_symlink_parquet/part=amer/symlink.txt' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/symlink_data/apac.parquet') TO '{DEFAULT_S3_LOCATION}/fixture/fixture_symlink_parquet/part=apac/symlink.txt' (FORMAT csv, HEADER false);
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.fixture_symlink_parquet', {part: 'amer'}, if_exists := true);
+
+statement ok
+CALL glue_drop_partition('my_datalake.default.fixture_symlink_parquet', {part: 'apac'}, if_exists := true);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.fixture_symlink_parquet', {part: 'amer'});
+
+# registered with a doubled '/', as Hadoop collapses it
+statement ok
+CALL glue_add_partition('my_datalake.default.fixture_symlink_parquet', {part: 'apac'},
+    location := '{DEFAULT_S3_LOCATION}/fixture/fixture_symlink_parquet//part=apac/');
+
+query III
+SELECT id, name, part FROM my_datalake.default.fixture_symlink_parquet ORDER BY id;
+----
+10	x	amer
+11	y	amer
+20	z	apac
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.fixture_symlink_parquet WHERE part = 'apac';
+----
+[20]
+
+statement error
+INSERT INTO my_datalake.default.fixture_symlink_parquet VALUES (30, 'w', 'amer');
+----
+<REGEX>:.*INSERT into Glue table 'fixture_symlink_parquet' is not supported: it is a symlink table.*

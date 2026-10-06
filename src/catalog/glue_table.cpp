@@ -86,6 +86,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->table = this;
 	scan_info->root_location = latest_info.location;
 	scan_info->file_format = latest_info.GetFileFormat();
+	scan_info->symlink = latest_info.IsSymlink();
 	scan_info->delimiter = latest_info.GetFieldDelimiter();
 	scan_info->quote = latest_info.GetQuoteCharacter();
 	scan_info->escape = latest_info.GetEscapeCharacter();

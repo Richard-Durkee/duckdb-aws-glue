@@ -104,6 +104,8 @@ public:
 	//! Look up a SerDe parameter (case-insensitive key), returns empty string if missing
 	string GetSerdeParameter(const string &key) const;
 	bool IsBucketed() const;
+	//! Whether the table location holds manifests listing the data files (SymlinkTextInputFormat)
+	bool IsSymlink() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes

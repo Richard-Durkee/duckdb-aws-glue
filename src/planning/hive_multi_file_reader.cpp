@@ -98,6 +98,86 @@ static void ListDataFiles(ClientContext &context, const string &location, vector
 	}
 }
 
+//! A location with a lower-case scheme and repeated '/' collapsed (but not the scheme's '//'), as Hadoop's Path
+//! normalizes it
+static string NormalizeLocation(const string &location) {
+	auto scheme_end = location.find("://");
+	idx_t start = scheme_end == string::npos ? 0 : scheme_end + 3;
+	string result = StringUtil::Lower(location.substr(0, start));
+	for (idx_t i = start; i < location.size(); i++) {
+		if (location[i] == '/' && result.size() > start && result.back() == '/') {
+			continue;
+		}
+		result += location[i];
+	}
+	return result;
+}
+
+static bool IsS3Path(const string &path) {
+	// URI schemes are case-insensitive
+	auto lower = StringUtil::Lower(path.substr(0, 6));
+	return StringUtil::StartsWith(lower, "s3://") || StringUtil::StartsWith(lower, "s3a://") ||
+	       StringUtil::StartsWith(lower, "s3n://");
+}
+
+//! Whether a listed object is an S3 "directory" placeholder rather than a file: a key ending in '/' or Hadoop's
+//! '<dir>_$folder$' marker
+static bool IsDirectoryMarker(const string &path) {
+	return StringUtil::EndsWith(path, "/") || StringUtil::EndsWith(path, "_$folder$");
+}
+
+//! The data files one manifest entry names: a file, a glob over files, or the files directly below a 'dir/' prefix.
+//! Like Hadoop's input listing, a glob or directory skips hidden (_* and .*) files and directory placeholders; a file
+//! named explicitly is read.
+static void ExpandSymlinkTarget(FileSystem &fs, const string &target, vector<OpenFileInfo> &files) {
+	auto is_directory = StringUtil::EndsWith(target, "/");
+	if (!is_directory && !FileSystem::HasGlob(target)) {
+		files.emplace_back(target);
+		return;
+	}
+	for (auto &file : fs.GlobFiles(is_directory ? target + "*" : target, FileGlobOptions::ALLOW_EMPTY)) {
+		if (IsDirectoryMarker(file.path)) {
+			continue;
+		}
+		auto separator = file.path.find_last_of('/');
+		if (!IsHiddenPath(separator == string::npos ? file.path : file.path.substr(separator + 1))) {
+			files.push_back(file);
+		}
+	}
+}
+
+//! The data files the manifests directly below 'location' list, one path or glob per line (SymlinkTextInputFormat).
+//! Only S3 paths are followed, so that a manifest can not make the scan read the local file system.
+static void ListSymlinkTargets(ClientContext &context, const HiveScanInfo &scan_info, const string &location,
+                               vector<OpenFileInfo> &files) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto directory = NormalizeLocation(location);
+	StringUtil::RTrim(directory, "/");
+	if (directory.empty()) {
+		return;
+	}
+	vector<OpenFileInfo> manifests;
+	ExpandSymlinkTarget(fs, directory + "/", manifests);
+	for (auto &manifest : manifests) {
+		auto handle = fs.OpenFile(manifest, FileFlags::FILE_FLAGS_READ);
+		string content(handle->GetFileSize(), '\0');
+		handle->Read(QueryContext(context), &content[0], content.size(), 0);
+		for (auto &line : StringUtil::Split(content, '\n')) {
+			StringUtil::Trim(line);
+			if (line.empty()) {
+				continue;
+			}
+			if (!IsS3Path(line)) {
+				throw InvalidInputException(
+				    "Hive table '%s' is a symlink table whose manifest '%s' lists '%s': symlink "
+				    "target paths must be S3 URIs",
+				    scan_info.Describe(), manifest.path, line);
+			}
+			ExpandSymlinkTarget(fs, NormalizeLocation(line), files);
+		}
+	}
+}
+
 //===--------------------------------------------------------------------===//
 // HiveMultiFileList
 //===--------------------------------------------------------------------===//
@@ -114,6 +194,13 @@ void HiveMultiFileList::PlanListings() const {
 	planned = true;
 	if (scan_info->partition_keys.empty()) {
 		listing_jobs.push_back(ListingJob {true, {}});
+		return;
+	}
+	if (scan_info->symlink) {
+		// the data files a manifest lists can be anywhere: a listing of the root can not attribute them by location
+		for (auto partition_index : partition_indexes) {
+			listing_jobs.push_back(ListingJob {false, {partition_index}});
+		}
 		return;
 	}
 	// the partitions below the table root can be listed together
@@ -191,9 +278,18 @@ void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 		                            StringUtil::Join(partition.values, ", "), scan_info->Describe(),
 		                            partition.values.size(), scan_info->partition_keys.size());
 	}
+	vector<OpenFileInfo> partition_files;
+	if (scan_info->symlink) {
+		// every file the partition's manifests list belongs to the partition, wherever it is
+		ListSymlinkTargets(client_context, *scan_info, partition.location, partition_files);
+		lock_guard<mutex> guard(scan_info->file_partitions_lock);
+		for (auto &file : partition_files) {
+			AddFile(std::move(file), partition_index);
+		}
+		return;
+	}
 	auto location = partition.location;
 	StringUtil::RTrim(location, "/");
-	vector<OpenFileInfo> partition_files;
 	ListDataFiles(client_context, location, partition_files);
 	BuildPartitionLocations();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
@@ -263,7 +359,11 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		if (scan_info->root_location.empty()) {
 			throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 		}
-		ListDataFiles(client_context, scan_info->root_location, expanded_files);
+		if (scan_info->symlink) {
+			ListSymlinkTargets(client_context, *scan_info, scan_info->root_location, expanded_files);
+		} else {
+			ListDataFiles(client_context, scan_info->root_location, expanded_files);
+		}
 		return true;
 	}
 	if (job.root) {
@@ -463,6 +563,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(105, "partition_locations", locations);
 	serializer.WriteProperty(106, "types", bind_data.types);
 	serializer.WriteProperty(107, "names", bind_data.names);
+	serializer.WriteProperty(108, "symlink", info.symlink);
 }
 
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {

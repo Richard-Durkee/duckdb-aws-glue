@@ -32,6 +32,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	vector<LogicalType> types;
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
+	//! SymlinkTextInputFormat: the table and partition locations hold manifests, text files listing the data files
+	bool symlink = false;
 	//! CSV only: the dialect and whether every file starts with a header line
 	string delimiter = ",";
 	string quote = "\"";
@@ -62,7 +64,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 //! only the partitions a query reads are ever listed. When at least 'hive_partition_listing_threshold' of those
 //! partitions live below the table root, the root is listed once (recursively, one request per 1000 keys on S3) and
 //! the files are matched to their partitions by prefix; otherwise, and for partitions elsewhere, every partition is
-//! one listing of its location. An unpartitioned table is one listing of the root location.
+//! one listing of its location. An unpartitioned table is one listing of the root location. For a symlink table every
+//! listed location holds manifests instead, and the data files are the ones the manifests list.
 class HiveMultiFileList : public LazyMultiFileList {
 public:
 	//! 'partition_indexes' are the partitions (indexes into HiveScanInfo::partitions) to read

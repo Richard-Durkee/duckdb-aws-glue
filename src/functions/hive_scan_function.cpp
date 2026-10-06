@@ -142,6 +142,8 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 			scan_info->escape = option.second.GetValue<string>();
 		} else if (name == "header") {
 			scan_info->header = option.second.GetValue<bool>();
+		} else if (name == "symlink") {
+			scan_info->symlink = option.second.GetValue<bool>();
 		}
 	}
 	if (!schema) {
@@ -219,6 +221,7 @@ TableFunction GetHiveScanFunction(DatabaseInstance &db) {
 		options.Add("quote", LogicalType::VARCHAR);
 		options.Add("escape", LogicalType::VARCHAR);
 		options.Add("header", LogicalType::BOOLEAN);
+		options.Add("symlink", LogicalType::BOOLEAN);
 	});
 	function.GetSignature() = std::move(signature);
 	function.bind = HiveScanBind;

@@ -64,6 +64,14 @@ table records, so a table whose files use more than one codec is read correctly 
 `compressionType` does not matter. The codec a table records is what writes to it use. Parquet and avro files carry
 their codec themselves.
 
+Symlink tables (InputFormat `SymlinkTextInputFormat`) keep manifests in the table location (or the partition
+locations) instead of data: text files that list the data files, one entry per line, which the SerDe's reader then
+scans. An entry is a file, a glob (`s3://bucket/data/part-*.csv`) or a directory ending in `/` (the files directly
+below it); globs and directories skip hidden files (`_*`, `.*`), as Hadoop does. Every non-hidden file directly in
+the location (not in its subdirectories) is a manifest, blank lines are ignored, repeated `/` in a location or entry is collapsed, and the files a
+partition's manifests list belong to that partition wherever they are. Only S3 paths (`s3://`, `s3a://`, `s3n://`) are
+followed; any other entry fails the scan, so that a manifest can not make DuckDB read local files.
+
 ## Writing
 
 - `CREATE SCHEMA [IF NOT EXISTS] ... [WITH (comment = '...', location = '...', <property> = '...')]` creates a Glue
@@ -94,7 +102,8 @@ their codec themselves.
   inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
-  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
+  they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Writes
+  to symlink tables are refused too: a data file in their location would be read as a manifest.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
   Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
@@ -154,6 +163,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
 - `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
   `quote := '"'` and `escape := '\'` describe the files; csv columns are matched by position, json keys by name.
+- `symlink := true`: the root and partition locations hold manifests listing the data files, read like the
+  locations of a Glue symlink table (see above).
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is

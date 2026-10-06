@@ -79,6 +79,10 @@ bool GlueTableInfo::IsBucketed() const {
 	return !bucket_columns.empty();
 }
 
+bool GlueTableInfo::IsSymlink() const {
+	return StringUtil::Contains(StringUtil::Lower(input_format), "symlinktextinputformat");
+}
+
 string GlueColumn::DescribeSortOrder() const {
 	switch (sort_order) {
 	case GlueSortOrder::ASCENDING:

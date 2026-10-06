@@ -1,0 +1,224 @@
+# name: test/sql/hive/hive_scan/scan/test_symlink.test
+# description: hive_scan(symlink := true): the locations hold manifests (SymlinkTextInputFormat) listing the data files
+# group: [scan]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env DEFAULT_S3_LOCATION
+
+# the data files, outside the locations that hold the manifests
+statement ok
+COPY (SELECT * FROM (VALUES (1, 'a'), (2, 'b')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data1.csv' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (3, 'c'), (4, 'd')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data2.csv' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (5, 'e')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/other.csv' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (6, 'hidden')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/_hidden.csv' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT * FROM (VALUES (7, 'nested')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/sub/nested.csv' (FORMAT csv, HEADER false);
+
+#---------------------------------------------------------------------------
+# a file per line, blank lines ignored
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT unnest(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data1.csv', NULL, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data2.csv']))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_files/symlink.txt' (FORMAT csv, HEADER false);
+
+query II
+SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_files', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'})
+ORDER BY id;
+----
+1	a
+2	b
+3	c
+4	d
+
+# without symlink the manifest itself is read as data
+statement error
+SELECT id FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_files', format := 'csv',
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+<REGEX>:.*Could not convert string.*
+
+# every file directly in the location is a manifest; hidden files and subdirectories are not
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/other.csv') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_files/more.txt' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 'not a path') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_files/_SUCCESS' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT 'not a path') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_files/sub/not_a_manifest.txt' (FORMAT csv, HEADER false);
+
+query I
+SELECT list(id ORDER BY id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_files', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5]
+
+# a hidden file named explicitly is read
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/_hidden.csv') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_explicit_hidden/symlink.txt' (FORMAT csv, HEADER false);
+
+query I
+SELECT list(id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_explicit_hidden', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+[6]
+
+#---------------------------------------------------------------------------
+# globs and directories: hidden files and subdirectories are skipped
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data*.csv') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_glob/symlink.txt' (FORMAT csv, HEADER false);
+
+query I
+SELECT list(id ORDER BY id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_glob', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4]
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/*') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_wildcard/symlink.txt' (FORMAT csv, HEADER false);
+
+query I
+SELECT list(id ORDER BY id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_wildcard', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5]
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_directory/symlink.txt' (FORMAT csv, HEADER false);
+
+query I
+SELECT list(id ORDER BY id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_directory', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2, 3, 4, 5]
+
+# a glob that matches nothing reads no rows
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/nothing*.csv') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_no_match/symlink.txt' (FORMAT csv, HEADER false);
+
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_no_match', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+0
+
+# a location without manifests reads no rows
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_empty', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+0
+
+# a listed file that does not exist fails the scan
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/missing.csv') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_missing/symlink.txt' (FORMAT csv, HEADER false);
+
+statement error
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_missing', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+missing.csv
+
+# a directory's placeholder objects ('<dir>_$folder$') are not data files: as parquet a zero-byte file fails the scan
+statement ok
+COPY (SELECT * FROM (VALUES (8, 'h')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_marker_data/part-0.parquet';
+
+statement ok
+COPY (SELECT 1 AS x WHERE false) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_marker_data/sub_$folder$' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_marker_data/') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_marker/symlink.txt' (FORMAT csv, HEADER false);
+
+query II
+SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_marker', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+8	h
+
+#---------------------------------------------------------------------------
+# only S3 paths are followed; the scheme is case-insensitive
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT replace('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data1.csv', 's3://', 'S3://')) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_upper_scheme/symlink.txt' (FORMAT csv, HEADER false);
+
+query I
+SELECT list(id ORDER BY id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_upper_scheme', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+[1, 2]
+
+statement ok
+COPY (SELECT unnest(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data1.csv', '/etc/passwd'])) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_local/symlink.txt' (FORMAT csv, HEADER false);
+
+statement error
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_local', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+<REGEX>:.*lists '/etc/passwd': symlink target paths must be S3 URIs.*
+
+statement ok
+COPY (SELECT 'file:///etc/passwd') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_file_scheme/symlink.txt' (FORMAT csv, HEADER false);
+
+statement error
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_file_scheme', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+symlink target paths must be S3 URIs
+
+#---------------------------------------------------------------------------
+# the SerDe still decides the reader
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES (10, 'p')) t(id, name)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_parquet_data/part-0.parquet';
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_parquet_data/part-0.parquet') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_parquet/symlink.txt' (FORMAT csv, HEADER false);
+
+query II
+SELECT id, name FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_parquet', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+10	p
+
+#---------------------------------------------------------------------------
+# partitions: every file a partition's manifests list belongs to it, wherever the file is
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data1.csv') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_part/part=amer/symlink.txt' (FORMAT csv, HEADER false);
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_data/data2.csv') TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_part/part=apac/symlink.txt' (FORMAT csv, HEADER false);
+
+# apac is registered with a doubled '/', which is collapsed as Hadoop does
+query III
+SELECT id, name, part FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_part', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR', part: 'VARCHAR'},
+    partitions := [{part: 'amer', location: NULL}, {part: 'apac', location: '{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_part//part=apac/'}])
+ORDER BY id;
+----
+1	a	amer
+2	b	amer
+3	c	apac
+4	d	apac
+
+query I
+SELECT list(id ORDER BY id) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/sym_part', format := 'csv', symlink := true,
+    schema := {id: 'INTEGER', name: 'VARCHAR', part: 'VARCHAR'},
+    partitions := [{part: 'amer'}, {part: 'apac'}])
+WHERE part = 'apac';
+----
+[3, 4]

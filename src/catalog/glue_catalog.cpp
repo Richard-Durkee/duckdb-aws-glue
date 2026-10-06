@@ -294,6 +294,12 @@ GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char 
 		                              statement, table.name.GetIdentifierName(),
 		                              glue_table.table_info.DescribeBucketing());
 	}
+	// a data file written to the location would be read as a manifest
+	if (glue_table.table_info.IsSymlink()) {
+		throw NotImplementedException("%s into Glue table '%s' is not supported: it is a symlink table "
+		                              "(SymlinkTextInputFormat), whose location holds manifests rather than data files",
+		                              statement, table.name.GetIdentifierName());
+	}
 	return glue_table;
 }
 

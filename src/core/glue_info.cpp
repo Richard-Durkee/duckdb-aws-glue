@@ -168,6 +168,19 @@ string GlueTableInfo::GetCompressionLevel() const {
 	return GetParameter("compression_level");
 }
 
+string GlueTableInfo::GetAvroCodec() const {
+	auto codec = StringUtil::Lower(GetParameter("avro.output.codec"));
+	if (codec.empty() || codec == "snappy" || codec == "deflate" || codec == "null") {
+		return codec;
+	}
+	if (codec == "none" || codec == "uncompressed") {
+		return "null";
+	}
+	throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB writes only "
+	                              "snappy and deflate compressed avro files",
+	                              database_name, name, codec);
+}
+
 string GlueTableInfo::GetQuoteCharacter() const {
 	// OpenCSVSerde: quoteChar. LazySimpleSerDe does not quote at all, but DuckDB writes (and reads) quoted fields
 	// with the '"' it defaults to, which is also OpenCSVSerde's default

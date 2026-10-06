@@ -48,6 +48,11 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   does not have (added after the file was written) reads as NULL, a column with a different type in the file is
   cast, and file columns Glue does not list are ignored.
 
+Compression: a csv or json table is read with the codec it records (`write.compression`, else the `compressionType`
+Glue crawlers set), whatever the names of its files; DuckDB reads gzip and zstd, another codec is an error. A table
+that records none is read with DuckDB's default, which tells `.gz` and `.zst` files by their extension. Parquet and
+avro files carry their codec themselves.
+
 ## Writing
 
 - `CREATE SCHEMA [IF NOT EXISTS] ... [WITH (comment = '...', location = '...', <property> = '...')]` creates a Glue
@@ -83,17 +88,33 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
   Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
+- Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
+  for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
+  codec is an error.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`
   becomes `'4'`); a key may be quoted (`'parquet.compression' = 'ZSTD'`). The parameters the table format is read
   from (`table_type`, `spark.sql.sources.provider`, `metadata_location`) can not be changed this way.
+- `CALL glue_replace_columns('cat.db.t', {id: 'BIGINT', name: 'VARCHAR'}, comments := {id: '...'})` is Hive's
+  `ALTER TABLE ... REPLACE COLUMNS`: it replaces all data columns of the table at once, which can also rename and
+  reorder them. Types are DuckDB types, stored the way `CREATE TABLE` stores them; a column that stays (same name,
+  compared case-insensitively) keeps its stored name and may only be widened, as with `ALTER COLUMN ... TYPE`. As in
+  Hive, comments not given in `comments` are dropped; `keep_comments := true` keeps those of the columns that stay
+  (a NULL in `comments` then removes one). The partition keys are kept
+  and must not be listed; the bucketing and sort columns must be listed. It returns the columns as stored in Glue
+  (Glue type names). The data files are not rewritten: parquet, json and avro files are matched by name (a renamed
+  column reads as NULL), csv files by position, so a csv table keeps its number of columns, each may only be widened
+  and giving it a new name renames it.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
-is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported.
+is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
+of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
+...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
+`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
 
 ## Views
 

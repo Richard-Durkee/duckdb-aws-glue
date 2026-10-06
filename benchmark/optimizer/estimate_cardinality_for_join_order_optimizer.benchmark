@@ -1,4 +1,4 @@
-# name: benchmark/optimizer/join_build_side.benchmark
+# name: benchmark/optimizer/estimate_cardinality_for_join_order_optimizer.benchmark
 # description: join a large and a small partitioned Hive table in the local Glue (moto) + S3 (MinIO): the hash join should build on the small one
 # group: [optimizer]
 

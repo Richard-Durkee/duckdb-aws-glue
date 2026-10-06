@@ -11,7 +11,6 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
-class FileSystem;
 
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
@@ -94,8 +93,8 @@ private:
 	};
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
-	void ListRoot(FileSystem &fs, const vector<idx_t> &partitions) const;
-	void ListPartition(FileSystem &fs, idx_t partition_index) const;
+	void ListRoot(const vector<idx_t> &partitions) const;
+	void ListPartition(idx_t partition_index) const;
 	//! The files of the first of 'partitions' in the root listing, fetching no more of it than needed
 	vector<OpenFileInfo> SampleRootPartition(const vector<idx_t> &partitions) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
@@ -114,8 +113,8 @@ private:
 	shared_ptr<HiveScanInfo> scan_info;
 	vector<idx_t> partition_indexes;
 	mutable bool planned = false;
-	mutable vector<ListingJob> jobs;
-	//! The next entry of 'jobs' to run
+	mutable vector<ListingJob> listing_jobs;
+	//! The next entry of 'listing_jobs' to run
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;

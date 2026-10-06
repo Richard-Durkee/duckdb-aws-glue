@@ -8,13 +8,16 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
+#include "duckdb/common/multi_file/table_function_multi_file.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
@@ -589,7 +592,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	child_list_t<Value> data_columns;
 	for (idx_t i = 0; i < scan_info->names.size(); i++) {
 		if (scan_info->GetPartitionKeyIndex(scan_info->names[i].GetIdentifierName()) == DConstants::INVALID_INDEX) {
-			data_columns.emplace_back(scan_info->names[i], Value(scan_info->types[i].ToString()));
+			// with SerDe fields every column is read as text; InitializeReader converts it to the column's type
+			auto type = scan_info->serde_fields ? LogicalType::VARCHAR : scan_info->types[i];
+			data_columns.emplace_back(scan_info->names[i], Value(type.ToString()));
 		}
 	}
 	named_argument_map_t param_map;
@@ -612,6 +617,11 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["nullstr"] = Value(scan_info->null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
+		if (scan_info->serde_fields) {
+			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
+			param_map["null_padding"] = Value::BOOLEAN(true);
+			param_map["strict_mode"] = Value::BOOLEAN(false);
+		}
 		break;
 	case HiveFileFormat::JSON:
 		// one JSON object per line, keys matched to the columns by name
@@ -627,6 +637,14 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		break;
 	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
+	if (scan_info->serde_fields) {
+		// read_csv would convert the text itself, strictly: have the column mapping cast it, so InitializeReader can
+		// make the casts TRY_CASTs
+		auto &info = scan_function.function_info->Cast<TableFunctionMultiFileInfo>();
+		auto settings = info.settings;
+		settings.supports_cast_map = false;
+		scan_function.function_info = make_shared_ptr<TableFunctionMultiFileInfo>(info.function, std::move(settings));
+	}
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
 	// the format reader serializes its file list, which would expand this lazy list (listing S3) while the
@@ -944,6 +962,41 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	// the filename / file_index virtual columns
 	MultiFileReader::FinalizeBind(reader_data, file_options, options, global_columns, global_column_ids, context,
 	                              global_state);
+}
+
+//! Make the cast of a field's text to its column's type a TRY_CAST
+static void MakeTryCast(ClientContext &context, unique_ptr<Expression> &expr) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (BoundCastExpression::IsTryCast(cast) ||
+	    BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	auto target_type = cast.GetReturnType();
+	auto child = std::move(BoundCastExpression::ChildMutable(cast));
+	expr = BoundCastExpression::AddCastToType(context, std::move(child), target_type, true);
+}
+
+ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
+                                                           const MultiFileBindData &bind_data,
+                                                           const vector<MultiFileColumnDefinition> &global_columns,
+                                                           const vector<ColumnIndex> &global_column_ids,
+                                                           optional_ptr<TableFilterSet> table_filters,
+                                                           ClientContext &context, MultiFileGlobalState &gstate) {
+	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
+	                                                table_filters, context, gstate);
+	if (!ScanInfo().serde_fields) {
+		return result;
+	}
+	if (!reader_data.reader->expression_map.empty()) {
+		throw InternalException("read_csv evaluates casts of Hive text table '%s' itself", ScanInfo().Describe());
+	}
+	for (auto &expr : reader_data.expressions) {
+		MakeTryCast(context, expr);
+	}
+	return result;
 }
 
 } // namespace duckdb

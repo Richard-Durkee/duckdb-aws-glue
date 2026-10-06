@@ -110,7 +110,7 @@ public:
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
 	bool IsOpenCSVSerde() const;
-	//! A SerDe property (case-insensitive key), a table parameter of that name first
+	//! A SerDe property, a table parameter of that name first
 	bool TryGetSerdeProperty(const string &key, string &result) const;
 	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
@@ -127,16 +127,17 @@ public:
 	string GetNullFormat() const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
-	//! Throws for the text SerDe properties DuckDB can not read or write in a csv or json table: footer lines, header
-	//! lines in JSON files, escaped LazySimpleSerDe fields
+	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
-	//! The quote character of a CSV table (quoteChar of OpenCSVSerde), '"' when the SerDe does not say
+	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote
 	string GetQuoteCharacter() const;
-	//! The escape character of a CSV table (escapeChar of OpenCSVSerde), else the quote character
+	//! OpenCSVSerde's escapeChar, else its quote character; empty for LazySimpleSerDe
 	string GetEscapeCharacter() const;
 
 private:
 	idx_t GetLineCount(const string &key) const;
+	//! An OpenCSVSerde character property (its first character), 'fallback' when not set
+	string GetOpenCSVCharacter(const string &key, const string &fallback) const;
 };
 
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB

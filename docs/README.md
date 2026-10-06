@@ -31,21 +31,27 @@ line, keys by name) and AvroSerDe with `read_avro` (columns by name) from the av
 demand. Other SerDes (ORC, Ion, ...) are not supported. Text tables are read the way their SerDe reads them:
 
 - LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
-  is a byte code (`'1'` is `\001`, `'9'` a tab), and only ASCII delimiters other than NUL are supported. NULL is
-  `serialization.null.format`, `\N` by default. An empty string field stays an empty string. A value that does not
-  parse as its column type (an empty numeric field, `abc` in an `int` column) fails the scan, where Hive reads NULL.
-  LazySimpleSerDe does not quote, but a field in `"` is read and written quoted; tables with `escape.delim` can not be
-  read or written.
-- OpenCSVSerde: `separatorChar` (`,` by default), `quoteChar` and `escapeChar`. OpenCSVSerde has no NULL: a quoted
-  empty field (`""`, what it writes for an empty string) is an empty string, while an unquoted empty field reads as
-  NULL, since DuckDB's reader needs a NULL string. A value that does not parse fails the scan.
-- `skip.header.line.count` lines are skipped at the start of every csv file; JsonSerDe tables with header lines, and
-  text tables with `skip.footer.line.count`, can not be read or written. Line counts and byte codes are parsed as Hive
-  parses them: digits with an optional sign, so `'1.5'` or `' 1'` is not a number.
-- As in Hive, a table property overrides the SerDe property of the same name.
+  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
+  quoted.
+- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
+  doubled quotes Hive writes). An empty field is an empty string; there is no NULL.
+- Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
+  NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
+  `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
+- `skip.header.line.count` lines are skipped at the start of every file.
+- Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
+  delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
+  line break.
+- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
+  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
+  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
+  NULL string. Writes need a single-byte delimiter.
+- As in Hive, a table property overrides the SerDe property of the same name, keys are case-sensitive, and line counts
+  and byte codes are digits with an optional sign (`'1.5'` is not a number). Partitions are read with the table's
+  SerDe properties, not their own. `hive_scan()` uses plain `read_csv` rules.
 
-Tables created by earlier versions of this extension (`WITH (format = 'csv')`) store NULL as an empty field and do
-not record a NULL string; to read them as before, set `serialization.null.format` to `''` on the table.
+Breaking change: csv tables written by earlier versions of this extension store NULL as an empty field and may quote
+fields. To read such a table as before, set `serialization.null.format` to `''` and switch its SerDe to OpenCSVSerde.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 

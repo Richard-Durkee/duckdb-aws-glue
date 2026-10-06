@@ -94,7 +94,9 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 		scan_info->quote = latest_info.GetQuoteCharacter();
 		scan_info->escape = latest_info.GetEscapeCharacter();
 		scan_info->skip_lines = latest_info.GetHeaderLineCount();
-		scan_info->null_string = latest_info.GetNullFormat();
+		// OpenCSVSerde has no NULL: "\n" matches no unquoted field
+		scan_info->null_string = latest_info.IsOpenCSVSerde() ? "\n" : latest_info.GetNullFormat();
+		scan_info->serde_fields = true;
 	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());

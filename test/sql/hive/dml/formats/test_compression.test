@@ -19,7 +19,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -98,6 +98,44 @@ SELECT id FROM my_datalake.default.compr_csv_ctas;
 ----
 1
 
+# the other text codecs DuckDB writes: zstd csv, gzip and plain json
+statement ok
+CREATE TABLE my_datalake.default.compr_csv_zstd (id INTEGER, name VARCHAR) WITH (format = 'csv', 'write.compression' = 'ZSTD');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_json_gzip (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'GZIP');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_json_none (id INTEGER, name VARCHAR) WITH (format = 'json', 'write.compression' = 'NONE');
+
+foreach table compr_csv_zstd compr_json_gzip compr_json_none
+
+statement ok
+INSERT INTO my_datalake.default.{table} VALUES (1, 'a'), (2, 'b');
+
+query II
+SELECT id, name FROM my_datalake.default.{table} ORDER BY id;
+----
+1	a
+2	b
+
+endloop
+
+query II
+SELECT bool_and(filename LIKE '%.csv.zst'), bool_and(hex(content)[1:8] = '28B52FFD') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_zstd/*');
+----
+true	true
+
+query II
+SELECT bool_and(filename LIKE '%.json.gz'), bool_and(hex(content)[1:4] = '1F8B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_gzip/*');
+----
+true	true
+
+query II
+SELECT bool_and(filename LIKE '%.json'), bool_and(hex(content)[1:2] = '7B') FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_none/*');
+----
+true	true
+
 #---------------------------------------------------------------------------
 # reads: the codec the table records wins over the file name
 #---------------------------------------------------------------------------
@@ -142,11 +180,35 @@ COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_pla
 statement ok
 COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_plain/part-00001.csv' (FORMAT csv, HEADER false);
 
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_plain/part-00002.csv.zst' (FORMAT csv, HEADER false, COMPRESSION zstd);
+
 query I
 SELECT id FROM my_datalake.default.compr_csv_plain ORDER BY id;
 ----
 1
 2
+3
+
+# the same for json: one table with gzip, zstd and plain files
+statement ok
+CREATE TABLE my_datalake.default.compr_json_plain (id INTEGER) WITH (format = 'json');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_plain/part-00000.json.gz' (FORMAT json, COMPRESSION gzip);
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_plain/part-00001.json.zst' (FORMAT json, COMPRESSION zstd);
+
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_json_plain/part-00002.json' (FORMAT json);
+
+query I
+SELECT id FROM my_datalake.default.compr_json_plain ORDER BY id;
+----
+1
+2
+3
 
 # a codec DuckDB can not write
 statement ok
@@ -175,9 +237,19 @@ statement ok
 CREATE TABLE my_datalake.default.compr_parquet_none (id INTEGER) WITH ('parquet.compression' = 'NONE');
 
 statement ok
+CREATE TABLE my_datalake.default.compr_parquet_snappy (id INTEGER) WITH ('parquet.compression' = 'SNAPPY');
+
+# DuckDB writes LZ4 as LZ4_RAW
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_lz4 (id INTEGER) WITH ('parquet.compression' = 'LZ4');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_parquet_brotli (id INTEGER) WITH ('parquet.compression' = 'BROTLI');
+
+statement ok
 CREATE TABLE my_datalake.default.compr_parquet_default (id INTEGER);
 
-foreach table compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_default
+foreach table compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_parquet_default
 
 statement ok
 INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
@@ -185,13 +257,22 @@ INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
 endloop
 
 query II
-SELECT regexp_extract(file_name, 'compr_parquet_([a-z]+)', 1) AS t, string_agg(DISTINCT compression)
+SELECT regexp_extract(file_name, 'compr_parquet_([a-z0-9]+)', 1) AS t, string_agg(DISTINCT compression)
 FROM parquet_metadata('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_parquet_*/*.parquet') GROUP BY t ORDER BY t;
 ----
+brotli	BROTLI
 default	SNAPPY
 gzip	GZIP
+lz4	LZ4_RAW
 none	UNCOMPRESSED
+snappy	SNAPPY
 zstd	ZSTD
+
+query III
+SELECT (SELECT sum(id) FROM my_datalake.default.compr_parquet_snappy), (SELECT sum(id) FROM my_datalake.default.compr_parquet_lz4),
+    (SELECT sum(id) FROM my_datalake.default.compr_parquet_brotli);
+----
+4950	4950	4950
 
 query I
 SELECT sum(id) FROM my_datalake.default.compr_parquet_zstd;
@@ -238,7 +319,7 @@ INSERT INTO my_datalake.default.compr_parquet_lzo VALUES (1);
 ----
 Expected "compression" argument to be any of
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain
 
 statement ok
 DROP TABLE my_datalake.default.{table};

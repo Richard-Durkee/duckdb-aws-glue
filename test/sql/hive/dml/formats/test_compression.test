@@ -137,29 +137,31 @@ SELECT bool_and(filename LIKE '%.json'), bool_and(hex(content)[1:2] = '7B') FROM
 true	true
 
 #---------------------------------------------------------------------------
-# reads: the codec the table records wins over the file name
+# reads: the files are read with the codec their name says, whatever the table records
 #---------------------------------------------------------------------------
-# write.compression 'NONE': a gzip file is read as plain text, whatever its name
+# write.compression 'NONE': a gzip file named .csv.gz is still read as gzip
 statement ok
 COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_none/part-00001.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
 
-statement error
-SELECT * FROM my_datalake.default.compr_csv_none;
+query I
+SELECT id FROM my_datalake.default.compr_csv_none ORDER BY id;
 ----
-<REGEX>:.*(Invalid unicode|CSV Error|Could not convert).*
+1
+2
 
-# compressionType, which Glue crawlers record, names the codec when write.compression does not
+# a table that records gzip (as a Glue crawler does) reads plain files, and gzip files named .csv
 statement ok
 CREATE TABLE my_datalake.default.compr_csv_crawler (id INTEGER) WITH (format = 'csv', 'compressionType' = 'gzip');
 
 statement ok
-COPY (SELECT 5 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_crawler/part-00000.csv' (FORMAT csv, HEADER false, COMPRESSION gzip);
+COPY (SELECT 5 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_crawler/part-00000.csv' (FORMAT csv, HEADER false);
 
 query I
 SELECT id FROM my_datalake.default.compr_csv_crawler;
 ----
 5
 
+# the table's codec is still what INSERT writes with
 statement ok
 INSERT INTO my_datalake.default.compr_csv_crawler VALUES (6);
 
@@ -167,6 +169,12 @@ query I
 SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_crawler/*.csv.gz');
 ----
 1
+
+query I
+SELECT id FROM my_datalake.default.compr_csv_crawler ORDER BY id;
+----
+5
+6
 
 #---------------------------------------------------------------------------
 # reads of a table that records no codec: DuckDB tells gzip and zstd files by their extension
@@ -217,12 +225,16 @@ CREATE TABLE my_datalake.default.compr_csv_bzip2 (id INTEGER) WITH (format = 'cs
 statement error
 INSERT INTO my_datalake.default.compr_csv_bzip2 VALUES (1);
 ----
-Hive table 'default.compr_csv_bzip2' is bzip2 compressed, DuckDB reads and writes only gzip and zstd compressed csv and json files
+Can not write to Hive table 'default.compr_csv_bzip2': it records bzip2 compression, DuckDB writes only gzip and zstd compressed csv and json files
 
-statement error
-SELECT * FROM my_datalake.default.compr_csv_bzip2;
+# a codec DuckDB can not write does not stop reads: the files are read by their name
+statement ok
+COPY (SELECT 7 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_csv_bzip2/part-00000.csv.gz' (FORMAT csv, HEADER false, COMPRESSION gzip);
+
+query I
+SELECT id FROM my_datalake.default.compr_csv_bzip2;
 ----
-Hive table 'default.compr_csv_bzip2' is bzip2 compressed
+7
 
 #---------------------------------------------------------------------------
 # parquet.compression and compression_level

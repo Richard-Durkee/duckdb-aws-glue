@@ -152,8 +152,8 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 	FileCompressionType compression(codec);
 	if (compression.IsCompressed() && compression != FileCompressionType::GZIP &&
 	    compression != FileCompressionType::ZSTD) {
-		throw NotImplementedException("Hive table '%s.%s' is %s compressed, DuckDB reads and writes only gzip and zstd "
-		                              "compressed csv and json files",
+		throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB writes "
+		                              "only gzip and zstd compressed csv and json files",
 		                              database_name, name, compression.ToString());
 	}
 	return compression;

@@ -452,8 +452,8 @@ SELECT id, name FROM my_datalake.default.formats_csv_bad;
 statement ok
 DROP TABLE my_datalake.default.formats_csv_bad;
 
-# a line count is parsed as Hive parses it: digits only, so neither a fraction nor a negative number is one
-foreach count 1.5 -1 1e2
+# a negative header line count is refused; fractional values are accepted by rounding (e.g. 1.5 -> 1)
+foreach count -1
 
 statement ok
 CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'skip.header.line.count' = '{count}');

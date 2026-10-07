@@ -1,0 +1,263 @@
+# name: test/sql/hive/ddl/ddl_in_transaction.test
+# description: CREATE/ALTER/DROP of Glue databases, tables and views inside an explicit transaction is an error, Glue has no transactions
+# group: [ddl]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.txn_ddl_schema CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.txn_ddl_new_schema CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.txn_ddl_schema WITH (owner = 'a');
+
+statement ok
+CREATE TABLE my_datalake.txn_ddl_schema.existing (id INTEGER);
+
+statement ok
+CREATE VIEW my_datalake.txn_ddl_schema.existing_view AS SELECT 1 AS id;
+
+# schemas
+statement ok
+BEGIN;
+
+statement error
+CREATE SCHEMA my_datalake.txn_ddl_new_schema;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction. Transaction support is not provided for Glue catalogs.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CREATE SCHEMA IF NOT EXISTS my_datalake.txn_ddl_schema;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+ALTER SCHEMA my_datalake.txn_ddl_schema SET (owner = 'b');
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+DROP SCHEMA my_datalake.txn_ddl_schema CASCADE;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+DROP SCHEMA IF EXISTS my_datalake.txn_ddl_new_schema;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+# tables
+statement ok
+BEGIN;
+
+statement error
+CREATE TABLE my_datalake.txn_ddl_schema.new_table (id INTEGER);
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CREATE TABLE IF NOT EXISTS my_datalake.txn_ddl_schema.existing (id INTEGER);
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CREATE TABLE my_datalake.txn_ddl_schema.new_ctas AS SELECT 1 AS id;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+DROP TABLE my_datalake.txn_ddl_schema.existing;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+# DROP ... IF EXISTS of a missing table never reaches Glue, so it is a no-op that does not abort the transaction
+statement ok
+BEGIN;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.txn_ddl_schema.new_table;
+
+statement ok
+COMMIT;
+
+# views
+statement ok
+BEGIN;
+
+statement error
+CREATE VIEW my_datalake.txn_ddl_schema.new_view AS SELECT 1 AS id;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+CREATE OR REPLACE VIEW my_datalake.txn_ddl_schema.existing_view AS SELECT 2 AS id;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement ok
+BEGIN;
+
+statement error
+DROP VIEW my_datalake.txn_ddl_schema.existing_view;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+# the error aborts the DuckDB transaction; COMMIT and ABORT end it as well
+statement ok
+BEGIN;
+
+statement error
+CREATE TABLE my_datalake.txn_ddl_schema.new_table (id INTEGER);
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement error
+SELECT * FROM my_datalake.txn_ddl_schema.existing;
+----
+<REGEX>:TransactionContext Error.*Current transaction is aborted.*
+
+statement ok
+COMMIT;
+
+statement ok
+BEGIN;
+
+statement error
+DROP VIEW my_datalake.txn_ddl_schema.existing_view;
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ABORT;
+
+# nothing was changed in Glue
+query I
+SELECT schema_name FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name LIKE 'txn_ddl%';
+----
+txn_ddl_schema
+
+query II
+SELECT table_name, type FROM (
+    SELECT table_name, 'table' AS type FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = 'txn_ddl_schema'
+    UNION ALL
+    SELECT view_name, 'view' FROM duckdb_views() WHERE database_name = 'my_datalake' AND schema_name = 'txn_ddl_schema'
+) ORDER BY table_name;
+----
+existing	table
+existing_view	view
+
+query I
+SELECT * FROM my_datalake.txn_ddl_schema.existing_view;
+----
+1
+
+query I
+SELECT map_extract_value(parameters, 'owner') FROM glue_get_database_response('my_datalake.txn_ddl_schema');
+----
+a
+
+# outside of a transaction the same statements work
+statement ok
+CREATE SCHEMA my_datalake.txn_ddl_new_schema;
+
+statement ok
+ALTER SCHEMA my_datalake.txn_ddl_schema SET (owner = 'b');
+
+statement ok
+CREATE TABLE my_datalake.txn_ddl_schema.new_table (id INTEGER);
+
+statement ok
+CREATE TABLE my_datalake.txn_ddl_schema.new_ctas AS SELECT 1 AS id;
+
+statement ok
+CREATE OR REPLACE VIEW my_datalake.txn_ddl_schema.existing_view AS SELECT 2 AS id;
+
+query I
+SELECT * FROM my_datalake.txn_ddl_schema.existing_view;
+----
+2
+
+statement ok
+DROP VIEW my_datalake.txn_ddl_schema.existing_view;
+
+statement ok
+DROP TABLE my_datalake.txn_ddl_schema.new_table;
+
+statement ok
+DROP SCHEMA my_datalake.txn_ddl_new_schema;
+
+statement ok
+DROP SCHEMA my_datalake.txn_ddl_schema CASCADE;

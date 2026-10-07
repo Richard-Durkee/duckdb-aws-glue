@@ -15,12 +15,14 @@ struct CreateTableInfo;
 struct GlueCreateTableOptions {
 	//! Optional explicit S3 location of the table
 	string location;
-	//! The file format of the table (format = 'parquet' | 'csv' | 'json' | 'avro'), parquet by default
+	//! The file format of the table (format = 'parquet' | 'csv' | 'json' | 'avro' | 'regex'), parquet by default
 	HiveFileFormat format = HiveFileFormat::PARQUET;
 	//! csv only: delimiter, quote and escape (single characters; quote and escape empty unless given)
 	string csv_delimiter = ",";
 	string csv_quote;
 	string csv_escape;
+	//! regex only: input.regex and input.regex.case.insensitive, stored as SerDe properties
+	unordered_map<string, string> serde_parameters;
 	//! BucketColumns / NumberOfBuckets / SortColumns, named as in Glue's StorageDescriptor
 	vector<string> bucket_columns;
 	int32_t number_of_buckets = -1;

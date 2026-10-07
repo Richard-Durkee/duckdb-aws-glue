@@ -28,8 +28,8 @@ Attach options:
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is
 1, delimiter from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per
-line, keys by name) and AvroSerDe with `read_avro` (columns by name) from the avro extension, which is loaded on
-demand. Other SerDes (ORC, Ion, ...) are not supported.
+line, keys by name), AvroSerDe with `read_avro` (columns by name) from the avro extension, which is loaded on
+demand, and RegexSerDe with `read_csv` (one line per row, see below). Other SerDes (ORC, Ion, ...) are not supported.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
@@ -56,13 +56,23 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
 from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per line, keys by
-name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
-...) are not supported.
+name), AvroSerDe with `read_avro` from the avro extension, which is loaded on demand, and RegexSerDe with
+`read_csv`. Other SerDes (ORC, Ion, ...) are not supported.
 
 Compression: every csv and json file is read with the codec DuckDB tells from its name (`.gz`, `.zst`), whatever the
 table records, so a table whose files use more than one codec is read correctly and a stale `write.compression` or
 `compressionType` does not matter. The codec a table records is what writes to it use. Parquet and avro files carry
 their codec themselves.
+
+RegexSerDe tables are read the way Hive reads them: every line of a file is matched as a whole against the table's
+`input.regex` (with `input.regex.case.insensitive = 'true'` ignoring case), and the data columns are its capture
+groups, in order. A line the regex does not match reads as NULL in every data column, a group that takes no part in
+the match reads as NULL, and a group that does not convert to its column's type reads as NULL. `BOOLEAN` columns are
+true for `true` in any case and false otherwise, as Java's `Boolean.valueOf`. The table must have one capture group
+per data column, and only columns of primitive types. The regex is compiled with RE2, which has no backreferences or
+lookarounds; a regex RE2 can not compile fails the query. Filters on the data columns are applied after the lines are
+matched. RegexSerDe tables can not be written (Hive's RegexSerDe has no serialize either). `hive_scan` reads them
+with `format := 'regex', regex := '...'`.
 
 ## Writing
 
@@ -72,10 +82,10 @@ their codec themselves.
   `DBPROPERTIES`). A `DEFAULT_LOCATION` on ATTACH still decides where new tables go, over the database's LocationUri.
 - `ALTER SCHEMA ... SET (<key> = '...', ...)` merges options into the Glue database (UpdateDatabase), with the same
   keys as `CREATE SCHEMA`; `ALTER SCHEMA ... RESET (<key>, ...)` removes them. Keys are case-insensitive.
-- `CREATE TABLE ... [PARTITIONED BY (col, ...)] [WITH (format = 'parquet' | 'csv' | 'json' | 'avro', location = '...',
-  <property> = '...')]` creates a parquet (default), csv (LazySimpleSerDe, `,` delimited, no header), json
-  (JsonSerDe, one object per line) or avro (AvroSerDe)
-  Hive table at `location`, else `<DEFAULT_LOCATION>/<database>/<table>`, else `<database LocationUri>/<table>`;
+- `CREATE TABLE ... [PARTITIONED BY (col, ...)] [WITH (format = 'parquet' | 'csv' | 'json' | 'avro' | 'regex',
+  location = '...', <property> = '...')]` creates a parquet (default), csv (LazySimpleSerDe, `,` delimited, no
+  header), json (JsonSerDe, one object per line), avro (AvroSerDe) or regex (RegexSerDe, with the SerDe properties
+  `'input.regex' = '...'` and optionally `'input.regex.case.insensitive' = 'true'`) Hive table at `location`, else `<DEFAULT_LOCATION>/<database>/<table>`, else `<database LocationUri>/<table>`;
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
   PartitionKeys and are listed last in the table's columns. Unknown `WITH` keys are stored as Glue table parameters.
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a

@@ -40,12 +40,14 @@ string HiveFileFormatToString(HiveFileFormat format) {
 		return "json";
 	case HiveFileFormat::AVRO:
 		return "avro";
+	case HiveFileFormat::REGEX:
+		return "regex";
 	}
 	throw InternalException("Unknown HiveFileFormat");
 }
 
 bool IsTextFileFormat(HiveFileFormat format) {
-	return format == HiveFileFormat::CSV || format == HiveFileFormat::JSON;
+	return format == HiveFileFormat::CSV || format == HiveFileFormat::JSON || format == HiveFileFormat::REGEX;
 }
 
 HiveFileFormat HiveFileFormatFromString(const string &format) {
@@ -62,7 +64,10 @@ HiveFileFormat HiveFileFormatFromString(const string &format) {
 	if (lower == "avro") {
 		return HiveFileFormat::AVRO;
 	}
-	throw BinderException("Unknown Hive file format '%s', expected 'parquet', 'csv', 'json' or 'avro'", format);
+	if (lower == "regex") {
+		return HiveFileFormat::REGEX;
+	}
+	throw BinderException("Unknown Hive file format '%s', expected 'parquet', 'csv', 'json', 'avro' or 'regex'", format);
 }
 
 string GlueTableInfo::GetSerdeParameter(const string &key) const {
@@ -119,9 +124,12 @@ HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	if (StringUtil::Contains(serde, "avro")) {
 		return HiveFileFormat::AVRO;
 	}
+	if (StringUtil::Contains(serde, "regexserde")) {
+		return HiveFileFormat::REGEX;
+	}
 	throw NotImplementedException("Hive table '%s.%s' uses SerDe '%s', only parquet (ParquetHiveSerDe), csv "
-	                              "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe) and avro (AvroSerDe) tables are "
-	                              "supported",
+	                              "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe), avro (AvroSerDe) and regex "
+	                              "(RegexSerDe) tables are supported",
 	                              database_name, name, serde_library);
 }
 
@@ -135,6 +143,14 @@ string GlueTableInfo::GetFieldDelimiter() const {
 		return ",";
 	}
 	return delimiter;
+}
+
+string GlueTableInfo::GetInputRegex() const {
+	return GetSerdeParameter("input.regex");
+}
+
+bool GlueTableInfo::IsInputRegexCaseInsensitive() const {
+	return StringUtil::CIEquals(GetSerdeParameter("input.regex.case.insensitive"), "true");
 }
 
 bool GlueTableInfo::HasHeader() const {

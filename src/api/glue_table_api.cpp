@@ -147,6 +147,15 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 		storage_descriptor.SetOutputFormat("org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat");
 		parameters.emplace("classification", "avro");
 		break;
+	case HiveFileFormat::REGEX:
+		// lines matched against input.regex, one capture group per column
+		serde_info.SetSerializationLibrary("org.apache.hadoop.hive.serde2.RegexSerDe");
+		for (auto &parameter : table.serde_parameters) {
+			serde_info.AddParameters(parameter.first, parameter.second);
+		}
+		storage_descriptor.SetInputFormat("org.apache.hadoop.mapred.TextInputFormat");
+		storage_descriptor.SetOutputFormat("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat");
+		break;
 	}
 	storage_descriptor.SetLocation(table.location);
 	storage_descriptor.SetColumns(ToAwsColumns(table.columns));

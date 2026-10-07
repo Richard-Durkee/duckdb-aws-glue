@@ -204,6 +204,7 @@ static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &
 	}
 	case HiveFileFormat::CSV:
 	case HiveFileFormat::JSON:
+	case HiveFileFormat::REGEX:
 		// no reader is built for these: they are bound with a dialect and an explicit column list that fresh options
 		// would not reproduce. Counting lines needs none of it
 		return SampleLineOrientedRowsPerFile(context, file, info.header);

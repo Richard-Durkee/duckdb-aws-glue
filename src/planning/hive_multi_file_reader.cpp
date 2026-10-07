@@ -517,6 +517,23 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		ExtensionHelper::AutoLoadExtension(context, "avro");
 		function_name = "read_avro";
 		break;
+	case HiveFileFormat::REGEX: {
+		// RegexSerDe: every line is one row, read whole into one column (no delimiter, quote or escape character
+		// splits it) and split into the table's columns by HiveRegexSerDe
+		scan_info->regex_serde = HiveRegexSerDe::Create(*scan_info);
+		function_name = "read_csv";
+		child_list_t<Value> line_column;
+		line_column.emplace_back("line", Value("VARCHAR"));
+		param_map["columns"] = Value::STRUCT(line_column);
+		param_map["auto_detect"] = Value::BOOLEAN(false);
+		param_map["header"] = Value::BOOLEAN(scan_info->header);
+		param_map["delim"] = Value(string(1, '\0'));
+		param_map["quote"] = Value("");
+		param_map["escape"] = Value("");
+		// an empty line is an empty string, which the regex may match
+		param_map["force_not_null"] = Value::LIST(LogicalType::VARCHAR, {Value("line")});
+		break;
+	}
 	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
@@ -532,6 +549,12 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.cardinality = HiveScanCardinality;
 	scan_info->format_bind_info = scan_function.get_bind_info;
 	scan_function.get_bind_info = GlueHiveBindInfo;
+	if (scan_info->file_format == HiveFileFormat::REGEX) {
+		// the reader's one column is the line, so neither its filters nor its statistics are about the table's columns
+		scan_function.filter_pushdown = false;
+		scan_function.filter_prune = false;
+		scan_info->format_statistics = nullptr;
+	}
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
@@ -612,6 +635,87 @@ void HiveMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &
 	options.hive_partitioning = false;
 	options.union_by_name = false;
 	MultiFileReader::BindOptions(options, files, return_types, names, bind_data);
+}
+
+ReaderInitializeType HiveMultiFileReader::CreateMapping(
+    ClientContext &context, MultiFileReaderData &reader_data, const vector<MultiFileColumnDefinition> &global_columns,
+    const vector<ColumnIndex> &global_column_ids, optional_ptr<TableFilterSet> filters, MultiFileList &multi_file_list,
+    const MultiFileReaderBindData &bind_data, const virtual_column_map_t &virtual_columns,
+    MultiFileColumnMappingMode mapping_mode) {
+	auto &info = ScanInfo();
+	if (info.file_format != HiveFileFormat::REGEX) {
+		return MultiFileReader::CreateMapping(context, reader_data, global_columns, global_column_ids, filters,
+		                                      multi_file_list, bind_data, virtual_columns, mapping_mode);
+	}
+	// the capture group of every data column: its position among the data columns
+	vector<idx_t> groups(global_columns.size(), 0);
+	idx_t group = 0;
+	for (idx_t i = 0; i < global_columns.size(); i++) {
+		if (info.GetPartitionKeyIndex(global_columns[i].name.GetIdentifierName()) == DConstants::INVALID_INDEX) {
+			groups[i] = ++group;
+		}
+	}
+	auto &reader = *reader_data.reader;
+	optional_idx line_index;
+	for (idx_t i = 0; i < global_column_ids.size(); i++) {
+		// partition values and the filename / file_index virtual columns, from FinalizeBind
+		optional_idx constant;
+		for (idx_t j = 0; j < reader_data.constant_map.size(); j++) {
+			if (reader_data.constant_map[MultiFileConstantMapIndex(j)].column_idx.GetIndex() == i) {
+				constant = j;
+				break;
+			}
+		}
+		if (constant.IsValid()) {
+			auto &value = reader_data.constant_map[MultiFileConstantMapIndex(constant.GetIndex())].value;
+			reader_data.expressions.push_back(make_uniq<BoundConstantExpression>(value));
+			continue;
+		}
+		auto &column_id = global_column_ids[i];
+		if (column_id.IsVirtualColumn() || groups[column_id.GetPrimaryIndex()] == 0) {
+			throw NotImplementedException("Column %d of RegexSerDe table %s can not be read: it is not a data column, "
+			                              "a partition column or the filename",
+			                              column_id.GetPrimaryIndex(), info.Describe());
+		}
+		if (!line_index.IsValid()) {
+			line_index = reader.column_ids.size();
+			reader.column_ids.push_back(MultiFileLocalColumnId(0));
+			reader.column_indexes.emplace_back(0);
+		}
+		auto &column = global_columns[column_id.GetPrimaryIndex()];
+		auto &type = column_id.HasType() ? column_id.GetScanType() : column.type;
+		reader_data.expressions.push_back(
+		    info.regex_serde->GroupExpression(groups[column_id.GetPrimaryIndex()], type, line_index.GetIndex()));
+	}
+	return ReaderInitializeType::INITIALIZED;
+}
+
+void HiveMultiFileReader::FinalizeChunk(ClientContext &context, const MultiFileBindData &bind_data,
+                                        BaseFileReader &reader, const MultiFileReaderData &reader_data,
+                                        DataChunk &input_chunk, DataChunk &output_chunk, ExpressionExecutor &executor,
+                                        optional_ptr<MultiFileReaderGlobalState> global_state) {
+	auto &info = ScanInfo();
+	if (info.file_format != HiveFileFormat::REGEX) {
+		MultiFileReader::FinalizeChunk(context, bind_data, reader, reader_data, input_chunk, output_chunk, executor,
+		                               global_state);
+		return;
+	}
+	vector<idx_t> groups;
+	vector<reference<Vector>> results;
+	idx_t line_index = 0;
+	executor.SetChunk(input_chunk);
+	for (idx_t i = 0; i < executor.expressions.size(); i++) {
+		idx_t group;
+		if (HiveRegexSerDe::IsGroupExpression(*executor.expressions[i], group, line_index)) {
+			groups.push_back(group);
+			results.push_back(output_chunk.data[i]);
+			continue;
+		}
+		executor.ExecuteExpression(i, output_chunk.data[i]);
+	}
+	if (!groups.empty()) {
+		info.regex_serde->Extract(context, input_chunk.data[line_index], input_chunk.size(), groups, results);
+	}
 }
 
 //===--------------------------------------------------------------------===//
@@ -809,7 +913,7 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 			reader_data.constant_map.Add(MultiFileGlobalIndex(i), std::move(value));
 			continue;
 		}
-		if (local_names.find(name) == local_names.end()) {
+		if (info.file_format != HiveFileFormat::REGEX && local_names.find(name) == local_names.end()) {
 			// a data column the file does not have (added to the table after the file was written) reads as NULL
 			auto &type = column_id.HasType() ? column_id.GetScanType() : global_column.type;
 			reader_data.constant_map.Add(MultiFileGlobalIndex(i), Value(type));

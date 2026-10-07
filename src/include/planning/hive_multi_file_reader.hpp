@@ -9,6 +9,7 @@
 #include "duckdb/function/table_function.hpp"
 
 #include "core/glue_info.hpp"
+#include "planning/hive_regex_serde.hpp"
 
 namespace duckdb {
 
@@ -37,6 +38,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	string quote = "\"";
 	string escape = "\"";
 	bool header = false;
+	//! RegexSerDe only: input.regex and input.regex.case.insensitive, and the regex compiled when the scan is bound
+	string regex;
+	bool regex_case_insensitive = false;
+	shared_ptr<HiveRegexSerDe> regex_serde;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partitions registered in Glue (empty for an unpartitioned table)
@@ -128,7 +133,7 @@ private:
 	mutable bool partition_locations_built = false;
 };
 
-//! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of
+//! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro; read_csv for regex) over the partitions of
 //! 'scan_info' with the HiveMultiFileReader. Returns the bound table function and fills in 'bind_data'; the scan
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
@@ -161,6 +166,18 @@ public:
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
 	                  optional_ptr<MultiFileReaderGlobalState> global_state) override;
+	//! A RegexSerDe table's files are read as one column of lines, and every data column is a capture group of it
+	ReaderInitializeType CreateMapping(ClientContext &context, MultiFileReaderData &reader_data,
+	                                   const vector<MultiFileColumnDefinition> &global_columns,
+	                                   const vector<ColumnIndex> &global_column_ids,
+	                                   optional_ptr<TableFilterSet> filters, MultiFileList &multi_file_list,
+	                                   const MultiFileReaderBindData &bind_data,
+	                                   const virtual_column_map_t &virtual_columns,
+	                                   MultiFileColumnMappingMode mapping_mode) override;
+	//! and the capture groups of a chunk are extracted with one match per line
+	void FinalizeChunk(ClientContext &context, const MultiFileBindData &bind_data, BaseFileReader &reader,
+	                   const MultiFileReaderData &reader_data, DataChunk &input_chunk, DataChunk &output_chunk,
+	                   ExpressionExecutor &executor, optional_ptr<MultiFileReaderGlobalState> global_state) override;
 
 private:
 	shared_ptr<HiveScanInfo> scan_info;

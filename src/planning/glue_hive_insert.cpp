@@ -163,6 +163,11 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 
 	// the files are written in the table's format (from its SerDe)
 	auto file_format = table_info.GetFileFormat();
+	if (file_format == HiveFileFormat::REGEX) {
+		// Hive's RegexSerDe has no serialize either
+		throw NotImplementedException("Can not write to Hive table '%s.%s': RegexSerDe tables can only be read",
+		                              table_info.database_name, table_info.name);
+	}
 	auto format_name = HiveFileFormatToString(file_format);
 	// the operator feeding the copy and the columns it produces
 	optional_ptr<PhysicalOperator> source = &plan;

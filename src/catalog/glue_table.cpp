@@ -90,6 +90,8 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->quote = latest_info.GetQuoteCharacter();
 	scan_info->escape = latest_info.GetEscapeCharacter();
 	scan_info->header = latest_info.HasHeader();
+	scan_info->regex = latest_info.GetInputRegex();
+	scan_info->regex_case_insensitive = latest_info.IsInputRegexCaseInsensitive();
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

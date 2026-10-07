@@ -504,7 +504,8 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 	auto &column_names = StructType::GetChildTypes(columns.type());
 	auto &column_types = StructValue::GetChildren(columns);
 	// csv files are read by position, the other formats by name; other SerDes are refused
-	bool by_position = table.GetFileFormat() == HiveFileFormat::CSV;
+	auto file_format = table.GetFileFormat();
+	bool by_position = file_format == HiveFileFormat::CSV || file_format == HiveFileFormat::REGEX;
 	if (by_position && column_names.size() != table.columns.size()) {
 		throw BinderException("glue_replace_columns: table '%s' is stored as csv, which is read by position, so it "
 		                      "must keep its %d columns",

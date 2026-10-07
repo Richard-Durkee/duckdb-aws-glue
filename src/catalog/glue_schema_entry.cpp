@@ -277,6 +277,9 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			} else {
 				result.csv_escape = string_value;
 			}
+		} else if (StringUtil::CIEquals(key, "input.regex") || StringUtil::CIEquals(key, "input.regex.case.insensitive")) {
+			// Hive's "ROW FORMAT SERDE 'org.apache.hadoop.hive.serde2.RegexSerDe' WITH SERDEPROPERTIES (...)"
+			result.serde_parameters[StringUtil::Lower(key)] = string_value;
 		} else if (StringUtil::CIEquals(key, "header")) {
 			// csv files with a header line: Hive's "TBLPROPERTIES ('skip.header.line.count' = '1')"
 			if (value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>()) {
@@ -299,6 +302,14 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
 		}
+	}
+	bool regex = result.format == HiveFileFormat::REGEX;
+	if (regex && result.serde_parameters.find("input.regex") == result.serde_parameters.end()) {
+		throw BinderException("CREATE TABLE with format 'regex' needs the option 'input.regex'");
+	}
+	if (!regex && !result.serde_parameters.empty()) {
+		throw BinderException("CREATE TABLE option '%s' is only for format 'regex'",
+		                      result.serde_parameters.begin()->first);
 	}
 	return result;
 }
@@ -383,6 +394,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction trans
 	table.csv_delimiter = options.csv_delimiter;
 	table.csv_quote = options.csv_quote;
 	table.csv_escape = options.csv_escape;
+	table.serde_parameters = options.serde_parameters;
 	table.bucket_columns = options.bucket_columns;
 	table.number_of_buckets = options.number_of_buckets;
 	table.sort_columns = options.sort_columns;

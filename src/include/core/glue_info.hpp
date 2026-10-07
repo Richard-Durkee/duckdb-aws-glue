@@ -37,11 +37,11 @@ struct GlueDatabaseInfo {
 };
 
 //! The file format of a Hive table's data files, decided by its SerDe
-enum class HiveFileFormat : uint8_t { PARQUET, CSV, JSON, AVRO };
+enum class HiveFileFormat : uint8_t { PARQUET, CSV, JSON, AVRO, REGEX };
 string HiveFileFormatToString(HiveFileFormat format);
-//! Whether the data files are text files (csv, json), whose codec the table records rather than the files themselves
+//! Whether the data files are text files (csv, json, regex), whose codec the table records rather than the files themselves
 bool IsTextFileFormat(HiveFileFormat format);
-//! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
+//! Parse 'parquet' | 'csv' | 'json' | 'avro' | 'regex' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
 
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
@@ -124,6 +124,10 @@ public:
 	string GetQuoteCharacter() const;
 	//! The escape character of a CSV table (escapeChar of OpenCSVSerde), else the quote character
 	string GetEscapeCharacter() const;
+	//! The regex of a RegexSerDe table (input.regex), empty when the SerDe does not say
+	string GetInputRegex() const;
+	//! Whether a RegexSerDe table matches its regex ignoring case (input.regex.case.insensitive)
+	bool IsInputRegexCaseInsensitive() const;
 };
 
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB

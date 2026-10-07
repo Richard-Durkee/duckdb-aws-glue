@@ -469,6 +469,14 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	throw NotImplementedException("HiveScan deserialization not implemented");
 }
 
+static BindInfo GlueHiveBindInfo(const optional_ptr<FunctionData> bind_data) {
+	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
+	auto &info = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	auto result = info.format_bind_info ? info.format_bind_info(bind_data) : BindInfo(ScanType::EXTERNAL);
+	result.table = info.table;
+	return result;
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -525,6 +533,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.statistics_extended = HivePartitionStatistics;
 	// and the row count comes from a sampled file rather than the format's constant
 	scan_function.cardinality = HiveScanCardinality;
+	scan_info->format_bind_info = scan_function.get_bind_info;
+	scan_function.get_bind_info = GlueHiveBindInfo;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;

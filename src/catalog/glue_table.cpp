@@ -38,6 +38,14 @@ TableStorageInfo GlueTable::GetStorageInfo(ClientContext &context) {
 	return result;
 }
 
+virtual_column_map_t GlueTable::GetVirtualColumns() const {
+	return virtual_column_map_t();
+}
+
+vector<column_t> GlueTable::GetRowIdColumns() const {
+	return vector<column_t>();
+}
+
 GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	GlueTableInfo result;
@@ -72,6 +80,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->catalog_name = catalog.GetName().GetIdentifierName();
 	scan_info->database_name = latest_info.database_name;
 	scan_info->table_name = latest_info.name;
+	scan_info->table = this;
 	scan_info->root_location = latest_info.location;
 	scan_info->file_format = latest_info.GetFileFormat();
 	scan_info->delimiter = latest_info.GetFieldDelimiter();

@@ -19,6 +19,11 @@ struct HiveScanInfo : public TableFunctionInfo {
 	string catalog_name;
 	string database_name;
 	string table_name;
+	//! The Glue catalog table this scan reads, or null when the scan is a hive_scan over a location: reported
+	//! through the scan's bind info, as iceberg_scan reports its Iceberg table
+	optional_ptr<TableCatalogEntry> table;
+	//! The bind info callback of the bound file format reader, which the Hive scan extends with 'table'
+	table_function_get_bind_info_t format_bind_info = nullptr;
 	//! The table location: the data files of an unpartitioned table live directly below it, and it is the parent of
 	//! the <key>=<value> directories of partitions without an explicit location
 	string root_location;
@@ -141,6 +146,9 @@ public:
 
 	static unique_ptr<MultiFileReader> CreateInstance(const BoundTableFunction &table);
 
+	//! The scan info behind this reader, which the Hive scan's bind info delegates to the format reader and extends
+	const HiveScanInfo &ScanInfo() const;
+
 	unique_ptr<MultiFileReader> Copy() const override;
 	shared_ptr<MultiFileList> CreateFileList(ClientContext &context, const vector<string> &paths,
 	                                         const FileGlobInput &glob_input) override;
@@ -155,9 +163,6 @@ public:
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
 	                  optional_ptr<MultiFileReaderGlobalState> global_state) override;
-
-private:
-	const HiveScanInfo &ScanInfo() const;
 
 private:
 	shared_ptr<HiveScanInfo> scan_info;

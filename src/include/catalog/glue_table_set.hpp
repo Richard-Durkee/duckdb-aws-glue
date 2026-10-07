@@ -26,7 +26,6 @@ public:
 	//! Insert a (new) entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<CatalogEntry> entry);
 	void RemoveEntry(const string &name);
-	void ClearEntries();
 
 	//! Build the catalog entry for a Glue table definition: a GlueView for a VIRTUAL_VIEW, else a GlueTable
 	unique_ptr<CatalogEntry> CreateEntry(const GlueTableInfo &table);
@@ -34,6 +33,9 @@ public:
 private:
 	void LoadEntries(ClientContext &context);
 	static void SetTableTypeTag(GlueTable &entry);
+	//! Move an entry out of the set; the transaction manager keeps it alive while a running statement may use it.
+	//! Called with entry_lock held.
+	void RetireEntry(const string &name);
 
 private:
 	GlueSchemaEntry &schema;

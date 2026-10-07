@@ -144,6 +144,14 @@ jobs:
           ls benchmark/optimizer/*.benchmark >> .github/regression/hive_benchmarks.csv
           python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/hive_benchmarks.csv --verbose --threads 2
 
+      # A step of its own so a TPC-H failure is visible on its own; it also runs when the step above fails
+      - name: Tpch benchmarks
+        if: ${{ !cancelled() }}
+        run: |
+          mkdir -p .github/regression
+          ls benchmark/tpch/sf1/*.benchmark > .github/regression/tpch_benchmarks.csv
+          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/tpch_benchmarks.csv --verbose --threads 2
+
       - name: Server logs
         if: always()
         run: docker compose -f scripts/docker-compose.yml logs --no-color moto | tail -200

@@ -1,8 +1,9 @@
 # DuckDB Glue extension
 
 Experimental extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
-SDK Glue client and works with Hive (Glue native) tables stored as parquet on S3. Tables of other formats that Glue
-registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or written.
+SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
+formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
+written.
 
 ```sql
 CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');
@@ -24,8 +25,13 @@ Attach options:
 
 ## Reading
 
-Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet` through a custom
-`MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
+The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
+LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is
+1, delimiter from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per
+line, keys by name) and AvroSerDe with `read_avro` (columns by name) from the avro extension, which is loaded on
+demand. Other SerDes (ORC, Ion, ...) are not supported.
+
+Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
 - The data files are those below the location of every partition Glue lists (`GetPartitions`), at any depth, or
   below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
@@ -38,15 +44,14 @@ Hive tables stored as parquet (ParquetHiveSerDe) are scanned with `read_parquet`
   10) partitions below the table location, the location is listed once, recursively (one S3 request per 1000
   keys), and the files are matched to their partitions by prefix; fewer partitions, and partitions at custom
   locations, are listed one directory each.
-- The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
-  by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
-  a different type in the file is cast, and file columns Glue does not list are ignored.
+- The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. A column a file
+  does not have (added after the file was written) reads as NULL, a column with a different type in the file is
+  cast, and file columns Glue does not list are ignored.
 
-The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
-OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
-from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per line, keys by
-name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
-...) are not supported.
+Compression: a csv or json table is read with the codec it records (`write.compression`, else the `compressionType`
+Glue crawlers set), whatever the names of its files; DuckDB reads gzip and zstd, another codec is an error. A table
+that records none is read with DuckDB's default, which tells `.gz` and `.zst` files by their extension. Parquet and
+avro files carry their codec themselves.
 
 ## Writing
 
@@ -81,19 +86,35 @@ name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
-  Existing parquet files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
+  Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
+- Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
+  for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
+  codec is an error.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`
   becomes `'4'`); a key may be quoted (`'parquet.compression' = 'ZSTD'`). The parameters the table format is read
   from (`table_type`, `spark.sql.sources.provider`, `metadata_location`) can not be changed this way.
+- `CALL glue_replace_columns('cat.db.t', {id: 'BIGINT', name: 'VARCHAR'}, comments := {id: '...'})` is Hive's
+  `ALTER TABLE ... REPLACE COLUMNS`: it replaces all data columns of the table at once, which can also rename and
+  reorder them. Types are DuckDB types, stored the way `CREATE TABLE` stores them; a column that stays (same name,
+  compared case-insensitively) keeps its stored name and may only be widened, as with `ALTER COLUMN ... TYPE`. As in
+  Hive, comments not given in `comments` are dropped; `keep_comments := true` keeps those of the columns that stay
+  (a NULL in `comments` then removes one). The partition keys are kept
+  and must not be listed; the bucketing and sort columns must be listed. It returns the columns as stored in Glue
+  (Glue type names). The data files are not rewritten: parquet, json and avro files are matched by name (a renamed
+  column reads as NULL), csv files by position, so a csv table keeps its number of columns, each may only be widened
+  and giving it a new name renames it.
 - `DROP TABLE` and `DROP SCHEMA` delete the Glue entries but leave the data files in S3. Glue deletes all tables of
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
 Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
-is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported.
+is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
+of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
+...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
+`COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
 
 ## Views
 
@@ -224,7 +245,7 @@ which the tests use in their ATTACH; tests are skipped without a config (`requir
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
-make test-local          # unittest --test-config test/configs/local_glue.json 'test/sql/*'
+make test-local          # unittest --test-config test/configs/local_glue.json 'test/sql/*', with retries
 make glue-fixture-down
 
 AWS_PROFILE=... AWS_CONFIG_FILE=~/.aws/config AWS_SHARED_CREDENTIALS_FILE=~/.aws/credentials make test-cloud
@@ -233,6 +254,12 @@ AWS_PROFILE=... AWS_CONFIG_FILE=~/.aws/config AWS_SHARED_CREDENTIALS_FILE=~/.aws
 Both targets set `AWS_EC2_METADATA_DISABLED=true`: the test runner hides `~/.aws`, and without a region from the
 environment or a profile the AWS SDK asks the EC2 instance metadata service for one, which off EC2 hangs for
 minutes per client. A test config can not export process environment variables, so this stays on the command.
+
+`make test-local` runs the tests through DuckDB's `duckdb/scripts/ci/run_tests.py` (Python 3.10+; pick the
+interpreter with `PYTHON=python3.14`), one test per process and one at a time, and reruns a failing test up to twice:
+against the local servers a read right after a write occasionally comes back with no rows. Every retry is reported in
+the output. `TEST_BUILD=release` runs the `release` build instead of
+`relassert`.
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.
@@ -271,7 +298,8 @@ Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so
 factor) has no effect while the tables are in Glue: rebuild the fixture with
 `make glue-fixture-down && make glue-fixture` first.
 
-`.github/workflows/Regression.yml` runs them for a PR and for its merge base and compares the timings.
+`.github/workflows/Regression.yml` runs `benchmark/*.benchmark`, `benchmark/pushdown/`, `benchmark/optimizer/` and
+`benchmark/tpch/sf1/` for a PR and for its merge base and compares the timings. It does not run `benchmark/tpcds/`.
 
 ## Building
 

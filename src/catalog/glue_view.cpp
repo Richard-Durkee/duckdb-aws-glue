@@ -4,6 +4,7 @@
 #include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "duckdb/parser/parser.hpp"
 
 namespace duckdb {
 
@@ -23,7 +24,8 @@ const SelectStatement &GlueView::GetQuery() {
 	lock_guard<mutex> guard(parse_lock);
 	if (!parsed) {
 		try {
-			parsed = CreateViewInfo::ParseSelect(select_sql);
+			auto parser = Parser::GetBuiltinParser();
+			parsed = CreateViewInfo::ParseSelect(parser, select_sql);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.database_name,

@@ -20,6 +20,7 @@
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
+#include "duckdb/parser/parser.hpp"
 #include "catalog/glue_view.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
@@ -455,7 +456,8 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	view.sql = GlueView::RenderViewSql(info);
 	try {
 		// what is stored must read back: never write a view DuckDB itself could not parse
-		CreateViewInfo::ParseSelect(view.sql);
+		auto parser = Parser::GetBuiltinParser();
+		CreateViewInfo::ParseSelect(parser, view.sql);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
@@ -695,7 +697,10 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	}
 	case AlterTableType::ALTER_COLUMN_TYPE: {
 		auto &change = alter_table.Cast<ChangeColumnTypeInfo>();
-		auto &name = change.column_name.GetIdentifierName();
+		if (change.column_path.size() > 1) {
+			throw NotImplementedException("Changing the type of a nested field is not yet supported");
+		}
+		auto &name = change.column_path[0].GetIdentifierName();
 		if (is_partition_key(name)) {
 			throw CatalogException("Column \"%s\" is a partition key of table \"%s\" and its type can not be "
 			                       "changed",

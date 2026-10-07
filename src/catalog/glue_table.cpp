@@ -39,7 +39,10 @@ TableStorageInfo GlueTable::GetStorageInfo(ClientContext &context) {
 }
 
 virtual_column_map_t GlueTable::GetVirtualColumns() const {
-	return virtual_column_map_t();
+	virtual_column_map_t result;
+	result.insert(
+	    make_pair(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR)));
+	return result;
 }
 
 vector<column_t> GlueTable::GetRowIdColumns() const {

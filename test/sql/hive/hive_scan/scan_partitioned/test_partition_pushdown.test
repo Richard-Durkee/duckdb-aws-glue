@@ -103,13 +103,15 @@ SELECT count(*) FROM my_datalake.default.pp_days o, wanted_days w WHERE o.day_sk
 ----
 2
 
+# read_files() also sees the one file the cardinality estimate reads while planning, from whichever partition Glue
+# lists first: the same file as the scan's, or one more
 query I
-SELECT count(*) FROM read_files() WHERE file LIKE '%/pp_days/%';
+SELECT count(*) FROM read_files() WHERE file LIKE '%/pp_days/day_sk=2450817/%';
 ----
 1
 
 query I
-SELECT file LIKE '%/pp_days/day_sk=2450817/%' FROM read_files() WHERE file LIKE '%/pp_days/%';
+SELECT count(*) <= 1 FROM read_files() WHERE file LIKE '%/pp_days/%' AND file NOT LIKE '%/pp_days/day_sk=2450817/%';
 ----
 true
 

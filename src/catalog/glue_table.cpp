@@ -76,13 +76,14 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 		}
 		latest_info = entry->table_info;
 	}
-	switch (latest_info->GetFormat()) {
-	case GlueTableFormat::HIVE:
+	auto format = latest_info->GetFormat();
+	switch (format.format) {
+	case GlueFormat::HIVE:
 		return GetHiveScanFunction(context, bind_data, *latest_info);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
 		                              "glue_get_table_response() to inspect its definition",
-		                              latest_info->database_name, latest_info->name, latest_info->GetFormatName());
+		                              latest_info->database_name, latest_info->name, format.Describe(*latest_info));
 	}
 }
 

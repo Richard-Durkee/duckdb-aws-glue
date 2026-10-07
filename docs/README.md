@@ -27,6 +27,11 @@ Attach options:
 
 ## Reading
 
+A table's format is read from its parameters (`table_type`, `spark.sql.sources.provider`, `metadata_location`) and
+otherwise from its InputFormat: Hudi tables (`HoodieParquetInputFormat`, ...) and symlink manifest tables
+(`SymlinkTextInputFormat`, e.g. a Delta `_symlink_format_manifest`) register a Parquet or text SerDe, so only the
+InputFormat tells them apart from a Hive table. They are listed but not read or written, like Iceberg and Delta.
+
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
 `read_json` (one object per line, keys by name; SerDe properties see below) and AvroSerDe with `read_avro`
@@ -137,7 +142,10 @@ their codec themselves.
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
   Athena, JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
   `CREATE TABLE ... WITH (format = 'json')` creates): `INSERT` into a table with the OpenX JSON SerDe
-  (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read.
+  (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read. `INSERT` also requires the table's InputFormat to
+  be one Hive uses for its file format (`MapredParquetInputFormat`, `TextInputFormat` or `CombineTextInputFormat` for
+  csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
+  know, and files written into it could corrupt the table.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.
@@ -264,8 +272,8 @@ Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s be
 
 ## Inspecting tables
 
-Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA` or
-`UNKNOWN`). The full Glue definition of a table is available through a table function:
+Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,
+`SYMLINK` or `UNKNOWN`). The full Glue definition of a table is available through a table function:
 
 ```sql
 SELECT * FROM glue_get_table_response('my_datalake.default.some_table');

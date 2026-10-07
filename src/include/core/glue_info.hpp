@@ -102,16 +102,14 @@ public:
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
 	string GetParameter(const string &key) const;
-	//! Look up a SerDe parameter (case-insensitive key), returns empty string if missing
-	string GetSerdeParameter(const string &key) const;
 	bool IsBucketed() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
 	bool IsOpenCSVSerde() const;
-	//! A SerDe property, a table parameter of that name first
-	bool TryGetSerdeProperty(const string &key, string &result) const;
+	//! A property of the table as Hive hands it to the SerDe: a table parameter, else a SerDe parameter
+	bool TryGetProperty(const string &key, string &result) const;
 	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
 	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
@@ -135,7 +133,8 @@ public:
 	string GetEscapeCharacter() const;
 
 private:
-	idx_t GetLineCount(const string &key) const;
+	//! A non-negative integer property, 0 when not set
+	idx_t GetCountProperty(const string &key) const;
 	//! An OpenCSVSerde character property (its first character), 'fallback' when not set
 	string GetOpenCSVCharacter(const string &key, const string &fallback) const;
 };

@@ -137,15 +137,15 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 		} else if (name == "format") {
 			scan_info->file_format = HiveFileFormatFromString(option.second.GetValue<string>());
 		} else if (name == "delim") {
-			scan_info->delimiter = option.second.GetValue<string>();
+			scan_info->csv.delimiter = option.second.GetValue<string>();
 		} else if (name == "quote") {
-			scan_info->quote = option.second.GetValue<string>();
+			scan_info->csv.quote = option.second.GetValue<string>();
 		} else if (name == "escape") {
-			scan_info->escape = option.second.GetValue<string>();
+			scan_info->csv.escape = option.second.GetValue<string>();
 		} else if (name == "header") {
-			scan_info->skip_lines = option.second.GetValue<bool>() ? 1 : 0;
+			scan_info->csv.skip_lines = option.second.GetValue<bool>() ? 1 : 0;
 		} else if (name == "nullstr") {
-			scan_info->null_string = option.second.GetValue<string>();
+			scan_info->csv.null_string = option.second.GetValue<string>();
 		}
 	}
 	if (!schema) {

@@ -1,4 +1,5 @@
 #include "core/glue_info.hpp"
+#include "core/helpers.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
@@ -67,15 +68,6 @@ HiveFileFormat HiveFileFormatFromString(const string &format) {
 	throw BinderException("Unknown Hive file format '%s', expected 'parquet', 'csv', 'json' or 'avro'", format);
 }
 
-string GlueTableInfo::GetSerdeParameter(const string &key) const {
-	for (auto &entry : serde_parameters) {
-		if (StringUtil::CIEquals(entry.first, key)) {
-			return entry.second;
-		}
-	}
-	return string();
-}
-
 bool GlueTableInfo::IsBucketed() const {
 	// NumberOfBuckets is -1 or 0 for unbucketed tables but can also be unset on bucketed ones
 	return !bucket_columns.empty();
@@ -109,7 +101,8 @@ string GlueTableInfo::DescribeBucketing() const {
 
 HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	auto serde = StringUtil::Lower(serde_library);
-	if (StringUtil::Contains(serde, "parquet")) {
+	// an empty SerDe means the table is being created (CTAS before execution); default to Parquet
+	if (serde.empty() || StringUtil::Contains(serde, "parquet")) {
 		return HiveFileFormat::PARQUET;
 	}
 	if (StringUtil::Contains(serde, "lazysimpleserde") || StringUtil::Contains(serde, "opencsvserde")) {
@@ -131,7 +124,7 @@ bool GlueTableInfo::IsOpenCSVSerde() const {
 	return StringUtil::Contains(StringUtil::Lower(serde_library), "opencsvserde");
 }
 
-bool GlueTableInfo::TryGetSerdeProperty(const string &key, string &result) const {
+bool GlueTableInfo::TryGetProperty(const string &key, string &result) const {
 	// as Hive: the table's parameters override the SerDe's, and keys are case-sensitive
 	for (auto properties : {&parameters, &serde_parameters}) {
 		auto entry = properties->find(key);
@@ -143,40 +136,17 @@ bool GlueTableInfo::TryGetSerdeProperty(const string &key, string &result) const
 	return false;
 }
 
-//! OpenCSVSerde reads only the first character of its separator, quote and escape characters
-static string FirstCharacter(const string &value) {
-	idx_t length = 1;
-	auto lead = static_cast<uint8_t>(value[0]);
-	if (lead >= 0xF0) {
-		length = 4;
-	} else if (lead >= 0xE0) {
-		length = 3;
-	} else if (lead >= 0xC0) {
-		length = 2;
-	}
-	return value.substr(0, length);
-}
-
 string GlueTableInfo::GetOpenCSVCharacter(const string &key, const string &fallback) const {
 	string value;
-	return TryGetSerdeProperty(key, value) && !value.empty() ? FirstCharacter(value) : fallback;
-}
-
-//! Java's Integer.parseInt: an optional sign and digits only ("1.5" and " 1" are not numbers)
-static bool TryParseJavaInteger(const string &value, int64_t min, int64_t max, int64_t &result) {
-	idx_t pos = !value.empty() && (value[0] == '-' || value[0] == '+') ? 1 : 0;
-	if (pos == value.size()) {
-		return false;
+	if (!TryGetProperty(key, value) || value.empty()) {
+		return fallback;
 	}
-	int64_t number = 0;
-	for (; pos < value.size(); pos++) {
-		if (!StringUtil::CharacterIsDigit(value[pos]) || number > max - min) {
-			return false;
-		}
-		number = number * 10 + (value[pos] - '0');
+	string character;
+	if (!TryFirstCharacter(value, character)) {
+		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected text", database_name,
+		                            name, key, value);
 	}
-	result = value[0] == '-' ? -number : number;
-	return result >= min && result <= max;
+	return character;
 }
 
 //! Hive's LazyUtils.getByte: a byte code from -128 to 127 ('1' is '\001'), else the first character
@@ -200,8 +170,8 @@ string GlueTableInfo::GetFieldDelimiter() const {
 		return GetOpenCSVCharacter("separatorChar", ",");
 	}
 	string delimiter;
-	if (!TryGetSerdeProperty("field.delim", delimiter)) {
-		TryGetSerdeProperty("serialization.format", delimiter);
+	if (!TryGetProperty("field.delim", delimiter)) {
+		TryGetProperty("serialization.format", delimiter);
 	}
 	return LazySimpleSeparator(*this, delimiter);
 }
@@ -211,24 +181,24 @@ string GlueTableInfo::GetNullFormat() const {
 		return string();
 	}
 	string null_format;
-	return TryGetSerdeProperty("serialization.null.format", null_format) ? null_format : "\\N";
+	return TryGetProperty("serialization.null.format", null_format) ? null_format : "\\N";
 }
 
-idx_t GlueTableInfo::GetLineCount(const string &key) const {
+idx_t GlueTableInfo::GetCountProperty(const string &key) const {
 	string value;
-	if (!TryGetSerdeProperty(key, value) || value.empty()) {
+	if (!TryGetProperty(key, value) || value.empty()) {
 		return 0;
 	}
-	int64_t lines;
-	if (!TryParseJavaInteger(value, 0, NumericLimits<int32_t>::Maximum(), lines)) {
-		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected a number of lines",
+	int64_t count;
+	if (!TryParseJavaInteger(value, 0, NumericLimits<int32_t>::Maximum(), count)) {
+		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected a non-negative number",
 		                            database_name, name, key, value);
 	}
-	return NumericCast<idx_t>(lines);
+	return NumericCast<idx_t>(count);
 }
 
 idx_t GlueTableInfo::GetHeaderLineCount() const {
-	return GetLineCount("skip.header.line.count");
+	return GetCountProperty("skip.header.line.count");
 }
 
 void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
@@ -237,7 +207,7 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		throw NotImplementedException("Hive table '%s.%s' %s, which DuckDB can not read or write", database_name, name,
 		                              what);
 	};
-	if (GetLineCount("skip.footer.line.count") > 0) {
+	if (GetCountProperty("skip.footer.line.count") > 0) {
 		refuse("has 'skip.footer.line.count' set");
 	}
 	if (format == HiveFileFormat::JSON) {
@@ -259,14 +229,14 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		return;
 	}
 	string value;
-	if (TryGetSerdeProperty("escape.delim", value)) {
+	if (TryGetProperty("escape.delim", value)) {
 		refuse("has 'escape.delim' set");
 	}
-	if (TryGetSerdeProperty("serialization.encoding", value) && !StringUtil::CIEquals(value, "UTF-8") &&
+	if (TryGetProperty("serialization.encoding", value) && !StringUtil::CIEquals(value, "UTF-8") &&
 	    !StringUtil::CIEquals(value, "UTF8")) {
 		refuse(StringUtil::Format("has the 'serialization.encoding' '%s' (DuckDB reads UTF-8)", value));
 	}
-	if (TryGetSerdeProperty("serialization.last.column.takes.rest", value) && StringUtil::CIEquals(value, "true")) {
+	if (TryGetProperty("serialization.last.column.takes.rest", value) && StringUtil::CIEquals(value, "true")) {
 		refuse("has 'serialization.last.column.takes.rest' set");
 	}
 	if (StringUtil::Contains(GetNullFormat(), GetFieldDelimiter())) {

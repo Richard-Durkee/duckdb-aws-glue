@@ -12,6 +12,18 @@
 
 namespace duckdb {
 
+//! How the files of a csv table are read
+struct HiveCSVOptions {
+	string delimiter = ",";
+	string quote = "\"";
+	string escape = "\"";
+	//! The header lines every file starts with
+	idx_t skip_lines = 0;
+	string null_string;
+	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
+	bool serde_fields = false;
+};
+
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
 struct HiveScanInfo : public TableFunctionInfo {
@@ -32,14 +44,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	vector<LogicalType> types;
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
-	//! CSV only: the dialect, the number of header lines every file starts with and the string NULL is written as
-	string delimiter = ",";
-	string quote = "\"";
-	string escape = "\"";
-	idx_t skip_lines = 0;
-	string null_string;
-	//! CSV only: read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
-	bool serde_fields = false;
+	HiveCSVOptions csv;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,

@@ -59,10 +59,10 @@ from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_js
 name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
 ...) are not supported.
 
-Compression: a csv or json table is read with the codec it records (`write.compression`, else the `compressionType`
-Glue crawlers set), whatever the names of its files; DuckDB reads gzip and zstd, another codec is an error. A table
-that records none is read with DuckDB's default, which tells `.gz` and `.zst` files by their extension. Parquet and
-avro files carry their codec themselves.
+Compression: every csv and json file is read with the codec DuckDB tells from its name (`.gz`, `.zst`), whatever the
+table records, so a table whose files use more than one codec is read correctly and a stale `write.compression` or
+`compressionType` does not matter. The codec a table records is what writes to it use. Parquet and avro files carry
+their codec themselves.
 
 ## Writing
 

@@ -115,13 +115,11 @@ public:
 	//! The codec of a csv / json table's files (write.compression, else compressionType), auto-detection when the
 	//! table names none; throws for a codec DuckDB can not read and write
 	FileCompressionType GetTextCompression() const;
-	//! parquet.compression, empty when the table does not say
-	string GetParquetCompression() const;
+	//! The codec the table records for its files, as DuckDB's writer for 'format' names it ('null' for an uncompressed
+	//! avro file), empty when it records none; throws for a codec DuckDB can not write
+	string GetCodec(HiveFileFormat format) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
-	//! The codec to write an avro table's files with (avro.output.codec) as DuckDB's avro writer names it ('null' for
-	//! none), empty when the table does not say; throws for a codec DuckDB can not write
-	string GetAvroCodec() const;
 	//! The quote character of a CSV table (quoteChar of OpenCSVSerde), '"' when the SerDe does not say
 	string GetQuoteCharacter() const;
 	//! The escape character of a CSV table (escapeChar of OpenCSVSerde), else the quote character

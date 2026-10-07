@@ -193,31 +193,23 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	// the copy function and its options
 	string copy_format = format_name;
 	identifier_map_t<vector<Value>> copy_options;
+	auto codec = table_info.GetCodec(file_format);
+	auto codec_option = file_format == HiveFileFormat::AVRO ? "codec" : "compression";
+	if (!codec.empty()) {
+		copy_options[Identifier(codec_option)] = {Value(codec)};
+	}
 	switch (file_format) {
 	case HiveFileFormat::PARQUET: {
-		auto codec = table_info.GetParquetCompression();
-		if (codec.empty()) {
-			break;
-		}
-		copy_options[Identifier("compression")] = {Value(codec)};
 		// DuckDB's parquet writer takes a compression_level for zstd only
-		if (codec != "zstd") {
-			break;
-		}
 		auto level = table_info.GetCompressionLevel();
-		if (!level.empty()) {
+		if (codec == "zstd" && !level.empty()) {
 			copy_options[Identifier("compression_level")] = {Value(level)};
 		}
 		break;
 	}
-	case HiveFileFormat::AVRO: {
+	case HiveFileFormat::AVRO:
 		ExtensionHelper::AutoLoadExtension(context, "avro");
-		auto codec = table_info.GetAvroCodec();
-		if (!codec.empty()) {
-			copy_options[Identifier("codec")] = {Value(codec)};
-		}
 		break;
-	}
 	case HiveFileFormat::CSV:
 		// Hive CSV files: the table's dialect, a header line only when the table says so
 		copy_options[Identifier("header")] = {Value::BOOLEAN(table_info.HasHeader())};
@@ -282,12 +274,6 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 		break;
 	}
 	}
-	if (IsTextFileFormat(file_format)) {
-		auto codec = table_info.GetTextCompression();
-		if (codec.IsCompressed()) {
-			copy_options[Identifier("compression")] = {Value(codec.ToString())};
-		}
-	}
 	auto copy_function = TryGetCopyFunction(*context.db, copy_format);
 	if (!copy_function) {
 		throw MissingExtensionException("Writing to Hive table '%s' requires the %s copy function", table_info.name,
@@ -305,7 +291,7 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	if (file_format == HiveFileFormat::PARQUET) {
 		// named after the codec, as Spark and Hive name them (<name>.snappy.parquet): readers that list the files can
 		// tell
-		bind_input.file_extension = ParquetCodecExtension(table_info.GetParquetCompression()) + format_name;
+		bind_input.file_extension = ParquetCodecExtension(codec) + format_name;
 	}
 	auto names_to_write = LogicalCopyToFile::GetNamesWithoutPartitions(copy_names, partition_columns, false);
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(copy_types, partition_columns, false);

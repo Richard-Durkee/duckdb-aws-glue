@@ -72,7 +72,7 @@ CALL glue_add_partition('my_datalake.default.path_nested', {year: '2022', month:
     location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p');
 
 # a directory inside a partition that is not a partition itself, and one below the table location that is not a
-# partition either: neither is data of the table
+# partition either: both belong to the deepest partition registered above them (day=02 and top)
 statement ok
 COPY (SELECT 50 AS id, 'stray' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=02/extra/data.parquet';
 
@@ -107,7 +107,7 @@ statement ok
 SET hive_partition_listing_threshold = {threshold};
 
 #---------------------------------------------------------------------------
-# a full scan: every row names the file it is in, and nothing outside the partitions is read
+# a full scan: every row names the file it is in
 #---------------------------------------------------------------------------
 query IIII
 SELECT id, year, day, rel_dir(filename) FROM my_datalake.default.path_nested ORDER BY id;
@@ -124,12 +124,14 @@ SELECT id, year, day, rel_dir(filename) FROM my_datalake.default.path_nested ORD
 20	2024	late	default/path_nested/year=2024/month=1/day=01/late/
 30	2023	top	default/path_nested/year=2024/
 40	2022	away	path_nested_elsewhere/p/
+50	2024	02	default/path_nested/year=2024/month=1/day=02/extra/
+51	2023	top	default/path_nested/year=2024/month=9/day=09/
 
 query II
 SELECT count(*), count(*) FILTER (t.filename = f.path)
 FROM my_datalake.default.path_nested t JOIN nested_files f USING (id);
 ----
-12	12
+14	14
 
 # the two files of year=2024/month=1/day=01
 query I
@@ -157,23 +159,25 @@ SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE day
 ----
 20	late	default/path_nested/year=2024/month=1/day=01/late/
 
-# pruned to the partition above the others: only the files directly in its directory
+# pruned to the partition above the others: its own files and those of unregistered directories below it
 query III
-SELECT id, year, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2023;
+SELECT id, year, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2023 ORDER BY id;
 ----
 30	2023	default/path_nested/year=2024/
+51	2023	default/path_nested/year=2024/month=9/day=09/
 
 # pruned to every partition below the one above the others, and not that one
 query I
 SELECT list(id ORDER BY id) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1;
 ----
-[1, 2, 3, 6, 7, 20]
+[1, 2, 3, 6, 7, 20, 50]
 
-# pruned to the partition with the stray directory: the stray file is not read
+# pruned to the partition with the stray directory: the stray file is read as part of it
 query III
-SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE month = 1 AND day = '02';
+SELECT id, day, rel_dir(filename) FROM my_datalake.default.path_nested WHERE month = 1 AND day = '02' ORDER BY id;
 ----
 3	02	default/path_nested/year=2024/month=1/day=02/
+50	02	default/path_nested/year=2024/month=1/day=02/extra/
 
 # pruned to the day=0 partition, whose directory name is a prefix of day=01 and day=02
 query III
@@ -218,20 +222,20 @@ SELECT id FROM my_datalake.default.path_nested WHERE filename = (SELECT path FRO
 query II
 SELECT id, rel_dir(filename) FROM my_datalake.default.path_nested ORDER BY id DESC LIMIT 3;
 ----
+51	default/path_nested/year=2024/month=9/day=09/
+50	default/path_nested/year=2024/month=1/day=02/extra/
 40	path_nested_elsewhere/p/
-30	default/path_nested/year=2024/
-20	default/path_nested/year=2024/month=1/day=01/late/
 
 query II
 SELECT id, rel_dir(filename) FROM my_datalake.default.path_nested WHERE year = 2024 AND month = 1 ORDER BY val DESC LIMIT 2;
 ----
+50	default/path_nested/year=2024/month=1/day=02/extra/
 20	default/path_nested/year=2024/month=1/day=01/late/
-7	default/path_nested/year=2024/month=1/day=0/
 
 query II
 SELECT count(DISTINCT filename), count(DISTINCT rel_dir(filename)) FROM my_datalake.default.path_nested;
 ----
-11	10
+13	12
 
 endloop
 
@@ -239,7 +243,7 @@ statement ok
 RESET hive_partition_listing_threshold;
 
 #---------------------------------------------------------------------------
-# hive_scan() over the same directories
+# hive_scan() over the same directories: without the other partitions, top owns every directory below it but day=01
 #---------------------------------------------------------------------------
 foreach threshold 100 1
 
@@ -259,8 +263,15 @@ ORDER BY id;
 ----
 1	01	default/path_nested/year=2024/month=1/day=01/
 2	01	default/path_nested/year=2024/month=1/day=01/
+3	top	default/path_nested/year=2024/month=1/day=02/
+4	top	default/path_nested/year=2024/month=2/day=01/
 6	01	default/path_nested/year=2024/month=1/day=01/
+7	top	default/path_nested/year=2024/month=1/day=0/
+8	top	default/path_nested/year=2024/month=3/day=a%2Fb/
+9	top	default/path_nested/year=2024/month=3/day=__HIVE_DEFAULT_PARTITION__/
 30	top	default/path_nested/year=2024/
+50	top	default/path_nested/year=2024/month=1/day=02/extra/
+51	top	default/path_nested/year=2024/month=9/day=09/
 
 endloop
 

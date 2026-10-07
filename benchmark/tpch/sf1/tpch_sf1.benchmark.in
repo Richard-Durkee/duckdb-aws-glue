@@ -3,8 +3,10 @@
 # group: [sf1]
 
 # TPC-H SF1 generated locally with dbgen and written to Hive tables in the local Glue (moto) + S3 (MinIO) with CTAS:
-# lineitem partitioned by l_shipdate and orders by o_orderdate, the other tables unpartitioned. The local tables are
-# dropped after the load, so the queries read the Glue tables; the cache only keeps a marker table.
+# lineitem and orders are partitioned by 10-day buckets of l_shipdate and o_orderdate (l_shipbucket, o_orderbucket),
+# the other tables unpartitioned. A partition per day makes moto's GetPartitions dominate the timings. The queries in
+# benchmark/tpch/queries are DuckDB's with bucket filters added next to the date filters. The local tables are dropped
+# after the load, so the queries read the Glue tables; the cache only keeps a marker table.
 
 require parquet
 
@@ -33,8 +35,8 @@ ATTACH '123456789012' AS my_datalake (
     DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
 );
 CREATE SCHEMA IF NOT EXISTS my_datalake.bench_tpch_sf1;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_sf1.lineitem PARTITIONED BY (l_shipdate) AS SELECT * FROM lineitem;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_sf1.orders PARTITIONED BY (o_orderdate) AS SELECT * FROM orders;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_sf1.lineitem PARTITIONED BY (l_shipbucket) AS SELECT *, date_diff('day', DATE '1970-01-01', l_shipdate) // 10 AS l_shipbucket FROM lineitem;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_sf1.orders PARTITIONED BY (o_orderbucket) AS SELECT *, date_diff('day', DATE '1970-01-01', o_orderdate) // 10 AS o_orderbucket FROM orders;
 CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_sf1.customer AS SELECT * FROM customer;
 CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_sf1.part AS SELECT * FROM part;
 CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_sf1.partsupp AS SELECT * FROM partsupp;
@@ -77,6 +79,6 @@ name Q${QUERY_NUMBER_PADDED}
 group tpch_glue
 subgroup sf1
 
-run duckdb/extension/tpch/dbgen/queries/q${QUERY_NUMBER_PADDED}.sql
+run benchmark/tpch/queries/q${QUERY_NUMBER_PADDED}.sql
 
 result duckdb/extension/tpch/dbgen/answers/sf1/q${QUERY_NUMBER_PADDED}.csv

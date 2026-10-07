@@ -11,7 +11,6 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
-class FileSystem;
 
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
@@ -48,6 +47,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
+	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
+	table_statistics_extended_t format_statistics = nullptr;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
@@ -79,6 +81,11 @@ public:
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
+	//! The data files of one directory the scan reads, for measuring the table: the first partition's, or the location
+	//! of an unpartitioned table. The listing is kept until the query ends, and any scan listing the same directory in
+	//! the query takes it from there. When the scan lists the table root, the files of the first partition read in the
+	//! root's first page instead, and the scan continues that listing.
+	vector<OpenFileInfo> ListSampleDirectory() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
 
@@ -93,8 +100,10 @@ private:
 	};
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
-	void ListRoot(FileSystem &fs, const vector<idx_t> &partitions) const;
-	void ListPartition(FileSystem &fs, idx_t partition_index) const;
+	void ListRoot(const vector<idx_t> &partitions) const;
+	void ListPartition(idx_t partition_index) const;
+	//! The files of the first of 'partitions' in the root listing, fetching no more of it than needed
+	vector<OpenFileInfo> SampleRootPartition(const vector<idx_t> &partitions) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than
@@ -111,8 +120,8 @@ private:
 	shared_ptr<HiveScanInfo> scan_info;
 	vector<idx_t> partition_indexes;
 	mutable bool planned = false;
-	mutable vector<ListingJob> jobs;
-	//! The next entry of 'jobs' to run
+	mutable vector<ListingJob> listing_jobs;
+	//! The next entry of 'listing_jobs' to run
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;

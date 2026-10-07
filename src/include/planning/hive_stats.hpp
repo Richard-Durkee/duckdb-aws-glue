@@ -7,10 +7,14 @@
 
 namespace duckdb {
 class BaseStatistics;
+struct GluePartitionInfo;
+struct HiveScanInfo;
 
 //! The recursive listing of 'directory' in this query, fetched page by page as it is read: every scan and the sample
 //! share it, so a directory is listed once per query
 shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory);
+//! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
+shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info);
 
 //! Cardinality of a Hive scan: one directory of the table, measured once per query, scaled by the partitions read
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p);

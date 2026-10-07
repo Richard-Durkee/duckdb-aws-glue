@@ -196,8 +196,10 @@ becomes `CALL glue_alter_table(table, [actions])`: every action is checked again
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.
 
-Listing the partitions of a table - `glue_partitions`, and the binding of every scan of a partitioned table - pages
-through Glue's `GetPartitions`. The pages are asked for in parallel with Glue's Segment API:
+Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
+Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
+`DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query shares one
+fetch. The pages are asked for in parallel with Glue's Segment API:
 `glue_get_partitions_segments` requests run at the same time, each over a segment of the partitions that does not
 overlap with the others. `0`, the default, uses 8 requests against AWS and 1 against a Glue compatible server given
 with `ENDPOINT` (moto ignores `Segment` and answers every segment with the whole table, so the partitions a segment

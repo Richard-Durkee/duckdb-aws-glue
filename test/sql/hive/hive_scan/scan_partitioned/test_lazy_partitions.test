@@ -102,6 +102,20 @@ FROM glue_calls();
 GetPartitions	1
 GetTable	1
 
+# Every scan of the table in a query shares one fetch, each with its own pruning
+statement ok
+CALL truncate_duckdb_logs();
+
+query IIR
+SELECT a.dt, b.dt, a.amount + b.amount FROM my_datalake.default.lp_orders a JOIN my_datalake.default.lp_orders b ON a.id + 1 = b.id WHERE a.dt = '2016-05-14' AND b.dt >= '2016-05-15';
+----
+2016-05-14	2016-05-15	30.0
+
+query I
+SELECT n FROM glue_calls() WHERE api = 'GetPartitions';
+----
+1
+
 # The results are unchanged: pruning, partition values and the prepared statement all see the partitions
 
 statement ok
@@ -151,6 +165,26 @@ FROM glue_calls();
 
 statement ok
 DROP VIEW lp_view;
+
+# A prepared statement outlives the catalog it was bound against: the partitions are fetched through the catalog's
+# name, so executing it after a DETACH is a catalog error, not a read of a freed catalog
+statement ok
+PREPARE lp_detached AS SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-14';
+
+statement ok
+DETACH my_datalake;
+
+statement error
+EXECUTE lp_detached;
+----
+my_datalake
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
 
 statement ok
 DROP TABLE my_datalake.default.lp_orders;

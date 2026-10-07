@@ -8,8 +8,6 @@
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/function/table_function.hpp"
 
-#include <functional>
-
 #include "core/glue_info.hpp"
 
 namespace duckdb {
@@ -43,13 +41,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	FileCompressionType compression = FileCompressionType::AUTO_DETECT;
 	//! The partition keys, in order
 	vector<string> partition_keys;
-	//! Fetches the partitions from Glue on first use (Partitions()); unset when they are known at bind
-	std::function<vector<GluePartitionInfo>(ClientContext &)> partition_loader;
-	//! The partitions, loaded once under a lock (the scan info is shared and the listing runs on worker threads)
-	const vector<GluePartitionInfo> &Partitions(ClientContext &context);
-	//! Whether the partitions are loaded
-	bool PartitionsLoaded() const;
-	//! The partition (index into 'partitions') each listed data file belongs to. Filled in while the file list expands,
+	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
@@ -63,14 +55,15 @@ struct HiveScanInfo : public TableFunctionInfo {
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
 	//! A description of the table for error messages
 	string Describe() const;
-
-	//! Set the partitions known at bind (hive_scan)
+	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
+	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
+	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
+	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
 
 private:
-	mutable mutex partitions_lock;
-	bool partitions_loaded = false;
-	vector<GluePartitionInfo> partitions;
+	mutable annotated_mutex partitions_lock;
+	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
@@ -83,11 +76,12 @@ class HiveMultiFileList : public LazyMultiFileList {
 public:
 	//! 'partition_indexes' are the partitions to read
 	HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info, vector<idx_t> partition_indexes);
-	//! Every partition of the table; loaded when PartitionIndexes() is first asked
+	//! Every partition of the table, resolved when PartitionIndexes() is first asked
 	HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info);
 
-	const vector<idx_t> &PartitionIndexes() const;
-	HiveScanInfo &ScanInfo() const {
+	//! The partitions to read, as indexes into HiveScanInfo::Partitions()
+	shared_ptr<const vector<idx_t>> PartitionIndexes() const;
+	const HiveScanInfo &ScanInfo() const {
 		return *scan_info;
 	}
 	ClientContext &Context() const {
@@ -135,17 +129,16 @@ private:
 	//! members
 	ClientContext &client_context;
 	shared_ptr<HiveScanInfo> scan_info;
-	//! Whether the list reads every partition ('partition_indexes' filled on first use)
-	bool all_partitions;
-	mutable mutex indexes_lock;
-	mutable vector<idx_t> partition_indexes;
+	mutable annotated_mutex indexes_lock;
+	//! Null for every partition of the table until PartitionIndexes() resolves it
+	mutable shared_ptr<const vector<idx_t>> partition_indexes DUCKDB_GUARDED_BY(indexes_lock);
 	mutable bool planned = false;
 	mutable vector<ListingJob> listing_jobs;
 	//! The next entry of 'listing_jobs' to run
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::partitions
+	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::Partitions()
 	mutable unordered_map<string, idx_t> partition_by_location;
 	mutable bool partition_locations_built = false;
 };

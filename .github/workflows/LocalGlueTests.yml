@@ -1,7 +1,6 @@
 # Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
 #
-# NOTE: written alongside the local harness and not yet exercised in CI; the build step mirrors `make relassert`
-# (a release build with `make` works the same, adjust the build directory below).
+# A debug build: DuckDB's assertions and the sanitizers are on, like the `relassert` build used locally.
 
 name: Local Glue tests
 
@@ -45,10 +44,10 @@ jobs:
           vcpkgGitCommitId: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
       - name: Build
-        run: make release
+        run: make debug
 
       - name: Run tests
-        run: ./build/release/test/unittest --test-config test/configs/local_glue.json 'test/sql/*'
+        run: make test-local TEST_BUILD=debug
 
       - name: Server logs
         if: always()

@@ -26,6 +26,8 @@ struct GlueAttachOptions {
 	string default_location;
 	//! Optional default schema
 	Identifier default_schema;
+	//! Run the ATTACH-time GetDatabases reachability probe (default true); false defers the first Glue call
+	bool verify_connection = true;
 };
 
 } // namespace duckdb

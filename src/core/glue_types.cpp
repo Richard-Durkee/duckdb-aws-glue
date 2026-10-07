@@ -1,6 +1,7 @@
 #include "core/glue_types.hpp"
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/decimal.hpp"
 
@@ -42,8 +43,23 @@ private:
 		pos++;
 	}
 
-	//! Read an identifier, optionally quoted with backticks (struct field names)
+	//! Read a type name
 	string ReadIdentifier() {
+		SkipWhitespace();
+		auto start = pos;
+		while (pos < input.size() && input[pos] != '<' && input[pos] != '>' && input[pos] != ',' && input[pos] != ':' &&
+		       input[pos] != '(' && input[pos] != ')' && !StringUtil::CharacterIsSpace(input[pos])) {
+			pos++;
+		}
+		if (start == pos) {
+			throw InvalidInputException("Expected a type name in Glue type '%s' at position %d", input, pos);
+		}
+		return input.substr(start, pos - start);
+	}
+
+	//! Read a struct field name: everything up to its ':', as Hive allows spaces in field names, or quoted with
+	//! backticks
+	string ReadFieldName() {
 		SkipWhitespace();
 		if (pos < input.size() && input[pos] == '`') {
 			pos++;
@@ -59,14 +75,15 @@ private:
 			return result;
 		}
 		auto start = pos;
-		while (pos < input.size() && input[pos] != '<' && input[pos] != '>' && input[pos] != ',' && input[pos] != ':' &&
-		       input[pos] != '(' && input[pos] != ')' && !StringUtil::CharacterIsSpace(input[pos])) {
+		while (pos < input.size() && input[pos] != ':' && input[pos] != '<' && input[pos] != '>' && input[pos] != ',') {
 			pos++;
 		}
-		if (start == pos) {
-			throw InvalidInputException("Expected a type name in Glue type '%s' at position %d", input, pos);
+		auto result = input.substr(start, pos - start);
+		StringUtil::RTrim(result);
+		if (result.empty()) {
+			throw InvalidInputException("Expected a field name in Glue type '%s' at position %d", input, pos);
 		}
-		return input.substr(start, pos - start);
+		return result;
 	}
 
 	int64_t ReadInteger() {
@@ -101,7 +118,7 @@ private:
 			Expect('<');
 			child_list_t<LogicalType> children;
 			while (true) {
-				auto field_name = ReadIdentifier();
+				auto field_name = ReadFieldName();
 				Expect(':');
 				auto field_type = ParseType();
 				children.emplace_back(field_name, field_type);
@@ -256,13 +273,41 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 		vector<string> fields;
 		auto &children = StructType::GetChildTypes(type);
 		for (auto &child : children) {
-			fields.push_back(child.first + ":" + FromLogicalType(child.second));
+			auto &name = child.first.GetIdentifierName();
+			// Hive type strings do not quote field names, so these would change the type's structure
+			if (name.empty() || name.find_first_of(":,<>`") != string::npos ||
+			    StringUtil::CharacterIsSpace(name.front()) || StringUtil::CharacterIsSpace(name.back())) {
+				throw NotImplementedException("Struct field name '%s' can not be stored in a Glue type", name);
+			}
+			fields.push_back(name + ":" + FromLogicalType(child.second));
 		}
 		return "struct<" + StringUtil::Join(fields, ",") + ">";
 	}
 	default:
 		throw NotImplementedException("DuckDB type '%s' can not be converted to a Glue type", type.ToString());
 	}
+}
+
+Value GlueTypes::PartitionValue(ClientContext &context, const string &key, const string &str_value,
+                                const LogicalType &type) {
+	if (str_value == HivePartitioning::DEFAULT_PARTITION_NAME) {
+		return Value(type);
+	}
+	if (type.id() == LogicalTypeId::VARCHAR) {
+		// verbatim: what Glue holds IS the value
+		return Value(str_value);
+	}
+	// for a non-string column these are the spellings a NULL arrives as
+	if (StringUtil::CIEquals(str_value, "NULL") || str_value.empty()) {
+		return Value(type);
+	}
+	Value value(str_value);
+	auto cast = value.TryCastAs(context, type);
+	if (!cast) {
+		throw InvalidInputException("Unable to cast '%s' (from Glue partition column '%s') to: '%s'", str_value,
+		                            StringUtil::Upper(key), type.ToString());
+	}
+	return std::move(*cast);
 }
 
 } // namespace duckdb

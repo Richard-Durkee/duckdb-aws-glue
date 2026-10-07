@@ -44,6 +44,10 @@ string HiveFileFormatToString(HiveFileFormat format) {
 	throw InternalException("Unknown HiveFileFormat");
 }
 
+bool IsTextFileFormat(HiveFileFormat format) {
+	return format == HiveFileFormat::CSV || format == HiveFileFormat::JSON;
+}
+
 HiveFileFormat HiveFileFormatFromString(const string &format) {
 	auto lower = StringUtil::Lower(format);
 	if (lower == "parquet") {
@@ -137,6 +141,33 @@ bool GlueTableInfo::HasHeader() const {
 	return GetParameter("skip.header.line.count") == "1";
 }
 
+FileCompressionType GlueTableInfo::GetTextCompression() const {
+	auto codec = GetParameter("write.compression");
+	if (codec.empty()) {
+		codec = GetParameter("compressionType");
+	}
+	if (codec.empty()) {
+		return FileCompressionType::AUTO_DETECT;
+	}
+	FileCompressionType compression(codec);
+	if (compression.IsCompressed() && compression != FileCompressionType::GZIP &&
+	    compression != FileCompressionType::ZSTD) {
+		throw NotImplementedException("Hive table '%s.%s' is %s compressed, DuckDB reads and writes only gzip and zstd "
+		                              "compressed csv and json files",
+		                              database_name, name, compression.ToString());
+	}
+	return compression;
+}
+
+string GlueTableInfo::GetParquetCompression() const {
+	auto codec = StringUtil::Lower(GetParameter("parquet.compression"));
+	return codec == "none" ? "uncompressed" : codec;
+}
+
+string GlueTableInfo::GetCompressionLevel() const {
+	return GetParameter("compression_level");
+}
+
 string GlueTableInfo::GetQuoteCharacter() const {
 	// OpenCSVSerde: quoteChar. LazySimpleSerDe does not quote at all, but DuckDB writes (and reads) quoted fields
 	// with the '"' it defaults to, which is also OpenCSVSerde's default
@@ -211,6 +242,11 @@ string GlueTableInfo::GetFormatName() const {
 
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
+}
+
+bool GlueTableInfo::IsFormatParameter(const string &key) {
+	return StringUtil::CIEquals(key, "table_type") || StringUtil::CIEquals(key, "spark.sql.sources.provider") ||
+	       StringUtil::CIEquals(key, "metadata_location");
 }
 
 } // namespace duckdb

@@ -63,9 +63,14 @@ public:
 	static GlueCreateTableOptions ParseCreateTableOptions(ClientContext &context, const CreateTableInfo &create_info);
 	//! BucketColumns, NumberOfBuckets or SortColumns (case-insensitive)
 	static bool IsBucketingOption(const string &key);
+	//! Type changes Hive can read back from the existing parquet files: widening only
+	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
+	//! Replace the cached entry of an altered table with what Glue stored
+	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
 
 private:
 	static bool CatalogTypeIsSupported(CatalogType type);
+	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
 
 public:
 	//! The database definition as returned by Glue

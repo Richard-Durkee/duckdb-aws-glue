@@ -57,5 +57,26 @@ ORDER BY id;
 1	10.0	2016-05-14
 2	20.0	2016-05-15
 
+# with the table reported, DML binds against it: a Glue table has no rowid, so the catalog refuses the statement
+statement error
+DELETE FROM my_datalake.default.bi_orders WHERE id = 1;
+----
+<REGEX>:Not implemented Error.*DELETE is not supported for Glue tables.*
+
+statement error
+UPDATE my_datalake.default.bi_orders SET amount = 0;
+----
+<REGEX>:Not implemented Error.*UPDATE is not supported for Glue tables.*
+
+statement error
+MERGE INTO my_datalake.default.bi_orders USING (SELECT 1 AS id) s ON bi_orders.id = s.id WHEN MATCHED THEN DELETE;
+----
+<REGEX>:Not implemented Error.*MERGE INTO is not supported for Glue tables.*
+
+statement error
+SELECT rowid FROM my_datalake.default.bi_orders;
+----
+<REGEX>:Binder Error.*Referenced column "rowid" not found.*
+
 statement ok
 DROP TABLE my_datalake.default.bi_orders;

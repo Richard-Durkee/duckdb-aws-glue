@@ -38,6 +38,14 @@ TableStorageInfo GlueTable::GetStorageInfo(ClientContext &context) {
 	return result;
 }
 
+virtual_column_map_t GlueTable::GetVirtualColumns() const {
+	return virtual_column_map_t();
+}
+
+vector<column_t> GlueTable::GetRowIdColumns() const {
+	return vector<column_t>();
+}
+
 GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	GlueTableInfo result;

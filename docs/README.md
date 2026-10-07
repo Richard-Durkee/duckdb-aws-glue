@@ -39,14 +39,25 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns are applied to the partition values first,
-  so only the partitions a query reads are listed (EXPLAIN shows the partitions kept as `Scanning Files`), and
-  planning a query does not touch S3. When a query reads at least `hive_partition_listing_threshold` (default
-  10) partitions below the table location, the location is listed once, recursively (one S3 request per 1000
-  keys), and the files are matched to their partitions by prefix; fewer partitions, and partitions at custom
-  locations, are listed one directory each.
-- The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. A column a file
-  does not have (added after the file was written) reads as NULL, a column with a different type in the file is
-  cast, and file columns Glue does not list are ignored.
+  so only the partitions a query reads are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a
+  query reads at least `hive_partition_listing_threshold` (default 10) partitions below the table location, the
+  location is listed once, recursively (one S3 request per 1000 keys), and the files are matched to their
+  partitions by prefix; fewer partitions, and partitions at custom locations, are listed one directory each.
+- To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
+  of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
+  first page of that listing, which the scan then continues) and reads the row count of its largest file: the
+  parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
+  that one measurement by the partitions it reads, and a scan that lists the same directory reuses the listing.
+  Avro tables are not measured, so planning them lists nothing.
+- The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
+  by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
+  a different type in the file is cast, and file columns Glue does not list are ignored.
+
+The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
+OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
+from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_json` (one object per line, keys by
+name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
+...) are not supported.
 
 Compression: a csv or json table is read with the codec it records (`write.compression`, else the `compressionType`
 Glue crawlers set), whatever the names of its files; DuckDB reads gzip and zstd, another codec is an error. A table

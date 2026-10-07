@@ -91,13 +91,13 @@ SELECT requests, root_scoped, partition_scoped FROM listings();
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale20;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*~4,000 rows.*
 
 # ten partitions: pruning narrows the files and the scan estimate is EXACTLY the 2,000 rows they hold
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/20.*~2,000 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*Scanning Files: 10/20.*~2,000 rows.*
 
 # one partition: the files are narrowed correctly (1/20) but the estimate is 40 where the truth is 200.
 # An equality filter is pushed INTO the scan, so DEFAULT_SELECTIVITY (0.2) is applied to the scan's own
@@ -106,7 +106,7 @@ physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/20.*~2,000 rows.*
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/20.*~40 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*Scanning Files: 1/20.*~40 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.scale20;
@@ -158,19 +158,19 @@ SELECT requests, root_scoped, partition_scoped FROM listings();
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale200;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*~4,000 rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/200.*~200 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*Scanning Files: 10/200.*~200 rows.*
 
 # 20 rows estimated at 4: the same 0.2, so the error is a constant factor rather than something that
 # grows with the table
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/200.*~4 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*Scanning Files: 1/200.*~4 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.scale200;
@@ -238,19 +238,19 @@ SELECT requests, root_scoped, partition_scoped FROM listings();
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale2000;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*~4,000 rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3','d4','d5','d6','d7','d8','d9','d10');
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/2000.*~20 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*Scanning Files: 10/2000.*~20 rows.*
 
 # Two rows estimated as one. 2 x 0.2 is 0.4, and the 0.2 path floors at 1, so here the error is the
 # floor rather than the factor.
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2000.*~1 row.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*Scanning Files: 1/2000.*~1 row.*
 
 # and raising the threshold above the partitions read takes the narrow branch again, at any table size --
 # which is what makes this a threshold problem rather than a listing problem

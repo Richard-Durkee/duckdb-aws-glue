@@ -115,7 +115,7 @@ UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*~4,000 rows.*
 
 # and one partition is 200, which the equality filter's default selectivity of 0.2 takes to ~40
 query II
@@ -124,7 +124,7 @@ UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~40 rows.*
+physical_plan	<REGEX>:.*Glue Hive Scan.*~40 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.plancost_wide;

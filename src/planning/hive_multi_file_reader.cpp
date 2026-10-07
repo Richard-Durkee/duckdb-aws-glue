@@ -25,6 +25,7 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "core/glue_types.hpp"
 
 namespace duckdb {
@@ -466,7 +467,33 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 }
 
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
-	throw NotImplementedException("HiveScan deserialization not implemented");
+	deserializer.ReadProperty<string>(100, "catalog");
+	auto database = deserializer.ReadProperty<string>(101, "database");
+	auto table = deserializer.ReadProperty<string>(102, "table");
+	throw NotImplementedException("A plan that scans the Glue table \"%s.%s\" can not be deserialized", database,
+	                              table);
+}
+
+//! The name every scan of a Glue table carries, whatever the format of the table: a deserialized plan finds its
+//! function by name, and the format reader's own (read_parquet, ...) can not read what HiveScanSerialize writes
+static constexpr const char *GLUE_HIVE_SCAN = "glue_hive_scan";
+
+static unique_ptr<FunctionData> GlueHiveScanBind(ClientContext &context, TableFunctionBindInput &input,
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
+	throw BinderException("glue_hive_scan is the scan of a Glue table and can not be called, query the table instead");
+}
+
+TableFunctionSet GetGlueHiveScanFunctionSet(ExtensionLoader &loader) {
+	auto set = loader.GetTableFunction("parquet_scan").functions;
+	set.ApplyToFunctions([](TableFunction &function) {
+		function.bind = GlueHiveScanBind;
+		function.bind_replace = nullptr;
+		function.SetSerializeCallback(HiveScanSerialize);
+		function.SetDeserializeCallback(HiveScanDeserialize);
+		function.SetName(GLUE_HIVE_SCAN);
+	});
+	set.SetName(GLUE_HIVE_SCAN);
+	return set;
 }
 
 static BindInfo GlueHiveBindInfo(const optional_ptr<FunctionData> bind_data) {
@@ -545,6 +572,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	                                  nullptr, bound_function, empty_ref);
 	HiveScanInfoScope scope(scan_info);
 	bind_data = scan_function.bind(context, bind_input, return_types, names);
+	scan_function.SetName(GLUE_HIVE_SCAN);
 	return scan_function;
 }
 

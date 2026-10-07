@@ -1,0 +1,64 @@
+# name: benchmark/optimizer/estimate_cardinality_for_join_order_optimizer.benchmark
+# description: join a large and a small partitioned Hive table in the local Glue (moto) + S3 (MinIO): the hash join should build on the small one
+# group: [optimizer]
+
+# fact has 10,000,000 rows in 2 partitions, dim 4,000 rows in 50. Written as FROM dim JOIN fact, the hash join builds
+# on fact unless the optimizer knows which table is larger: an estimate from the partition count alone ranks dim
+# larger, and only the cardinality sampled from the data builds on dim.
+
+name Hash join build side from Hive table cardinalities
+group optimizer
+
+require parquet
+
+require httpfs
+
+require glue
+
+cache glue_join_build_side.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE SCHEMA IF NOT EXISTS my_datalake.bench_join_build_side;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_build_side.fact PARTITIONED BY (part) AS
+    SELECT i AS id, i % 1000000 AS k, (i % 997)::DOUBLE AS v, i % 2 AS part FROM range(0, 10000000) t(i);
+CREATE TABLE IF NOT EXISTS my_datalake.bench_join_build_side.dim PARTITIONED BY (part) AS
+    SELECT i * 250 AS k, 'name_' || i AS name, i % 50 AS part FROM range(0, 4000) t(i);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+SET enable_external_file_cache=false;
+
+run
+SELECT count(*), sum(f.v)
+FROM my_datalake.bench_join_build_side.dim d
+JOIN my_datalake.bench_join_build_side.fact f ON f.k = d.k;
+
+result II
+40000	19910460.0

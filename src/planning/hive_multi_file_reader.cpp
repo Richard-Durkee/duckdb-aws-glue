@@ -132,7 +132,7 @@ void HiveMultiFileList::PlanListings() const {
 	if (client_context.TryGetCurrentSetting("hive_partition_listing_threshold", setting) && !setting.IsNull()) {
 		threshold = setting.GetValue<idx_t>();
 	}
-	if (!below_root.empty() && below_root.size() >= threshold) {
+	if (!below_root.empty() && (below_root.size() >= threshold || RootIsListed())) {
 		jobs.push_back(ListingJob {true, std::move(below_root)});
 	} else {
 		for (auto partition_index : below_root) {
@@ -214,14 +214,25 @@ void HiveMultiFileList::AddFile(OpenFileInfo file, idx_t partition_index) const 
 	expanded_files.push_back(std::move(file));
 }
 
+bool HiveMultiFileList::RootIsListed() const {
+	lock_guard<mutex> guard(scan_info->root_listing_lock);
+	return scan_info->root_listed;
+}
+
 void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions) const {
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
 	if (root.empty()) {
 		throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 	}
-	// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request
-	auto files = fs.GlobFiles(root + "/**", FileGlobOptions::ALLOW_EMPTY);
+	unique_lock<mutex> root_guard(scan_info->root_listing_lock);
+	if (!scan_info->root_listed) {
+		// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request
+		scan_info->root_files = fs.GlobFiles(root + "/**", FileGlobOptions::ALLOW_EMPTY);
+		scan_info->root_listed = true;
+	}
+	root_guard.unlock();
+	auto &files = scan_info->root_files;
 	unordered_set<idx_t> reading;
 	for (auto partition_index : partitions) {
 		auto &partition = scan_info->partitions[partition_index];
@@ -244,7 +255,7 @@ void HiveMultiFileList::ListRoot(FileSystem &fs, const vector<idx_t> &partitions
 		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
 			continue;
 		}
-		AddFile(std::move(file), partition_index.GetIndex());
+		AddFile(file, partition_index.GetIndex());
 	}
 }
 
@@ -365,7 +376,13 @@ static unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, co
 	if (count_info.type != FileExpansionType::ALL_FILES_EXPANDED) {
 		estimated_file_count *= 2;
 	}
-	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
+	auto result = bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
+	if (!result) {
+		// no file is opened at bind, so the reader has no estimate: assume 1000 rows per file, as read_parquet did
+		static constexpr idx_t ESTIMATED_ROWS_PER_FILE = 1000;
+		result = make_uniq<NodeStatistics>(estimated_file_count * ESTIMATED_ROWS_PER_FILE);
+	}
+	return result;
 }
 
 //! Serialize the fields that identify a scan; CommonSubplanOptimizer uses them to decide whether sub-plans are equal
@@ -661,28 +678,46 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 	if (scan.partition_keys.empty() || !info.filters.HasFilters()) {
 		return nullptr;
 	}
-	auto projections = PartitionKeyProjections(scan, info.column_ids, info.column_names);
-	if (projections.empty()) {
-		return nullptr;
-	}
-	// The table filters become expressions over the scan's columns, as MultiFileList::DynamicFilterPushdown does
-	TableIndex table_index(0);
-	vector<unique_ptr<Expression>> filters;
+	struct PartitionKeyFilter {
+		const ExpressionFilter &filter;
+		idx_t partition_key_index;
+		const LogicalType &type;
+	};
+	vector<PartitionKeyFilter> key_filters;
 	for (auto &entry : info.filters) {
-		auto filter_index = entry.GetIndex();
-		auto primary_index = info.column_indexes[filter_index].GetPrimaryIndex();
+		auto primary_index = info.column_indexes[entry.GetIndex()].GetPrimaryIndex();
 		if (IsVirtualColumn(primary_index)) {
 			continue;
 		}
-		auto column_ref = make_uniq<BoundColumnRefExpression>(info.column_types[primary_index],
-		                                                      ColumnBinding(table_index, filter_index));
+		auto key_index = scan.GetPartitionKeyIndex(info.column_names[primary_index].GetIdentifierName());
+		if (key_index == DConstants::INVALID_INDEX) {
+			continue;
+		}
 		auto &filter =
 		    ExpressionFilter::GetExpressionFilter(entry.Filter(), "HiveMultiFileList::DynamicFilterPushdown");
-		filters.push_back(filter.ToExpression(*column_ref));
+		key_filters.push_back({filter, key_index, info.column_types[primary_index]});
 	}
-	unordered_set<idx_t> pruning_filters;
-	auto kept =
-	    PartitionsToRead(info.context, scan, partition_indexes, table_index, projections, filters, pruning_filters);
+	if (key_filters.empty()) {
+		return nullptr;
+	}
+	// join filters are optional filters, which fold to true as expressions: evaluate the filter they wrap instead
+	vector<idx_t> kept;
+	for (auto partition_index : partition_indexes) {
+		auto &partition = scan.partitions[partition_index];
+		bool keep = true;
+		for (auto &key_filter : key_filters) {
+			auto &key = scan.partition_keys[key_filter.partition_key_index];
+			auto value = HivePartitioning::GetValue(info.context, key, partition.values[key_filter.partition_key_index],
+			                                        key_filter.type);
+			if (!key_filter.filter.EvaluateWithConstant(info.context, value)) {
+				keep = false;
+				break;
+			}
+		}
+		if (keep) {
+			kept.push_back(partition_index);
+		}
+	}
 	if (kept.size() == partition_indexes.size()) {
 		return nullptr;
 	}

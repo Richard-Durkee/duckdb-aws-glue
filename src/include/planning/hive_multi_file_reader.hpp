@@ -43,6 +43,11 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The recursive listing of 'root_location', shared by the lists of this scan: DuckDB counts the files of the list
+	//! before partition pruning when the scan starts, the pruned list then reads the same listing
+	mutex root_listing_lock;
+	bool root_listed = false;
+	vector<OpenFileInfo> root_files;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
@@ -89,6 +94,7 @@ private:
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
 	void ListRoot(FileSystem &fs, const vector<idx_t> &partitions) const;
+	bool RootIsListed() const;
 	void ListPartition(FileSystem &fs, idx_t partition_index) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;

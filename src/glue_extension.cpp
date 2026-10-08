@@ -16,7 +16,6 @@
 #include <aws/core/Aws.h>
 #include <mutex>
 #include "catalog/glue_catalog.hpp"
-#include "planning/hive_multi_file_reader.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 
 namespace duckdb {
@@ -98,7 +97,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// ALTER TABLE ... ADD / DROP PARTITION etc., switched on with SET active_grammar_extensions = ['glue_hive_ddl']
 	RegisterGlueGrammarExtension(instance);
 	loader.RegisterFunction(GetHiveScanFunction(instance));
-	loader.RegisterFunction(GetGlueHiveScanFunctionSet(loader));
 }
 
 void GlueExtension::Load(ExtensionLoader &loader) {

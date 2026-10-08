@@ -25,7 +25,6 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
-#include "duckdb/main/extension/extension_loader.hpp"
 #include "core/glue_types.hpp"
 
 namespace duckdb {
@@ -443,7 +442,8 @@ static const TableFunction &GetListReadFunction(ClientContext &context, const st
 	return *function_set.functions.GetFunctionByArguments(context, {LogicalType::LIST(LogicalType::VARCHAR)});
 }
 
-//! Serialize the fields that identify a scan; CommonSubplanOptimizer uses them to decide whether sub-plans are equal
+//! The full description of the scan: CommonSubplanOptimizer compares it to decide whether sub-plans are equal, and a
+//! deserialized plan binds the same scan again from it
 static void HiveScanSerialize(Serializer &serializer, const optional_ptr<FunctionData> bind_data_p,
                               const BoundTableFunction &function) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
@@ -464,36 +464,52 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(105, "partition_locations", locations);
 	serializer.WriteProperty(106, "types", bind_data.types);
 	serializer.WriteProperty(107, "names", bind_data.names);
+	serializer.WriteProperty(108, "format", HiveFileFormatToString(info.file_format));
+	serializer.WriteProperty(109, "partition_keys", info.partition_keys);
+	serializer.WriteProperty(110, "columns", info.names);
+	serializer.WriteProperty(111, "column_types", info.types);
+	serializer.WriteProperty(112, "delimiter", info.delimiter);
+	serializer.WriteProperty(113, "quote", info.quote);
+	serializer.WriteProperty(114, "escape", info.escape);
+	serializer.WriteProperty(115, "header", info.header);
 }
 
+//! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
+//! that filters already pruned are not brought back
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
-	deserializer.ReadProperty<string>(100, "catalog");
-	auto database = deserializer.ReadProperty<string>(101, "database");
-	auto table = deserializer.ReadProperty<string>(102, "table");
-	throw NotImplementedException("A plan that scans the Glue table \"%s.%s\" can not be deserialized", database,
-	                              table);
+	auto &context = deserializer.Get<ClientContext &>();
+	auto info = make_shared_ptr<HiveScanInfo>();
+	info->catalog_name = deserializer.ReadProperty<string>(100, "catalog");
+	info->database_name = deserializer.ReadProperty<string>(101, "database");
+	info->table_name = deserializer.ReadProperty<string>(102, "table");
+	info->root_location = deserializer.ReadProperty<string>(103, "location");
+	auto partitions = deserializer.ReadProperty<vector<vector<string>>>(104, "partitions");
+	auto locations = deserializer.ReadProperty<vector<string>>(105, "partition_locations");
+	deserializer.ReadProperty<vector<LogicalType>>(106, "types");
+	deserializer.ReadProperty<vector<Identifier>>(107, "names");
+	info->file_format = HiveFileFormatFromString(deserializer.ReadProperty<string>(108, "format"));
+	info->partition_keys = deserializer.ReadProperty<vector<string>>(109, "partition_keys");
+	info->names = deserializer.ReadProperty<vector<Identifier>>(110, "columns");
+	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
+	info->delimiter = deserializer.ReadProperty<string>(112, "delimiter");
+	info->quote = deserializer.ReadProperty<string>(113, "quote");
+	info->escape = deserializer.ReadProperty<string>(114, "escape");
+	info->header = deserializer.ReadProperty<bool>(115, "header");
+	if (partitions.size() != locations.size()) {
+		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
+		                             partitions.size(), locations.size());
+	}
+	for (idx_t i = 0; i < partitions.size(); i++) {
+		info->partitions.push_back({std::move(partitions[i]), std::move(locations[i])});
+	}
+	unique_ptr<FunctionData> bind_data;
+	function = BoundTableFunction(BindHiveScan(context, std::move(info), bind_data));
+	return bind_data;
 }
 
-//! The name every scan of a Glue table carries, whatever the format of the table: a deserialized plan finds its
-//! function by name, and the format reader's own (read_parquet, ...) can not read what HiveScanSerialize writes
-static constexpr const char *GLUE_HIVE_SCAN = "glue_hive_scan";
-
-static unique_ptr<FunctionData> GlueHiveScanBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
-	throw BinderException("glue_hive_scan is the scan of a Glue table and can not be called, query the table instead");
-}
-
-TableFunctionSet GetGlueHiveScanFunctionSet(ExtensionLoader &loader) {
-	auto set = loader.GetTableFunction("parquet_scan").functions;
-	set.ApplyToFunctions([](TableFunction &function) {
-		function.bind = GlueHiveScanBind;
-		function.bind_replace = nullptr;
-		function.SetSerializeCallback(HiveScanSerialize);
-		function.SetDeserializeCallback(HiveScanDeserialize);
-		function.SetName(GLUE_HIVE_SCAN);
-	});
-	set.SetName(GLUE_HIVE_SCAN);
-	return set;
+void SetHiveScanSerialization(TableFunction &function) {
+	function.SetSerializeCallback(HiveScanSerialize);
+	function.SetDeserializeCallback(HiveScanDeserialize);
 }
 
 static BindInfo GlueHiveBindInfo(const optional_ptr<FunctionData> bind_data) {
@@ -550,8 +566,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
 	// the format reader serializes its file list, which would expand this lazy list (listing S3) while the
 	// common-subplan optimizer computes plan signatures
-	scan_function.SetSerializeCallback(HiveScanSerialize);
-	scan_function.SetDeserializeCallback(HiveScanDeserialize);
+	SetHiveScanSerialization(scan_function);
 	// partition columns are answered from the partition values; the format keeps every other column
 	scan_info->format_statistics = scan_function.statistics_extended;
 	scan_function.statistics_extended = HivePartitionStatistics;
@@ -572,7 +587,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	                                  nullptr, bound_function, empty_ref);
 	HiveScanInfoScope scope(scan_info);
 	bind_data = scan_function.bind(context, bind_input, return_types, names);
-	scan_function.SetName(GLUE_HIVE_SCAN);
+	scan_function.SetName("hive_scan");
 	return scan_function;
 }
 

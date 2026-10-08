@@ -47,6 +47,6 @@ TableFunction GetGlueAlterTableFunction();
 //! hive_scan('s3://root', schema := {col: 'TYPE', ...}, partitions := [{key: value, ..., location: '...'}, ...],
 //! partition_keys := [...]): read a parquet Hive table without a catalog. The same scan as for a Glue Hive table,
 //! with the schema and the partitions (values and locations) given as arguments.
-TableFunction GetHiveScanFunction(DatabaseInstance &db);
+TableFunctionSet GetHiveScanFunction(DatabaseInstance &db);
 
 } // namespace duckdb

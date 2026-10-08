@@ -11,7 +11,6 @@
 #include "core/glue_info.hpp"
 
 namespace duckdb {
-class ExtensionLoader;
 
 //! Everything a Hive table scan knows before any data file is opened: the table schema as Glue defines it, the
 //! partitions Glue lists (values and locations) and the data files of every partition
@@ -134,9 +133,9 @@ private:
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
-//! glue_hive_scan: the name of every scan of a Glue table, registered (as a copy of parquet_scan that can not be
-//! called) so that deserializing a plan with such a scan reaches the Hive scan's deserialization
-TableFunctionSet GetGlueHiveScanFunctionSet(ExtensionLoader &loader);
+//! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan
+//! binds the same scan again
+void SetHiveScanSerialization(TableFunction &function);
 
 //! MultiFileReader for Hive tables registered in Glue. It reads the files Glue's partitions point to (whatever their
 //! directory names), binds the schema Glue defines rather than the schema of the first file (a column missing from a

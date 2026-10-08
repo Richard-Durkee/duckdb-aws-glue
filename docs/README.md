@@ -95,8 +95,9 @@ their codec themselves.
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
   into a partition whose location is not below the table location fails; the rows of other partitions can still be
   inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
-  column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
-  fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
+  column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
+  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
+  (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
   partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.

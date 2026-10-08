@@ -37,6 +37,10 @@ public:
 
 public:
 	optional_ptr<CatalogEntry> CreateTable(CatalogTransaction transaction, BoundCreateTableInfo &info) override;
+	//! Create a table from a definition whose options were already resolved while planning CTAS. This avoids evaluating
+	//! location, format or dialect expressions a second time when execution begins.
+	optional_ptr<CatalogEntry> CreateTableFromInfo(CatalogTransaction transaction, BoundCreateTableInfo &info,
+	                                               const GlueTableInfo &table_info);
 	optional_ptr<CatalogEntry> CreateFunction(CatalogTransaction transaction, CreateFunctionInfo &info) override;
 	optional_ptr<CatalogEntry> CreateIndex(CatalogTransaction transaction, CreateIndexInfo &info,
 	                                       TableCatalogEntry &table) override;
@@ -56,6 +60,9 @@ public:
 	void DropEntry(ClientContext &context, DropInfo &info) override;
 	optional_ptr<CatalogEntry> LookupEntry(CatalogTransaction transaction, const EntryLookupInfo &lookup_info) override;
 
+	//! Build and validate a Glue table definition without touching Glue. CTAS resolves it once while planning, then
+	//! carries the same value into execution for both catalog creation and file-writer behavior.
+	GlueTableInfo BuildTableInfo(ClientContext &context, const CreateTableInfo &create_info);
 	//! Bind and evaluate the constant expressions of a WITH (<key> = <value>, ...) option list
 	static vector<pair<string, Value>>
 	EvaluateOptions(ClientContext &context, const case_insensitive_map_t<unique_ptr<ParsedExpression>> &options,
@@ -69,6 +76,8 @@ public:
 	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
 
 private:
+	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
+	                                               const GlueTableInfo *resolved_table_info);
 	static bool CatalogTypeIsSupported(CatalogType type);
 	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
 

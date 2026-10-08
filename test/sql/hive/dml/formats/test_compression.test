@@ -19,7 +19,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -280,6 +280,19 @@ none	UNCOMPRESSED
 snappy	SNAPPY
 zstd	ZSTD
 
+# the files are named after their codec, as Spark and Hive name them
+query II
+SELECT regexp_extract(file, 'compr_parquet_([a-z0-9]+)/', 1) AS t, string_agg(DISTINCT regexp_extract(file, '[0-9a-f-]{36}(\..*)$', 1))
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_parquet_*/*') GROUP BY t ORDER BY t;
+----
+brotli	.br.parquet
+default	.snappy.parquet
+gzip	.gz.parquet
+lz4	.lz4raw.parquet
+none	.parquet
+snappy	.snappy.parquet
+zstd	.zstd.parquet
+
 query III
 SELECT (SELECT sum(id) FROM my_datalake.default.compr_parquet_snappy), (SELECT sum(id) FROM my_datalake.default.compr_parquet_lz4),
     (SELECT sum(id) FROM my_datalake.default.compr_parquet_brotli);
@@ -331,7 +344,56 @@ INSERT INTO my_datalake.default.compr_parquet_lzo VALUES (1);
 ----
 Expected "compression" argument to be any of
 
-foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain
+#---------------------------------------------------------------------------
+# avro.output.codec
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.compr_avro_snappy (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'snappy');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_avro_deflate (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'deflate');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_avro_none (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'none');
+
+statement ok
+CREATE TABLE my_datalake.default.compr_avro_default (id INTEGER) WITH (format = 'avro');
+
+foreach table compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default
+
+statement ok
+INSERT INTO my_datalake.default.{table} SELECT range FROM range(100);
+
+query I
+SELECT sum(id) FROM my_datalake.default.{table};
+----
+4950
+
+endloop
+
+# the codec an avro file is written with is in its header ('avro.codec')
+query II
+SELECT regexp_extract(filename, 'compr_avro_([a-z]+)/', 1) AS t,
+    CASE WHEN contains(hex(content), hex('snappy'::BLOB)) THEN 'snappy'
+         WHEN contains(hex(content), hex('deflate'::BLOB)) THEN 'deflate'
+         ELSE 'null' END
+FROM read_blob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/compr_avro_*/*') ORDER BY t;
+----
+default	null
+deflate	deflate
+none	null
+snappy	snappy
+
+# a codec DuckDB can not write
+statement ok
+CREATE TABLE my_datalake.default.compr_avro_zstd (id INTEGER) WITH (format = 'avro', 'avro.output.codec' = 'zstandard');
+
+statement error
+INSERT INTO my_datalake.default.compr_avro_zstd VALUES (1);
+----
+Can not write to Hive table 'default.compr_avro_zstd': it records zstandard compression, DuckDB writes only snappy and deflate compressed avro files
+
+foreach table compr_csv_gzip compr_json_zstd compr_csv_none compr_csv_ctas compr_csv_bzip2 compr_csv_plain compr_csv_crawler compr_parquet_zstd compr_parquet_gzip compr_parquet_none compr_parquet_lzo compr_parquet_default compr_parquet_crawler compr_parquet_level compr_parquet_badlevel compr_parquet_snappy compr_parquet_lz4 compr_parquet_brotli compr_csv_zstd compr_json_gzip compr_json_none compr_json_plain compr_avro_snappy compr_avro_deflate compr_avro_none compr_avro_default compr_avro_zstd
 
 statement ok
 DROP TABLE my_datalake.default.{table};

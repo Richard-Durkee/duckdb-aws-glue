@@ -27,6 +27,10 @@ CREATE TABLE my_datalake.default.plancost (id INTEGER, dt VARCHAR) PARTITIONED B
 statement ok
 INSERT INTO my_datalake.default.plancost SELECT i, 'd' || (i % 4) FROM generate_series(1,4000) t(i);
 
+# the listed prefix is in the URL's query string, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
 statement ok
 CALL enable_logging('HTTP', storage := 'memory');
 
@@ -117,14 +121,14 @@ UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
 ----
 physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
 
-# and one partition is 200, which the equality filter's default selectivity of 0.2 takes to ~40
+# and one partition is 200: the equality is always true of the partition left, so it takes no selectivity
 query II
 EXPLAIN SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd3'
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~40 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*~200 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.plancost_wide;

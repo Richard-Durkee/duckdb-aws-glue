@@ -27,6 +27,10 @@ jobs:
         with:
           submodules: recursive
 
+      # the relassert build (debug info + ASAN) and the test data otherwise fill the runner's disk
+      - name: Free disk space
+        uses: ./duckdb/.github/actions/cleanup_runner
+
       - uses: docker/setup-compose-action@v1
 
       - name: Start Glue (moto) and S3 (MinIO)
@@ -38,9 +42,10 @@ jobs:
           sudo apt-get install -y -qq ninja-build
 
       - name: Setup Ccache
-        uses: hendrikmuhs/ccache-action@main
+        uses: ./duckdb/.github/actions/ccache-action
         with:
-          key: ${{ github.job }}
+          # PR caches are only visible to the PR itself; at this size they would evict main's from the 10 GB budget
+          save: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         uses: duckdb/duckdb-ci/build-duckdb@main

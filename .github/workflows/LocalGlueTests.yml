@@ -59,26 +59,38 @@ jobs:
         env:
           ASAN_OPTIONS: detect_container_overflow=0
         run: |
+          set +e
           sudo apt-get install -y -qq strace
           printf 'statement ok\nSELECT 1;\n' > test/sql/diag_noop.test
           T=test/sql/hive/attach/verify_connection.test
           UT="./build/relassert/test/unittest --test-config test/configs/local_glue.json"
-          run() { echo "::group::$1"; shift; local s=$(date +%s.%N); "$@" > /tmp/out.txt 2>&1; local rc=$?; tail -3 /tmp/out.txt; echo "rc=$rc"; echo "::endgroup::"; echo "TIME $(echo "$(date +%s.%N) - $s" | bc) s"; }
+          run() {
+            echo "::group::$1"; shift
+            local s=$(date +%s%N)
+            "$@" > /tmp/out.txt 2>&1
+            local rc=$?
+            tail -5 /tmp/out.txt
+            echo "::endgroup::"
+            echo "TIME $(( ($(date +%s%N) - s) / 1000000 )) ms rc=$rc"
+          }
+          run "unittest --help" ./build/relassert/test/unittest --help
           run "list tests" $UT --list-tests "$T"
           run "noop test (no Glue)" $UT test/sql/diag_noop.test
           run "verify_connection" $UT "$T"
           run "verify_connection again (warm)" $UT "$T"
           run "verify_connection, AWS_REGION set" env AWS_REGION=us-east-1 $UT "$T"
           run "verify_connection, no LeakSanitizer" env ASAN_OPTIONS=detect_container_overflow=0:detect_leaks=0 $UT "$T"
-          run "verify_connection, SDK transport" env GLUE_DIAG=1 $UT "$T"
+          run "5 tests, one process" $UT 'test/sql/hive/ddl/alter_column/*'
+          for t in test/sql/hive/ddl/alter_column/*.test; do run "single $t" $UT "$t"; done
           echo "::group::strace (syscalls blocking > 0.5s)"
-          strace -f -tt -T -e trace=connect,poll,ppoll,select,pselect6,epoll_wait,epoll_pwait,nanosleep,clock_nanosleep,futex,read,recvfrom,wait4 \
+          strace -f -tt -T -e trace=connect,poll,ppoll,select,pselect6,epoll_wait,epoll_pwait,nanosleep,clock_nanosleep,futex,wait4 \
             -o /tmp/strace.txt $UT "$T" > /dev/null 2>&1
           awk 'match($0, /<([0-9.]+)>$/, m) && m[1] > 0.5' /tmp/strace.txt | head -100
           echo "::endgroup::"
           echo "::group::strace connect() calls"
           grep -E 'connect\(' /tmp/strace.txt | grep -vE 'AF_UNIX' | head -50
           echo "::endgroup::"
+          exit 0
 
       - name: Upload strace
         if: always()

@@ -15,6 +15,7 @@
 #include "duckdb/planner/expression_binder/table_function_binder.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 
 #include "core/glue_types.hpp"
@@ -709,6 +710,12 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		auto column = find_column(columns, name);
 		if (!column) {
 			throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
+		}
+		// without USING the binder fills in CAST(column AS type)
+		CastExpression plain_cast(change.target_type, make_uniq<ColumnRefExpression>(change.column_path));
+		if (change.expression && !change.expression->Equals(plain_cast)) {
+			throw NotImplementedException("ALTER COLUMN ... TYPE ... USING is not supported for Hive tables in a Glue "
+			                              "catalog: existing data files can not be rewritten");
 		}
 		auto from = GlueTypes::ToLogicalType(column->type);
 		if (!IsAllowedHiveTypeChange(from, change.target_type)) {

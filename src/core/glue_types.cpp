@@ -255,9 +255,6 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	case LogicalTypeId::TIME:
 		return "time";
 	case LogicalTypeId::TIMESTAMP:
-	case LogicalTypeId::TIMESTAMP_NS:
-	case LogicalTypeId::TIMESTAMP_MS:
-	case LogicalTypeId::TIMESTAMP_SEC:
 		return "timestamp";
 	case LogicalTypeId::TIMESTAMP_TZ:
 		return "timestamptz";

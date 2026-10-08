@@ -1,6 +1,6 @@
 # Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
 #
-# A relassert build: DuckDB's assertions and the sanitizers are on, like the build used locally.
+# A release build with DuckDB's assertions and the sanitizers on, i.e. relassert without debug info.
 
 name: Local Glue tests
 
@@ -27,7 +27,7 @@ jobs:
         with:
           submodules: recursive
 
-      # the relassert build (debug info + ASAN) and the test data otherwise fill the runner's disk
+      # the sanitizer build and the test data otherwise fill the runner's disk
       - name: Free disk space
         uses: ./duckdb/.github/actions/cleanup_runner
 
@@ -47,61 +47,17 @@ jobs:
           # PR caches are only visible to the PR itself; at this size they would evict main's from the 10 GB budget
           save: ${{ github.ref == 'refs/heads/main' }}
 
+      # relassert without debug info: on Linux -g makes each loadable extension ~1.5 GB, and the test runner
+      # installs and loads avro, httpfs and glue from build/*/repository for every test database (~25s per test)
       - name: Build
         uses: duckdb/duckdb-ci/build-duckdb@main
         with:
-          build-type: relassert
-          build: make relassert
+          build-type: release
+          build: make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
-      # TEMPORARY (diagnose_ci_test_time branch, not for merging): find the ~35s fixed cost per test process on CI
-      - name: Diagnose per-test time
-        env:
-          ASAN_OPTIONS: detect_container_overflow=0
-        run: |
-          set +e
-          sudo apt-get install -y -qq strace
-          printf 'statement ok\nSELECT 1;\n' > test/sql/diag_noop.test
-          T=test/sql/hive/attach/verify_connection.test
-          UT="./build/relassert/test/unittest --test-config test/configs/local_glue.json"
-          run() {
-            echo "::group::$1"; shift
-            local s=$(date +%s%N)
-            "$@" > /tmp/out.txt 2>&1
-            local rc=$?
-            tail -5 /tmp/out.txt
-            echo "::endgroup::"
-            echo "TIME $(( ($(date +%s%N) - s) / 1000000 )) ms rc=$rc"
-          }
-          sudo apt-get install -y -qq gdb jq
-          mk() { jq --argjson e "$2" '.statically_loaded_extensions = $e' test/configs/local_glue.json > /tmp/cfg_$1.json; }
-          mk none '[]'
-          mk core '["core_functions"]'
-          mk noglue '["core_functions","parquet","json","avro","httpfs"]'
-          mk noavro '["core_functions","parquet","json","httpfs","glue"]'
-          N=test/sql/diag_noop.test
-          UTB=./build/relassert/test/unittest
-          run "noop, no test config" $UTB $N
-          run "noop, full config" $UT $N
-          run "noop, config without extensions" $UTB --test-config /tmp/cfg_none.json $N
-          run "noop, core_functions only" $UTB --test-config /tmp/cfg_core.json $N
-          run "noop, without glue" $UTB --test-config /tmp/cfg_noglue.json $N
-          run "noop, without avro" $UTB --test-config /tmp/cfg_noavro.json $N
-          run "noop, full config, no LSan" env ASAN_OPTIONS=detect_container_overflow=0:detect_leaks=0 $UT $N
-          run "noop, full config, 1 thread" env DUCKDB_NO_THREADS=1 $UT $N
-          echo "::group::gdb stack samples of the main thread (noop, full config)"
-          $UT $N > /tmp/gdbrun.txt 2>&1 &
-          PID=$!
-          for at in 2 5 9 13 17 21 25; do
-            sleep $([ $at = 2 ] && echo 2 || echo 4)
-            echo "--- t=${at}s"
-            sudo gdb -p $PID -batch -ex "thread 1" -ex "bt 25" 2>/dev/null | grep -E '^#' | cut -c1-200
-          done
-          wait $PID
-          tail -3 /tmp/gdbrun.txt
-          echo "::endgroup::"
-          exit 0
-
+      - name: Run tests
+        run: make test-local TEST_BUILD=release
 
       - name: Server logs
         if: always()

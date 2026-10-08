@@ -1,7 +1,8 @@
 # Regression run of the benchmarks under benchmark/ (modelled on duckdb-iceberg's Regression.yml): builds the
 # benchmark runner for the PR and for its merge base with the base branch, and compares the timings of both with
 # duckdb/scripts/regression/test_runner.py. The benchmarks read from the local Glue (moto) + S3 (MinIO) of
-# scripts/docker-compose.yml, so no AWS credentials are needed.
+# scripts/docker-compose.yml, so no AWS credentials are needed. On main only the first build runs, to save the ccache and
+# vcpkg caches that PR branches restore from.
 
 name: Regression
 on:
@@ -21,8 +22,6 @@ on:
         type: string
   repository_dispatch:
   push:
-    branches-ignore:
-      - 'main'
   pull_request:
     types: [opened, reopened, ready_for_review, converted_to_draft, synchronize]
 
@@ -58,6 +57,10 @@ jobs:
       CXX: clang++-20
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
+      # lets the base build in base/ hit the ccache entries of the PR build
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_NOHASHDIR: "true"
+      IS_MAIN: ${{ github.ref == 'refs/heads/main' }}
 
     steps:
       - uses: actions/checkout@v5
@@ -92,12 +95,15 @@ jobs:
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
       - name: Set up Docker Compose
+        if: env.IS_MAIN != 'true'
         uses: docker/setup-compose-action@v1
 
       - name: Start Glue (moto) and S3 (MinIO)
+        if: env.IS_MAIN != 'true'
         run: docker compose -f scripts/docker-compose.yml up -d --wait
 
       - name: Select base ref
+        if: env.IS_MAIN != 'true'
         run: |
           git fetch origin "${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}"
           if [[ -n "${BASE_HASH}" ]]; then
@@ -115,6 +121,7 @@ jobs:
           echo "BASE_REF=${BASE_REF}" >> "$GITHUB_ENV"
 
       - name: Checkout Base Branch
+        if: env.IS_MAIN != 'true'
         run: |
           rm -rf base
           git clone . base
@@ -123,6 +130,7 @@ jobs:
           git submodule update --init --recursive
 
       - name: Build Base Benchmark (release)
+        if: env.IS_MAIN != 'true'
         uses: duckdb/duckdb-ci/build-duckdb@main
         env:
           STATIC_LIBCPP: 1
@@ -137,6 +145,7 @@ jobs:
       # The benchmark files of the PR checkout are run by both runners (the benchmark runner resolves the paths
       # against the working directory, which test_runner.py isolates per runner).
       - name: Regression Test Hive Benchmarks
+        if: env.IS_MAIN != 'true'
         run: |
           mkdir -p .github/regression
           ls benchmark/*.benchmark > .github/regression/hive_benchmarks.csv
@@ -146,12 +155,12 @@ jobs:
 
       # A step of its own so a TPC-H failure is visible on its own; it also runs when the step above fails
       - name: Tpch benchmarks
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.IS_MAIN != 'true' }}
         run: |
           mkdir -p .github/regression
           ls benchmark/tpch/sf1/*.benchmark > .github/regression/tpch_benchmarks.csv
           python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/tpch_benchmarks.csv --verbose --threads 2 --samples 10
 
       - name: Server logs
-        if: always()
+        if: ${{ always() && env.IS_MAIN != 'true' }}
         run: docker compose -f scripts/docker-compose.yml logs --no-color moto | tail -200

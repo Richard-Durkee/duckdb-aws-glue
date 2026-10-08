@@ -1,6 +1,6 @@
 # Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
 #
-# A debug build: DuckDB's assertions and the sanitizers are on, like the `relassert` build used locally.
+# A relassert build: DuckDB's assertions and the sanitizers are on, like the build used locally.
 
 name: Local Glue tests
 
@@ -16,7 +16,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       GEN: ninja
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
@@ -36,18 +35,22 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y -qq
-          sudo apt-get install -y -qq ninja-build ccache
+          sudo apt-get install -y -qq ninja-build
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Setup Ccache
+        uses: hendrikmuhs/ccache-action@main
         with:
-          vcpkgGitCommitId: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
+          key: ${{ github.job }}
 
       - name: Build
-        run: make debug
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        with:
+          build-type: relassert
+          build: make relassert
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
       - name: Run tests
-        run: make test-local TEST_BUILD=debug
+        run: make test-local TEST_BUILD=relassert
 
       - name: Server logs
         if: always()

@@ -111,20 +111,20 @@ EXPLAIN SELECT country, count(*) FROM my_datalake.default.vol_ctrl GROUP BY coun
 physical_plan	<REGEX>:.*Hash Group By.*~2 rows.*
 
 # Each predicate on the plan, where "Scanning Files: 1/2" is the direct evidence that pruning kept the
-# one partition the filter names. Pushed-down equality and range both take the flat 0.2, so 300 rows
-# estimate at ~60
+# one partition the filter names. An equality is always true of the partition left, so the estimate is
+# its 300 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'US';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~60 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~300 rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country = 'us';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~60 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2.*~300 rows.*
 
-# the two range bounds: a folded bound
-# would keep both partitions or neither
+# the two range bounds: a folded bound would keep both partitions or neither. VARCHAR statistics never
+# prove a range always true, so these take the flat 0.2 of the 300 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.vol_case WHERE country > 'US';
 ----

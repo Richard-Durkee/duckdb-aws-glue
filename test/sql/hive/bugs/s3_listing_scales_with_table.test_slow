@@ -25,6 +25,10 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
+# the listed prefix is in the URL's query string, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
 statement ok
 CALL enable_logging('HTTP', storage := 'memory');
 
@@ -99,14 +103,11 @@ EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt IN ('d1','d2','d3','d
 ----
 physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/20.*~2,000 rows.*
 
-# one partition: the files are narrowed correctly (1/20) but the estimate is 40 where the truth is 200.
-# An equality filter is pushed INTO the scan, so DEFAULT_SELECTIVITY (0.2) is applied to the scan's own
-# estimate -- unlike the IN form above, where the scan is exact and the 0.2 lands on a node above it.
-# Both are the same defect arriving by two routes; see session1-backlog.md 3.4.
+# one partition: the equality is always true of the partition left, so the estimate is exactly its 200 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale20 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/20.*~40 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/20.*~200 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.scale20;
@@ -165,12 +166,11 @@ EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt IN ('d1','d2','d3','
 ----
 physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/200.*~200 rows.*
 
-# 20 rows estimated at 4: the same 0.2, so the error is a constant factor rather than something that
-# grows with the table
+# and exactly its 20 rows at ten times the partitions
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale200 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/200.*~4 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/200.*~20 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.scale200;
@@ -245,12 +245,11 @@ EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3',
 ----
 physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 10/2000.*~20 rows.*
 
-# Two rows estimated as one. 2 x 0.2 is 0.4, and the 0.2 path floors at 1, so here the error is the
-# floor rather than the factor.
+# and its 2 rows at a hundred times
 query II
 EXPLAIN SELECT * FROM my_datalake.default.scale2000 WHERE dt = 'd7';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2000.*~1 row.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/2000.*~2 rows.*
 
 # and raising the threshold above the partitions read takes the narrow branch again, at any table size --
 # which is what makes this a threshold problem rather than a listing problem

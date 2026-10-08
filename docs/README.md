@@ -78,7 +78,9 @@ their codec themselves.
   (JsonSerDe, one object per line) or avro (AvroSerDe)
   Hive table at `location`, else `<DEFAULT_LOCATION>/<database>/<table>`, else `<database LocationUri>/<table>`;
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
-  PartitionKeys and are listed last in the table's columns. Unknown `WITH` keys are stored as Glue table parameters.
+  PartitionKeys and are listed last in the table's columns. Generated columns, column defaults and collated columns
+  (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
+  parameters.
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
@@ -96,8 +98,9 @@ their codec themselves.
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
-- `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
-  partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
+- `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
+  column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
+  definition with UpdateTable.
   Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`

@@ -284,8 +284,9 @@ AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner benc
 ```
 
 `benchmark/tpch/sf1/` runs the 22 TPC-H queries at SF1 against Hive tables in the Glue database `bench_tpch_sf1`
-(`lineitem` partitioned by `l_shipdate`, `orders` by `o_orderdate`) and checks the answers. The first run generates
-the data with `dbgen` and writes it with CTAS, which takes a while; later runs reuse
+(`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`) and checks the answers.
+The queries in `benchmark/tpch/queries/` are DuckDB's with filters on the bucket columns added next to the date
+filters. The first run generates the data with `dbgen` and writes it with CTAS, which takes a while; later runs reuse
 `duckdb_benchmark_data/glue_tpch_sf1.duckdb`, which `make glue-fixture` removes:
 
 ```sh

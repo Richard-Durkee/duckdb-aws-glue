@@ -38,11 +38,12 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   layout. Files and directories named `_*` or `.*` are skipped. When one partition's location lies inside another's,
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
-  partition keys. Files are listed lazily: filters on partition columns are applied to the partition values first,
-  so only the partitions a query reads are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a
-  query reads at least `hive_partition_listing_threshold` (default 10) partitions below the table location, the
-  location is listed once, recursively (one S3 request per 1000 keys), and the files are matched to their
-  partitions by prefix; fewer partitions, and partitions at custom locations, are listed one directory each.
+  partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
+  build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
+  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a query reads at least
+  `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
+  recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
+  partitions, and partitions at custom locations, are listed one directory each.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the

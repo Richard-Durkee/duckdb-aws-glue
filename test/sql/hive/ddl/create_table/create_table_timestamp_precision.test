@@ -1,0 +1,77 @@
+# name: test/sql/hive/ddl/create_table/create_table_timestamp_precision.test
+# description: TIMESTAMP_NS/_MS/_S have no Hive type (timestamp is microseconds) and are refused
+# group: [create_table]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.tsprec_bad;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.tsprec_ok;
+
+foreach type TIMESTAMP_NS TIMESTAMP_MS TIMESTAMP_S
+
+statement error
+CREATE TABLE my_datalake.default.tsprec_bad (ts {type});
+----
+can not be converted to a Glue type
+
+statement error
+CREATE TABLE my_datalake.default.tsprec_bad (l {type}[]);
+----
+can not be converted to a Glue type
+
+statement error
+CREATE TABLE my_datalake.default.tsprec_bad AS SELECT TIMESTAMP '2008-09-15 03:04:05.123456789'::{type} AS ts;
+----
+can not be converted to a Glue type
+
+endloop
+
+statement error
+SELECT * FROM my_datalake.default.tsprec_bad;
+----
+does not exist
+
+statement ok
+CREATE TABLE my_datalake.default.tsprec_ok (id INTEGER, ts TIMESTAMP);
+
+statement error
+ALTER TABLE my_datalake.default.tsprec_ok ADD COLUMN ns TIMESTAMP_NS;
+----
+can not be converted to a Glue type
+
+statement error
+CREATE VIEW my_datalake.default.tsprec_bad AS SELECT TIMESTAMP_NS '2008-09-15 03:04:05.123456789' AS ts;
+----
+can not be converted to a Glue type
+
+# an explicit TIMESTAMP column stores the value rounded to microseconds
+statement ok
+INSERT INTO my_datalake.default.tsprec_ok VALUES (1, TIMESTAMP_NS '2008-09-15 03:04:05.123456789');
+
+query II
+SELECT id, ts FROM my_datalake.default.tsprec_ok;
+----
+1	2008-09-15 03:04:05.123457
+
+query II
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'tsprec_ok' ORDER BY column_index;
+----
+id	INTEGER
+ts	TIMESTAMP
+
+statement ok
+DROP TABLE my_datalake.default.tsprec_ok;

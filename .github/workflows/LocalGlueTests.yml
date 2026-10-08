@@ -54,8 +54,38 @@ jobs:
           build: make relassert
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
-      - name: Run tests
-        run: make test-local TEST_BUILD=relassert
+      # TEMPORARY (diagnose_ci_test_time branch, not for merging): find the ~35s fixed cost per test process on CI
+      - name: Diagnose per-test time
+        env:
+          ASAN_OPTIONS: detect_container_overflow=0
+        run: |
+          sudo apt-get install -y -qq strace
+          printf 'statement ok\nSELECT 1;\n' > test/sql/diag_noop.test
+          T=test/sql/hive/attach/verify_connection.test
+          UT="./build/relassert/test/unittest --test-config test/configs/local_glue.json"
+          run() { echo "::group::$1"; shift; local s=$(date +%s.%N); "$@" > /tmp/out.txt 2>&1; local rc=$?; tail -3 /tmp/out.txt; echo "rc=$rc"; echo "::endgroup::"; echo "TIME $(echo "$(date +%s.%N) - $s" | bc) s"; }
+          run "list tests" $UT --list-tests "$T"
+          run "noop test (no Glue)" $UT test/sql/diag_noop.test
+          run "verify_connection" $UT "$T"
+          run "verify_connection again (warm)" $UT "$T"
+          run "verify_connection, AWS_REGION set" env AWS_REGION=us-east-1 $UT "$T"
+          run "verify_connection, no LeakSanitizer" env ASAN_OPTIONS=detect_container_overflow=0:detect_leaks=0 $UT "$T"
+          run "verify_connection, SDK transport" env GLUE_DIAG=1 $UT "$T"
+          echo "::group::strace (syscalls blocking > 0.5s)"
+          strace -f -tt -T -e trace=connect,poll,ppoll,select,pselect6,epoll_wait,epoll_pwait,nanosleep,clock_nanosleep,futex,read,recvfrom,wait4 \
+            -o /tmp/strace.txt $UT "$T" > /dev/null 2>&1
+          awk 'match($0, /<([0-9.]+)>$/, m) && m[1] > 0.5' /tmp/strace.txt | head -100
+          echo "::endgroup::"
+          echo "::group::strace connect() calls"
+          grep -E 'connect\(' /tmp/strace.txt | grep -vE 'AF_UNIX' | head -50
+          echo "::endgroup::"
+
+      - name: Upload strace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: strace
+          path: /tmp/strace.txt
 
       - name: Server logs
         if: always()

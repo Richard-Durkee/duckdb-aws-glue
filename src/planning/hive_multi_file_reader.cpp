@@ -449,9 +449,6 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = list.ScanInfo();
-	serializer.WriteProperty(100, "catalog", info.catalog_name);
-	serializer.WriteProperty(101, "database", info.database_name);
-	serializer.WriteProperty(102, "table", info.table_name);
 	serializer.WriteProperty(103, "location", info.root_location);
 	// by value: an index into Glue's partition list means nothing elsewhere
 	vector<vector<string>> partitions;
@@ -479,10 +476,8 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
 	auto &context = deserializer.Get<ClientContext &>();
 	auto info = make_shared_ptr<HiveScanInfo>();
-	info->catalog_name = deserializer.ReadProperty<string>(100, "catalog");
-	info->database_name = deserializer.ReadProperty<string>(101, "database");
-	info->table_name = deserializer.ReadProperty<string>(102, "table");
 	info->root_location = deserializer.ReadProperty<string>(103, "location");
+	info->table_name = info->root_location;
 	auto partitions = deserializer.ReadProperty<vector<vector<string>>>(104, "partitions");
 	auto locations = deserializer.ReadProperty<vector<string>>(105, "partition_locations");
 	deserializer.ReadProperty<vector<LogicalType>>(106, "types");

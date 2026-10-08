@@ -20,8 +20,9 @@ public:
 	unique_ptr<BaseStatistics> GetStatistics(ClientContext &context, column_t column_id) override;
 	TableFunction GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) override;
 	TableStorageInfo GetStorageInfo(ClientContext &context) override;
-	//! None: the files of a Hive table have no row identifier
+	//! filename: the location of the data file a row was read from, as for read_parquet and hive_scan
 	virtual_column_map_t GetVirtualColumns() const override;
+	//! None: the files of a Hive table have no row identifier
 	vector<column_t> GetRowIdColumns() const override;
 
 	//! Re-fetch the table definition from Glue

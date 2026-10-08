@@ -39,7 +39,10 @@ TableStorageInfo GlueTable::GetStorageInfo(ClientContext &context) {
 }
 
 virtual_column_map_t GlueTable::GetVirtualColumns() const {
-	return virtual_column_map_t();
+	virtual_column_map_t result;
+	result.insert(
+	    make_pair(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR)));
+	return result;
 }
 
 vector<column_t> GlueTable::GetRowIdColumns() const {
@@ -87,9 +90,6 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->quote = latest_info.GetQuoteCharacter();
 	scan_info->escape = latest_info.GetEscapeCharacter();
 	scan_info->header = latest_info.HasHeader();
-	if (IsTextFileFormat(scan_info->file_format)) {
-		scan_info->compression = latest_info.GetTextCompression();
-	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

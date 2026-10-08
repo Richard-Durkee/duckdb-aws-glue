@@ -37,8 +37,6 @@ struct HiveScanInfo : public TableFunctionInfo {
 	string quote = "\"";
 	string escape = "\"";
 	bool header = false;
-	//! CSV and JSON only: the codec the table records, else DuckDB tells it from each file's extension
-	FileCompressionType compression = FileCompressionType::AUTO_DETECT;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,

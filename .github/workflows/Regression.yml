@@ -150,7 +150,7 @@ jobs:
         run: |
           mkdir -p .github/regression
           ls benchmark/tpch/sf1/*.benchmark > .github/regression/tpch_benchmarks.csv
-          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/tpch_benchmarks.csv --verbose --threads 2
+          python duckdb/scripts/regression/test_runner.py --old base/build/release/benchmark/benchmark_runner --new build/release/benchmark/benchmark_runner --benchmarks .github/regression/tpch_benchmarks.csv --verbose --threads 2 --samples 10
 
       - name: Server logs
         if: always()

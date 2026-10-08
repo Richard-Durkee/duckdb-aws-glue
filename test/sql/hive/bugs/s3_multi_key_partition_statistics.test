@@ -55,9 +55,9 @@ SELECT count(*) FROM my_datalake.default.mkey WHERE country = 'd1';
 0
 
 # ----------------------------------------------------------------------------------------------------
-# The same predicates as estimates. Pushed-down equality gets a flat DEFAULT_SELECTIVITY of
-# 0.2, because a filter on a partition column is not recognised as already true of every row that
-# survived pruning. Each equality below is that 0.2 away from the truth.
+# The same predicates as estimates. The partition column statistics only cover the partitions that
+# survived pruning, so an equality on a key is always true of them and takes no selectivity: each
+# estimate below is exact.
 # ----------------------------------------------------------------------------------------------------
 
 # no predicate: every partition, and the estimate is the table
@@ -70,19 +70,19 @@ physical_plan	<REGEX>:.*Read Parquet.*~600 rows.*
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE dt = 'd1';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 3/6.*~60 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 3/6.*~300 rows.*
 
 # SECOND key: 2 of 6, holding 200. An off-by-one in the key index would prune the wrong ones
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE country = 'c2';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/6.*~40 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/6.*~200 rows.*
 
-# BOTH keys: down to the one partition they intersect in, holding 100. Still a single 0.2, not two
+# BOTH keys: down to the one partition they intersect in, holding 100
 query II
 EXPLAIN SELECT * FROM my_datalake.default.mkey WHERE dt = 'd1' AND country = 'c2';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/6.*~20 rows.*
+physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/6.*~100 rows.*
 
 # the other key's value: nothing survives, and 0 needs no selectivity to be right
 query II

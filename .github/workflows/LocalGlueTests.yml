@@ -73,31 +73,35 @@ jobs:
             echo "::endgroup::"
             echo "TIME $(( ($(date +%s%N) - s) / 1000000 )) ms rc=$rc"
           }
-          run "unittest --help" ./build/relassert/test/unittest --help
-          run "list tests" $UT --list-tests "$T"
-          run "noop test (no Glue)" $UT test/sql/diag_noop.test
-          run "verify_connection" $UT "$T"
-          run "verify_connection again (warm)" $UT "$T"
-          run "verify_connection, AWS_REGION set" env AWS_REGION=us-east-1 $UT "$T"
-          run "verify_connection, no LeakSanitizer" env ASAN_OPTIONS=detect_container_overflow=0:detect_leaks=0 $UT "$T"
-          run "5 tests, one process" $UT 'test/sql/hive/ddl/alter_column/*'
-          for t in test/sql/hive/ddl/alter_column/*.test; do run "single $t" $UT "$t"; done
-          echo "::group::strace (syscalls blocking > 0.5s)"
-          strace -f -tt -T -e trace=connect,poll,ppoll,select,pselect6,epoll_wait,epoll_pwait,nanosleep,clock_nanosleep,futex,wait4 \
-            -o /tmp/strace.txt $UT "$T" > /dev/null 2>&1
-          awk 'match($0, /<([0-9.]+)>$/, m) && m[1] > 0.5' /tmp/strace.txt | head -100
-          echo "::endgroup::"
-          echo "::group::strace connect() calls"
-          grep -E 'connect\(' /tmp/strace.txt | grep -vE 'AF_UNIX' | head -50
+          sudo apt-get install -y -qq gdb jq
+          mk() { jq --argjson e "$2" '.statically_loaded_extensions = $e' test/configs/local_glue.json > /tmp/cfg_$1.json; }
+          mk none '[]'
+          mk core '["core_functions"]'
+          mk noglue '["core_functions","parquet","json","avro","httpfs"]'
+          mk noavro '["core_functions","parquet","json","httpfs","glue"]'
+          N=test/sql/diag_noop.test
+          UTB=./build/relassert/test/unittest
+          run "noop, no test config" $UTB $N
+          run "noop, full config" $UT $N
+          run "noop, config without extensions" $UTB --test-config /tmp/cfg_none.json $N
+          run "noop, core_functions only" $UTB --test-config /tmp/cfg_core.json $N
+          run "noop, without glue" $UTB --test-config /tmp/cfg_noglue.json $N
+          run "noop, without avro" $UTB --test-config /tmp/cfg_noavro.json $N
+          run "noop, full config, no LSan" env ASAN_OPTIONS=detect_container_overflow=0:detect_leaks=0 $UT $N
+          run "noop, full config, 1 thread" env DUCKDB_NO_THREADS=1 $UT $N
+          echo "::group::gdb stack samples of the main thread (noop, full config)"
+          $UT $N > /tmp/gdbrun.txt 2>&1 &
+          PID=$!
+          for at in 2 5 9 13 17 21 25; do
+            sleep $([ $at = 2 ] && echo 2 || echo 4)
+            echo "--- t=${at}s"
+            sudo gdb -p $PID -batch -ex "thread 1" -ex "bt 25" 2>/dev/null | grep -E '^#' | cut -c1-200
+          done
+          wait $PID
+          tail -3 /tmp/gdbrun.txt
           echo "::endgroup::"
           exit 0
 
-      - name: Upload strace
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: strace
-          path: /tmp/strace.txt
 
       - name: Server logs
         if: always()

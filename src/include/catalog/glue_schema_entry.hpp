@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
+#include "duckdb/common/optional.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
 
 #include "core/glue_info.hpp"
@@ -27,6 +28,13 @@ struct GlueCreateTableOptions {
 	vector<GlueColumn> sort_columns;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
+};
+
+//! A change to one data column of a Hive table; what is not set stays as it is
+struct GlueColumnChange {
+	//! The column to change
+	string name;
+	optional<LogicalType> new_type;
 };
 
 //! A Glue database, exposed as a DuckDB schema
@@ -74,6 +82,8 @@ public:
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
 	//! Replace the cached entry of an altered table with what Glue stored
 	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
+	//! Change one data column of a Hive table in Glue and refresh the entry
+	GlueTable &ChangeColumn(ClientContext &context, const string &table_name, const GlueColumnChange &change);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,

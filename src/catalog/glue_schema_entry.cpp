@@ -630,6 +630,16 @@ void GlueSchemaEntry::AlterTableProperties(ClientContext &context, AlterTableInf
 	RefreshTable(context, table_name);
 }
 
+//! The index of the column named 'name' (case-insensitive)
+static optional_idx FindColumn(const vector<GlueColumn> &columns, const string &name) {
+	for (idx_t i = 0; i < columns.size(); i++) {
+		if (StringUtil::CIEquals(columns[i].name, name)) {
+			return i;
+		}
+	}
+	return optional_idx();
+}
+
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
@@ -669,22 +679,32 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		return;
 	}
 
+	if (alter_table.alter_table_type == AlterTableType::ALTER_COLUMN_TYPE) {
+		auto &change_type = alter_table.Cast<ChangeColumnTypeInfo>();
+		if (change_type.column_path.size() > 1) {
+			throw NotImplementedException("Changing the type of a nested field is not yet supported");
+		}
+		// without USING the binder fills in CAST(column AS type)
+		CastExpression plain_cast(change_type.target_type, make_uniq<ColumnRefExpression>(change_type.column_path));
+		if (change_type.expression && !change_type.expression->Equals(plain_cast)) {
+			throw NotImplementedException("ALTER COLUMN ... TYPE ... USING is not supported for Hive tables in a Glue "
+			                              "catalog: existing data files can not be rewritten");
+		}
+		GlueColumnChange change;
+		change.name = change_type.column_path[0].GetIdentifierName();
+		change.new_type = change_type.target_type;
+		ChangeColumn(context, table_name, change);
+		return;
+	}
+
 	// Work on the current Glue definition, not the cached one
 	GlueTableInfo current;
 	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}
-	auto find_column = [](vector<GlueColumn> &columns, const string &name) -> optional_ptr<GlueColumn> {
-		for (auto &column : columns) {
-			if (StringUtil::CIEquals(column.name, name)) {
-				return &column;
-			}
-		}
-		return nullptr;
-	};
 	auto is_partition_key = [&](const string &name) {
-		return find_column(current.partition_keys, name) != nullptr;
+		return FindColumn(current.partition_keys, name).IsValid();
 	};
 
 	auto columns = current.columns;
@@ -692,7 +712,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	case AlterTableType::ADD_COLUMN: {
 		auto &add = alter_table.Cast<AddColumnInfo>();
 		auto &name = add.new_column.Name().GetIdentifierName();
-		if (find_column(columns, name) || is_partition_key(name)) {
+		if (FindColumn(columns, name).IsValid() || is_partition_key(name)) {
 			if (add.if_column_not_exists) {
 				return;
 			}
@@ -712,7 +732,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			throw CatalogException("Column \"%s\" is a partition key of table \"%s\" and can not be dropped", name,
 			                       table_name);
 		}
-		if (!find_column(columns, name)) {
+		if (!FindColumn(columns, name).IsValid()) {
 			if (remove.if_column_exists) {
 				return;
 			}
@@ -740,39 +760,6 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		              columns.end());
 		break;
 	}
-	case AlterTableType::ALTER_COLUMN_TYPE: {
-		auto &change = alter_table.Cast<ChangeColumnTypeInfo>();
-		if (change.column_path.size() > 1) {
-			throw NotImplementedException("Changing the type of a nested field is not yet supported");
-		}
-		auto &name = change.column_path[0].GetIdentifierName();
-		if (is_partition_key(name)) {
-			throw CatalogException("Column \"%s\" is a partition key of table \"%s\" and its type can not be "
-			                       "changed",
-			                       name, table_name);
-		}
-		auto column = find_column(columns, name);
-		if (!column) {
-			throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
-		}
-		ThrowIfCollated(change.target_type, name);
-		// without USING the binder fills in CAST(column AS type)
-		CastExpression plain_cast(change.target_type, make_uniq<ColumnRefExpression>(change.column_path));
-		if (change.expression && !change.expression->Equals(plain_cast)) {
-			throw NotImplementedException("ALTER COLUMN ... TYPE ... USING is not supported for Hive tables in a Glue "
-			                              "catalog: existing data files can not be rewritten");
-		}
-
-		auto from = GlueTypes::ToLogicalType(column->type);
-		if (!IsAllowedHiveTypeChange(from, change.target_type)) {
-			throw CatalogException("Can not change column \"%s\" of table \"%s\" from %s to %s: existing parquet "
-			                       "files keep their types, only widening changes (e.g. INTEGER to BIGINT, FLOAT to "
-			                       "DOUBLE, anything to VARCHAR) are supported for Hive tables",
-			                       name, table_name, from.ToString(), change.target_type.ToString());
-		}
-		column->type = GlueTypes::FromLogicalType(change.target_type);
-		break;
-	}
 	default:
 		throw NotImplementedException("ALTER TABLE %s is not supported for Glue tables",
 		                              EnumUtil::ToString(alter_table.alter_table_type));
@@ -780,6 +767,42 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 
 	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
 	RefreshTable(context, table_name);
+}
+
+GlueTable &GlueSchemaEntry::ChangeColumn(ClientContext &context, const string &table_name,
+                                         const GlueColumnChange &change) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	// Work on the current Glue definition, not the cached one
+	GlueTableInfo current;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
+		                       database_info.name);
+	}
+	auto &name = change.name;
+	auto columns = current.columns;
+	auto index = FindColumn(columns, name);
+	if (!index.IsValid()) {
+		if (FindColumn(current.partition_keys, name).IsValid()) {
+			throw CatalogException("Column \"%s\" is a partition key of table \"%s\" and its type can not be "
+			                       "changed",
+			                       name, table_name);
+		}
+		throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
+	}
+	auto &column = columns[index.GetIndex()];
+	if (change.new_type) {
+		auto &new_type = *change.new_type;
+		auto from = GlueTypes::ToLogicalType(column.type);
+		if (!IsAllowedHiveTypeChange(from, new_type)) {
+			throw CatalogException("Can not change column \"%s\" of table \"%s\" from %s to %s: existing parquet "
+			                       "files keep their types, only widening changes (e.g. INTEGER to BIGINT, FLOAT to "
+			                       "DOUBLE, anything to VARCHAR) are supported for Hive tables",
+			                       name, table_name, from.ToString(), new_type.ToString());
+		}
+		column.type = GlueTypes::FromLogicalType(new_type);
+	}
+	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	return RefreshTable(context, table_name);
 }
 
 GlueTable &GlueSchemaEntry::RefreshTable(ClientContext &context, const string &table_name) {

@@ -833,14 +833,16 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 		return nullptr;
 	}
 	// join filters are optional filters, which fold to true as expressions: evaluate the filter they wrap instead
+	auto candidates = PartitionIndexes();
+	auto partitions = scan.Partitions(info.context);
 	vector<idx_t> kept;
-	for (auto partition_index : partition_indexes) {
-		auto &partition = scan.partitions[partition_index];
+	for (auto partition_index : *candidates) {
+		auto &partition = (*partitions)[partition_index];
 		bool keep = true;
 		for (auto &key_filter : key_filters) {
 			auto &key = scan.partition_keys[key_filter.partition_key_index];
-			auto value = HivePartitioning::GetValue(info.context, key, partition.values[key_filter.partition_key_index],
-			                                        key_filter.type);
+			auto value = GlueTypes::PartitionValue(info.context, key, partition.values[key_filter.partition_key_index],
+			                                       key_filter.type);
 			if (!key_filter.filter.EvaluateWithConstant(info.context, value)) {
 				keep = false;
 				break;
@@ -850,11 +852,6 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 			kept.push_back(partition_index);
 		}
 	}
-	auto candidates = PartitionIndexes();
-	auto partitions = scan.Partitions(info.context);
-	unordered_set<idx_t> pruning_filters;
-	auto kept = PartitionsToRead(info.context, scan, *partitions, *candidates, table_index, projections, filters,
-	                             pruning_filters);
 	if (kept.size() == candidates->size()) {
 		return nullptr;
 	}

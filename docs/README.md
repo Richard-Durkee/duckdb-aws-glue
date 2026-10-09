@@ -271,10 +271,12 @@ environment or a profile the AWS SDK asks the EC2 instance metadata service for 
 minutes per client. A test config can not export process environment variables, so this stays on the command.
 
 `make test-local` runs the tests through DuckDB's `duckdb/scripts/ci/run_tests.py` (Python 3.10+; pick the
-interpreter with `PYTHON=python3.14`), one test per process and one at a time, and reruns a failing test up to twice:
-against the local servers a read right after a write occasionally comes back with no rows. Every retry is reported in
-the output. `TEST_BUILD=release` runs the `release` build instead of
-`relassert`.
+interpreter with `PYTHON=python3.14`), one at a time in batches of `TEST_BATCH_SIZE` (10) tests per process, and reruns
+a failing batch up to twice: against the local servers a read right after a write occasionally comes back with no rows.
+Every retry is reported in the output. `TEST_BUILD=release` runs the `release` build instead of `relassert`. Every
+process first installs the loadable extensions from `build/<type>/repository`; on Linux the debug info of `relassert`
+makes them ~1.5 GB each, so CI tests a `make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1` build (assertions and
+sanitizers, no debug info).
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.

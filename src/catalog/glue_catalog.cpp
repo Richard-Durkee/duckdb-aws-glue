@@ -173,7 +173,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 	} else if (StringUtil::CIEquals(key, "location")) {
 		StringUtil::RTrim(string_value, "/");
 		if (string_value.empty()) {
-			throw BinderException("The location of Glue database \"%s\" must not be empty", database.name);
+			throw InvalidInputException("The location of Glue database \"%s\" must not be empty", database.name);
 		}
 		database.location_uri = string_value;
 	} else {

@@ -112,11 +112,13 @@ public:
 	string GetFieldDelimiter() const;
 	//! Whether the data files of a CSV table start with a header line (skip.header.line.count)
 	bool HasHeader() const;
-	//! The codec of a csv / json table's files (write.compression, else compressionType), auto-detection when the
-	//! table names none; throws for a codec DuckDB can not read and write
+	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
+	//! the table names none; throws for a codec DuckDB can not write. Files are read with the codec their extension
+	//! says, whatever the table records.
 	FileCompressionType GetTextCompression() const;
-	//! parquet.compression, empty when the table does not say
-	string GetParquetCompression() const;
+	//! The codec the table records for its files, as DuckDB's writer for 'format' names it ('null' for an uncompressed
+	//! avro file), empty when it records none; throws for a codec DuckDB can not write
+	string GetCodec(HiveFileFormat format) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
 	//! The quote character of a CSV table (quoteChar of OpenCSVSerde), '"' when the SerDe does not say

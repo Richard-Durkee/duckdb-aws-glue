@@ -134,6 +134,28 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, GlueTa
 	return std::move(result);
 }
 
+//! The part of a parquet file name before ".parquet" that names its codec, as parquet-mr names them ("snappy." for
+//! snappy); empty for uncompressed files. 'codec' is the parquet.compression of the table, empty for DuckDB's default.
+static string ParquetCodecExtension(const string &codec) {
+	if (codec.empty() || codec == "snappy") {
+		return "snappy.";
+	}
+	if (codec == "gzip") {
+		return "gz.";
+	}
+	if (codec == "zstd") {
+		return "zstd.";
+	}
+	if (codec == "brotli") {
+		return "br.";
+	}
+	if (codec == "lz4" || codec == "lz4_raw") {
+		// DuckDB writes LZ4 as LZ4_RAW
+		return "lz4raw.";
+	}
+	return string();
+}
+
 PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &planner, LogicalOperator &op,
                                             GlueTable &table, PhysicalOperator &plan, const vector<Identifier> &names,
                                             const vector<LogicalType> &types) {
@@ -171,19 +193,16 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	// the copy function and its options
 	string copy_format = format_name;
 	identifier_map_t<vector<Value>> copy_options;
+	auto codec = table_info.GetCodec(file_format);
+	auto codec_option = file_format == HiveFileFormat::AVRO ? "codec" : "compression";
+	if (!codec.empty()) {
+		copy_options[Identifier(codec_option)] = {Value(codec)};
+	}
 	switch (file_format) {
 	case HiveFileFormat::PARQUET: {
-		auto codec = table_info.GetParquetCompression();
-		if (codec.empty()) {
-			break;
-		}
-		copy_options[Identifier("compression")] = {Value(codec)};
 		// DuckDB's parquet writer takes a compression_level for zstd only
-		if (codec != "zstd") {
-			break;
-		}
 		auto level = table_info.GetCompressionLevel();
-		if (!level.empty()) {
+		if (codec == "zstd" && !level.empty()) {
 			copy_options[Identifier("compression_level")] = {Value(level)};
 		}
 		break;
@@ -255,12 +274,6 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 		break;
 	}
 	}
-	if (IsTextFileFormat(file_format)) {
-		auto codec = table_info.GetTextCompression();
-		if (codec.IsCompressed()) {
-			copy_options[Identifier("compression")] = {Value(codec.ToString())};
-		}
-	}
 	auto copy_function = TryGetCopyFunction(*context.db, copy_format);
 	if (!copy_function) {
 		throw MissingExtensionException("Writing to Hive table '%s' requires the %s copy function", table_info.name,
@@ -275,6 +288,11 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	// Hive convention: partition columns live in the directory names, not in the files
 	CopyFunctionBindInput bind_input(*copy_info);
 	bind_input.file_extension = format_name;
+	if (file_format == HiveFileFormat::PARQUET) {
+		// named after the codec, as Spark and Hive name them (<name>.snappy.parquet): readers that list the files can
+		// tell
+		bind_input.file_extension = ParquetCodecExtension(codec) + format_name;
+	}
 	auto names_to_write = LogicalCopyToFile::GetNamesWithoutPartitions(copy_names, partition_columns, false);
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(copy_types, partition_columns, false);
 	auto function_data = copy_function->function.copy_to_bind(context, bind_input, names_to_write, types_to_write);

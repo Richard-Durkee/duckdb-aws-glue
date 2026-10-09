@@ -518,9 +518,6 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		function_name = "read_avro";
 		break;
 	}
-	if (!scan_info->compression.IsAutoDetect()) {
-		param_map["compression"] = Value(scan_info->compression.ToString());
-	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
 	// with the HiveMultiFileReader: the table's schema and partition values, not the files'
 	scan_function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
@@ -749,28 +746,46 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 	if (scan.partition_keys.empty() || !info.filters.HasFilters()) {
 		return nullptr;
 	}
-	auto projections = PartitionKeyProjections(scan, info.column_ids, info.column_names);
-	if (projections.empty()) {
-		return nullptr;
-	}
-	// The table filters become expressions over the scan's columns, as MultiFileList::DynamicFilterPushdown does
-	TableIndex table_index(0);
-	vector<unique_ptr<Expression>> filters;
+	struct PartitionKeyFilter {
+		const ExpressionFilter &filter;
+		idx_t partition_key_index;
+		const LogicalType &type;
+	};
+	vector<PartitionKeyFilter> key_filters;
 	for (auto &entry : info.filters) {
-		auto filter_index = entry.GetIndex();
-		auto primary_index = info.column_indexes[filter_index].GetPrimaryIndex();
+		auto primary_index = info.column_indexes[entry.GetIndex()].GetPrimaryIndex();
 		if (IsVirtualColumn(primary_index)) {
 			continue;
 		}
-		auto column_ref = make_uniq<BoundColumnRefExpression>(info.column_types[primary_index],
-		                                                      ColumnBinding(table_index, filter_index));
+		auto key_index = scan.GetPartitionKeyIndex(info.column_names[primary_index].GetIdentifierName());
+		if (key_index == DConstants::INVALID_INDEX) {
+			continue;
+		}
 		auto &filter =
 		    ExpressionFilter::GetExpressionFilter(entry.Filter(), "HiveMultiFileList::DynamicFilterPushdown");
-		filters.push_back(filter.ToExpression(*column_ref));
+		key_filters.push_back({filter, key_index, info.column_types[primary_index]});
 	}
-	unordered_set<idx_t> pruning_filters;
-	auto kept =
-	    PartitionsToRead(info.context, scan, partition_indexes, table_index, projections, filters, pruning_filters);
+	if (key_filters.empty()) {
+		return nullptr;
+	}
+	// join filters are optional filters, which fold to true as expressions: evaluate the filter they wrap instead
+	vector<idx_t> kept;
+	for (auto partition_index : partition_indexes) {
+		auto &partition = scan.partitions[partition_index];
+		bool keep = true;
+		for (auto &key_filter : key_filters) {
+			auto &key = scan.partition_keys[key_filter.partition_key_index];
+			auto value = HivePartitioning::GetValue(info.context, key, partition.values[key_filter.partition_key_index],
+			                                        key_filter.type);
+			if (!key_filter.filter.EvaluateWithConstant(info.context, value)) {
+				keep = false;
+				break;
+			}
+		}
+		if (keep) {
+			kept.push_back(partition_index);
+		}
+	}
 	if (kept.size() == partition_indexes.size()) {
 		return nullptr;
 	}

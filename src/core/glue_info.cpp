@@ -152,16 +152,38 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 	FileCompressionType compression(codec);
 	if (compression.IsCompressed() && compression != FileCompressionType::GZIP &&
 	    compression != FileCompressionType::ZSTD) {
-		throw NotImplementedException("Hive table '%s.%s' is %s compressed, DuckDB reads and writes only gzip and zstd "
-		                              "compressed csv and json files",
+		throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB writes "
+		                              "only gzip and zstd compressed csv and json files",
 		                              database_name, name, compression.ToString());
 	}
 	return compression;
 }
 
-string GlueTableInfo::GetParquetCompression() const {
-	auto codec = StringUtil::Lower(GetParameter("parquet.compression"));
-	return codec == "none" ? "uncompressed" : codec;
+string GlueTableInfo::GetCodec(HiveFileFormat format) const {
+	switch (format) {
+	case HiveFileFormat::PARQUET: {
+		auto codec = StringUtil::Lower(GetParameter("parquet.compression"));
+		return codec == "none" ? "uncompressed" : codec;
+	}
+	case HiveFileFormat::AVRO: {
+		auto codec = StringUtil::Lower(GetParameter("avro.output.codec"));
+		if (codec == "none" || codec == "uncompressed") {
+			return "null";
+		}
+		if (!codec.empty() && codec != "snappy" && codec != "deflate" && codec != "null") {
+			throw NotImplementedException("Can not write to Hive table '%s.%s': it records %s compression, DuckDB "
+			                              "writes only snappy and deflate compressed avro files",
+			                              database_name, name, codec);
+		}
+		return codec;
+	}
+	case HiveFileFormat::CSV:
+	case HiveFileFormat::JSON: {
+		auto compression = GetTextCompression();
+		return compression.IsCompressed() ? compression.ToString() : string();
+	}
+	}
+	throw InternalException("Unknown Hive file format");
 }
 
 string GlueTableInfo::GetCompressionLevel() const {

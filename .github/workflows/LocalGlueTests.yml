@@ -1,6 +1,6 @@
 # Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
 #
-# A debug build: DuckDB's assertions and the sanitizers are on, like the `relassert` build used locally.
+# A release build with DuckDB's assertions and the sanitizers on, i.e. relassert without debug info.
 
 name: Local Glue tests
 
@@ -16,7 +16,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      VCPKG_TOOLCHAIN_PATH: ${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
       GEN: ninja
       # the AWS SDK would otherwise ask the EC2 metadata service for a region, which hangs off EC2
       AWS_EC2_METADATA_DISABLED: "true"
@@ -28,6 +27,10 @@ jobs:
         with:
           submodules: recursive
 
+      # the sanitizer build and the test data otherwise fill the runner's disk
+      - name: Free disk space
+        uses: ./duckdb/.github/actions/cleanup_runner
+
       - uses: docker/setup-compose-action@v1
 
       - name: Start Glue (moto) and S3 (MinIO)
@@ -36,18 +39,25 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update -y -qq
-          sudo apt-get install -y -qq ninja-build ccache
+          sudo apt-get install -y -qq ninja-build
 
-      - name: Setup vcpkg
-        uses: lukka/run-vcpkg@v11
+      - name: Setup Ccache
+        uses: ./duckdb/.github/actions/ccache-action
         with:
-          vcpkgGitCommitId: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
+          # PR caches are only visible to the PR itself; at this size they would evict main's from the 10 GB budget
+          save: ${{ github.ref == 'refs/heads/main' }}
 
+      # relassert without debug info: on Linux -g makes each loadable extension ~1.5 GB, and the test runner
+      # installs and loads avro, httpfs and glue from build/*/repository for every test database (~25s per test)
       - name: Build
-        run: make debug
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        with:
+          build-type: release
+          build: make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
       - name: Run tests
-        run: make test-local TEST_BUILD=debug
+        run: make test-local TEST_BUILD=release
 
       - name: Server logs
         if: always()

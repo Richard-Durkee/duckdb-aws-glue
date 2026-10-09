@@ -38,11 +38,12 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   layout. Files and directories named `_*` or `.*` are skipped. When one partition's location lies inside another's,
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
-  partition keys. Files are listed lazily: filters on partition columns are applied to the partition values first,
-  so only the partitions a query reads are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a
-  query reads at least `hive_partition_listing_threshold` (default 10) partitions below the table location, the
-  location is listed once, recursively (one S3 request per 1000 keys), and the files are matched to their
-  partitions by prefix; fewer partitions, and partitions at custom locations, are listed one directory each.
+  partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
+  build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
+  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a query reads at least
+  `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
+  recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
+  partitions, and partitions at custom locations, are listed one directory each.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the
@@ -59,10 +60,10 @@ from `field.delim` / `separatorChar`, `,` otherwise) and JsonSerDe with `read_js
 name) and AvroSerDe with `read_avro` from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion,
 ...) are not supported.
 
-Compression: a csv or json table is read with the codec it records (`write.compression`, else the `compressionType`
-Glue crawlers set), whatever the names of its files; DuckDB reads gzip and zstd, another codec is an error. A table
-that records none is read with DuckDB's default, which tells `.gz` and `.zst` files by their extension. Parquet and
-avro files carry their codec themselves.
+Compression: every csv and json file is read with the codec DuckDB tells from its name (`.gz`, `.zst`), whatever the
+table records, so a table whose files use more than one codec is read correctly and a stale `write.compression` or
+`compressionType` does not matter. The codec a table records is what writes to it use. Parquet and avro files carry
+their codec themselves.
 
 ## Writing
 
@@ -77,7 +78,10 @@ avro files carry their codec themselves.
   (JsonSerDe, one object per line) or avro (AvroSerDe)
   Hive table at `location`, else `<DEFAULT_LOCATION>/<database>/<table>`, else `<database LocationUri>/<table>`;
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
-  PartitionKeys and are listed last in the table's columns. Unknown `WITH` keys are stored as Glue table parameters.
+  PartitionKeys and are listed last in the table's columns. Generated columns, column defaults and collated columns
+  (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
+  parameters. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
+  `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
@@ -95,10 +99,12 @@ avro files carry their codec themselves.
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
   fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
-- `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
-  partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
+- `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
+  column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
+  definition with UpdateTable.
   Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
-  BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped.
+  BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped. `ALTER COLUMN ... TYPE ...
+  USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
   codec is an error.
@@ -267,10 +273,12 @@ environment or a profile the AWS SDK asks the EC2 instance metadata service for 
 minutes per client. A test config can not export process environment variables, so this stays on the command.
 
 `make test-local` runs the tests through DuckDB's `duckdb/scripts/ci/run_tests.py` (Python 3.10+; pick the
-interpreter with `PYTHON=python3.14`), one test per process and one at a time, and reruns a failing test up to twice:
-against the local servers a read right after a write occasionally comes back with no rows. Every retry is reported in
-the output. `TEST_BUILD=release` runs the `release` build instead of
-`relassert`.
+interpreter with `PYTHON=python3.14`), one at a time in batches of `TEST_BATCH_SIZE` (10) tests per process, and reruns
+a failing batch up to twice: against the local servers a read right after a write occasionally comes back with no rows.
+Every retry is reported in the output. `TEST_BUILD=release` runs the `release` build instead of `relassert`. Every
+process first installs the loadable extensions from `build/<type>/repository`; on Linux the debug info of `relassert`
+makes them ~1.5 GB each, so CI tests a `make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1` build (assertions and
+sanitizers, no debug info).
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.
@@ -284,8 +292,9 @@ AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner benc
 ```
 
 `benchmark/tpch/sf1/` runs the 22 TPC-H queries at SF1 against Hive tables in the Glue database `bench_tpch_sf1`
-(`lineitem` partitioned by `l_shipdate`, `orders` by `o_orderdate`) and checks the answers. The first run generates
-the data with `dbgen` and writes it with CTAS, which takes a while; later runs reuse
+(`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`) and checks the answers.
+The queries in `benchmark/tpch/queries/` are DuckDB's with filters on the bucket columns added next to the date
+filters. The first run generates the data with `dbgen` and writes it with CTAS, which takes a while; later runs reuse
 `duckdb_benchmark_data/glue_tpch_sf1.duckdb`, which `make glue-fixture` removes:
 
 ```sh

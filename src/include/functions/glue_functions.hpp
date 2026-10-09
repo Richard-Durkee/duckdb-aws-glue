@@ -13,6 +13,11 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 //! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
 //! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
+//! glue_describe_table('<catalog>.<schema>.<table>', formatted := false): a table of an attached Glue catalog described
+//! the way Hive's DESCRIBE lays it out, as (col_name, data_type, comment) rows: the columns, then the partition keys
+//! under '# Partition Information'; with 'formatted' also the '# Detailed Table Information' and '# Storage
+//! Information' of DESCRIBE FORMATTED
+TableFunction GetGlueDescribeTableFunction();
 //! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (schema) of an
 //! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and
 //! parameters as columns and the complete Glue Database object as VARIANT.

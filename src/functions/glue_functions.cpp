@@ -2,13 +2,20 @@
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
+#include "duckdb/common/array.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/date.hpp"
+#include "duckdb/common/types/time.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+
+#include <algorithm>
 
 namespace duckdb {
 
@@ -171,6 +178,144 @@ void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &dat
 	output.CheckCardinality(1);
 }
 
+//===--------------------------------------------------------------------===//
+// glue_describe_table: a table described the way Hive's DESCRIBE [FORMATTED] lays it out
+//===--------------------------------------------------------------------===//
+struct GlueDescribeTableBindData : public TableFunctionData {
+	vector<array<string, 3>> rows;
+};
+
+struct GlueDescribeTableState : public GlobalTableFunctionState {
+	idx_t offset = 0;
+};
+
+//! A time as Hive prints it, e.g. "Thu Apr 23 02:55:21 UTC 2020"
+string HiveTime(int64_t seconds) {
+	static const char *DAYS[] = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+	static const char *MONTHS[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+	date_t date;
+	dtime_t time;
+	Timestamp::Convert(Timestamp::FromEpochSeconds(seconds), date, time);
+	int32_t year, month, day;
+	Date::Convert(date, year, month, day);
+	int32_t hour, minute, second, micros;
+	Time::Convert(time, hour, minute, second, micros);
+	return StringUtil::Format("%s %s %02d %02d:%02d:%02d UTC %d", DAYS[Date::ExtractISODayOfTheWeek(date) - 1],
+	                          MONTHS[month - 1], day, hour, minute, second, year);
+}
+
+//! Key / value rows of a map, by key, under a "<title>:" row
+void AddParameterRows(vector<array<string, 3>> &rows, const string &title,
+                      const unordered_map<string, string> &parameters) {
+	rows.push_back({title, "", ""});
+	vector<string> keys;
+	for (auto &entry : parameters) {
+		keys.push_back(entry.first);
+	}
+	std::sort(keys.begin(), keys.end());
+	for (auto &key : keys) {
+		rows.push_back({"", key, parameters.at(key)});
+	}
+}
+
+vector<array<string, 3>> DescribeRows(const GlueTableInfo &table, bool formatted) {
+	vector<array<string, 3>> rows;
+	auto add_columns = [&](const vector<GlueColumn> &columns) {
+		for (auto &column : columns) {
+			rows.push_back({column.name, column.type, column.comment});
+		}
+	};
+	// the partition keys are listed with the data columns, and again under their own heading
+	add_columns(table.columns);
+	add_columns(table.partition_keys);
+	if (!table.partition_keys.empty()) {
+		rows.push_back({"", "", ""});
+		rows.push_back({"# Partition Information", "", ""});
+		rows.push_back({"# col_name", "data_type", "comment"});
+		rows.push_back({"", "", ""});
+		add_columns(table.partition_keys);
+	}
+	if (!formatted) {
+		return rows;
+	}
+	rows.push_back({"", "", ""});
+	rows.push_back({"# Detailed Table Information", "", ""});
+	rows.push_back({"Database:", table.database_name, ""});
+	rows.push_back({"Owner:", table.owner, ""});
+	rows.push_back({"CreateTime:", table.create_time >= 0 ? HiveTime(table.create_time) : "UNKNOWN", ""});
+	rows.push_back({"LastAccessTime:", table.last_access_time > 0 ? HiveTime(table.last_access_time) : "UNKNOWN", ""});
+	rows.push_back({"Protect Mode:", "None", ""});
+	rows.push_back({"Retention:", to_string(table.retention), ""});
+	if (!table.IsView()) {
+		rows.push_back({"Location:", table.location, ""});
+	}
+	rows.push_back({"Table Type:", table.glue_table_type, ""});
+	AddParameterRows(rows, "Table Parameters:", table.parameters);
+	if (table.IsView()) {
+		rows.push_back({"", "", ""});
+		rows.push_back({"# View Information", "", ""});
+		rows.push_back({"View Original Text:", table.view_original_text, ""});
+		rows.push_back({"View Expanded Text:", table.view_expanded_text, ""});
+		return rows;
+	}
+	vector<string> sort_columns;
+	for (auto &column : table.sort_columns) {
+		// Hive's Order: 1 for ascending, 0 for descending
+		sort_columns.push_back(StringUtil::Format("Order(col:%s, order:%d)", column.name,
+		                                          column.sort_order == GlueSortOrder::DESCENDING ? 0 : 1));
+	}
+	rows.push_back({"", "", ""});
+	rows.push_back({"# Storage Information", "", ""});
+	rows.push_back({"SerDe Library:", table.serde_library, ""});
+	rows.push_back({"InputFormat:", table.input_format, ""});
+	rows.push_back({"OutputFormat:", table.output_format, ""});
+	rows.push_back({"Compressed:", table.compressed ? "Yes" : "No", ""});
+	rows.push_back({"Num Buckets:", to_string(table.number_of_buckets), ""});
+	rows.push_back({"Bucket Columns:", "[" + StringUtil::Join(table.bucket_columns, ", ") + "]", ""});
+	rows.push_back({"Sort Columns:", "[" + StringUtil::Join(sort_columns, ", ") + "]", ""});
+	AddParameterRows(rows, "Storage Desc Params:", table.serde_parameters);
+	return rows;
+}
+
+unique_ptr<FunctionData> GlueDescribeTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto name = ResolveGlueTableName(context, "glue_describe_table", input.inputs[0].GetValue<string>());
+	auto &catalog = Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
+	GlueTableInfo table;
+	if (!GlueAPI::GetTable(context, catalog, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
+	                       table)) {
+		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
+		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
+	}
+	bool formatted = false;
+	for (auto &option : input.named_parameters) {
+		if (StringUtil::Lower(option.first.GetIdentifierName()) == "formatted") {
+			formatted = !option.second.IsNull() && option.second.GetValue<bool>();
+		}
+	}
+	auto result = make_uniq<GlueDescribeTableBindData>();
+	result->rows = DescribeRows(table, formatted);
+	names = {"col_name", "data_type", "comment"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+unique_ptr<GlobalTableFunctionState> GlueDescribeTableInit(ClientContext &context, TableFunctionInitInput &input) {
+	return make_uniq<GlueDescribeTableState>();
+}
+
+void GlueDescribeTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueDescribeTableState>();
+	auto &rows = data.bind_data->Cast<GlueDescribeTableBindData>().rows;
+	idx_t count = 0;
+	for (; state.offset < rows.size() && count < STANDARD_VECTOR_SIZE; state.offset++, count++) {
+		for (idx_t column = 0; column < 3; column++) {
+			output.SetValue(column, count, Value(rows[state.offset][column]));
+		}
+	}
+	output.SetCardinality(count);
+}
+
 } // namespace
 
 QualifiedName ResolveGlueTableName(ClientContext &context, const string &function_name, const string &table_name) {
@@ -202,6 +347,14 @@ TableFunction GetGlueGetDatabaseResponseFunction() {
 TableFunction GetGlueGetTableResponseFunction() {
 	TableFunction function("glue_get_table_response", {LogicalType::VARCHAR}, GlueGetTableResponseScan,
 	                       GlueGetTableResponseBind, GlueGetTableResponseInit);
+	return function;
+}
+
+TableFunction GetGlueDescribeTableFunction() {
+	TableFunction function("glue_describe_table", {LogicalType::VARCHAR}, GlueDescribeTableScan, GlueDescribeTableBind,
+	                       GlueDescribeTableInit);
+	function.GetSignature().WithTypedKwargs(
+	    "options", [](TypedKwargs &options) { options.Add("formatted", LogicalType::BOOLEAN); });
 	return function;
 }
 

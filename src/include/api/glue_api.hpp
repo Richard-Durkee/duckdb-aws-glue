@@ -81,9 +81,11 @@ public:
 	static void RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            const string &table_name, const vector<string> &values,
 	                            const vector<string> &new_values);
-	//! List the partitions of a Hive table (GetPartitions, all pages)
+	//! List the partitions of a Hive table (GetPartitions, all pages); with an 'expression' (Glue's partition filter
+	//! syntax, e.g. "dt = '2024-01-01'") only the partitions it matches
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
-	                                               const string &database_name, const string &table_name);
+	                                               const string &database_name, const string &table_name,
+	                                               const string &expression = string());
 	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<GluePartitionInput> &partitions);

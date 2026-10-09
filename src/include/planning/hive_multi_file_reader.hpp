@@ -58,10 +58,18 @@ struct HiveScanInfo : public TableFunctionInfo {
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+	//! Before the partitions are loaded: have Glue return only those 'expression' (its partition filter syntax)
+	//! matches. Ignored once they are loaded.
+	void SetPartitionExpression(string expression) const;
+	//! Whether Partitions() are only those the partition expression matches
+	bool PartitionsFiltered() const;
+	//! Every partition of the table, also those the partition expression leaves out
+	shared_ptr<const vector<GluePartitionInfo>> AllPartitions(ClientContext &context) const;
 
 private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
+	mutable string partition_expression DUCKDB_GUARDED_BY(partitions_lock);
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
@@ -118,6 +126,10 @@ private:
 	//! The partition of the deepest registered location containing the file, searching no shorter than
 	//! 'min_directory_size'
 	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
+	//! Partitions Glue filtered leave out the locations of the others: when a listed file is below a partition's
+	//! location but not directly in it, it may belong to a partition nested there, and partition_by_location gets the
+	//! locations of all partitions
+	void ResolveNestedLocations(const vector<OpenFileInfo> &files, idx_t min_directory_size) const;
 	//! Add a listed file of the partition unless this list already has it (two partitions sharing a location: the
 	//! file belongs to the first). Called with HiveScanInfo::file_partitions_lock held.
 	void AddFile(OpenFileInfo file, idx_t partition_index) const;
@@ -139,6 +151,8 @@ private:
 	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::Partitions()
 	mutable unordered_map<string, idx_t> partition_by_location;
 	mutable bool partition_locations_built = false;
+	//! Whether partition_by_location has the locations of all partitions of the table, not only the fetched ones
+	mutable bool all_partition_locations = false;
 };
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of

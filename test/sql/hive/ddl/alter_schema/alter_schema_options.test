@@ -97,7 +97,7 @@ ALTER SCHEMA my_datalake.ddl_alter_schema SET (owner = NULL);
 statement error
 ALTER SCHEMA my_datalake.ddl_alter_schema SET (location = '');
 ----
-<REGEX>:.*The location of Glue database "ddl_alter_schema" must not be empty.*
+<REGEX>:Invalid Input Error.*The location of Glue database "ddl_alter_schema" must not be empty.*
 
 # a failed SET changes nothing
 query II
@@ -125,6 +125,17 @@ statement error
 ALTER SCHEMA ro_datalake.ddl_alter_schema SET (owner = 'c');
 ----
 read-only mode
+
+# a SET on a database with no LocationUri (cleared by the RESET above) must still
+# work: UpdateDatabase has to omit the field rather than send an empty string
+statement ok
+ALTER SCHEMA my_datalake.ddl_alter_schema SET ('after_reset' = 'yes');
+
+query III
+SELECT location_uri, map_extract_value(parameters, 'after_reset'), cardinality(parameters)
+FROM glue_get_database_response('my_datalake.ddl_alter_schema');
+----
+NULL	yes	3
 
 statement ok
 DROP SCHEMA my_datalake.ddl_alter_schema CASCADE;

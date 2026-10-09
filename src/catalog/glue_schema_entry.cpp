@@ -304,6 +304,27 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 	return result;
 }
 
+static void ThrowIfCollated(const LogicalType &type, const string &column_name) {
+	auto collation = StringType::GetCollation(type);
+	if (!collation.empty()) {
+		throw NotImplementedException("Collation \"%s\" of column \"%s\" is not supported for tables in a Glue catalog",
+		                              collation, column_name);
+	}
+}
+
+//! A Glue column is a name and a type: refuse what DuckDB would otherwise drop when the column is stored in Glue
+static void ThrowIfUnsupportedColumn(const ColumnDefinition &column) {
+	auto &name = column.Name().GetIdentifierName();
+	if (column.Generated()) {
+		throw NotImplementedException("Generated column \"%s\" is not supported for tables in a Glue catalog", name);
+	}
+	if (column.HasDefaultValue()) {
+		throw NotImplementedException("Default value of column \"%s\" is not supported for tables in a Glue catalog",
+		                              name);
+	}
+	ThrowIfCollated(column.Type(), name);
+}
+
 //! Tables and views share one catalog set (as in DuckDB's own schema), so a lookup by name returns either; the
 //! statements that mean one of the two check it here
 static void CheckEntryType(optional_ptr<CatalogEntry> existing, CatalogType expected, const string &name,
@@ -338,6 +359,9 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTable(CatalogTransaction trans
 	}
 	if (!base.constraints.empty()) {
 		throw NotImplementedException("Constraints are not supported when creating tables in a Glue catalog");
+	}
+	for (auto &column : base.columns.Logical()) {
+		ThrowIfUnsupportedColumn(column);
 	}
 	auto options = ParseCreateTableOptions(context, base);
 	// Hive partitions are columns: PARTITIONED BY must name columns of the table, which become the PartitionKeys
@@ -652,9 +676,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			}
 			throw CatalogException("Column with name \"%s\" already exists in table \"%s\"", name, table_name);
 		}
-		if (add.new_column.HasDefaultValue()) {
-			throw NotImplementedException("Glue tables do not support column default values");
-		}
+		ThrowIfUnsupportedColumn(add.new_column);
 		GlueColumn column;
 		column.name = name;
 		column.type = GlueTypes::FromLogicalType(add.new_column.Type());
@@ -711,12 +733,14 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		if (!column) {
 			throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
 		}
+		ThrowIfCollated(change.target_type, name);
 		// without USING the binder fills in CAST(column AS type)
 		CastExpression plain_cast(change.target_type, make_uniq<ColumnRefExpression>(change.column_path));
 		if (change.expression && !change.expression->Equals(plain_cast)) {
 			throw NotImplementedException("ALTER COLUMN ... TYPE ... USING is not supported for Hive tables in a Glue "
 			                              "catalog: existing data files can not be rewritten");
 		}
+
 		auto from = GlueTypes::ToLogicalType(column->type);
 		if (!IsAllowedHiveTypeChange(from, change.target_type)) {
 			throw CatalogException("Can not change column \"%s\" of table \"%s\" from %s to %s: existing parquet "

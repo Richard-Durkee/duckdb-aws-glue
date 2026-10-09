@@ -37,6 +37,10 @@ CREATE MACRO glue_calls() AS TABLE
     WHERE request.headers['x-amz-target'] IS NOT NULL
     GROUP BY 1 ORDER BY 1;
 
+# the Glue operation is in the x-amz-target header, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
 statement ok
 CALL enable_logging('HTTP', storage='memory');
 

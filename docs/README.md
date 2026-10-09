@@ -239,6 +239,7 @@ The AWS SDK's Glue calls are routed through DuckDB's HTTP layer (httpfs), so the
 certificate settings and appear in the HTTP log:
 
 ```sql
+SET redact_http_logs = false; -- header values (incl. x-amz-target) are redacted by default
 CALL enable_logging('HTTP', storage='memory');
 -- ... run queries ...
 SELECT request.type, request.url, request.headers['x-amz-target'], response.status FROM duckdb_logs_parsed('HTTP');

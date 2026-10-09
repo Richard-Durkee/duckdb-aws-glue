@@ -47,9 +47,9 @@ Text tables are read the way their SerDe reads them:
   nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
   NULL string. Writes need a single-byte delimiter.
-- As in Hive, a table property overrides the SerDe property of the same name, keys are case-sensitive, and line counts
-  and byte codes are digits with an optional sign (`'1.5'` is not a number). Partitions are read with the table's
-  SerDe properties, not their own. `hive_scan()` uses plain `read_csv` rules.
+- As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
+  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
+  their own. `hive_scan()` uses plain `read_csv` rules.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 

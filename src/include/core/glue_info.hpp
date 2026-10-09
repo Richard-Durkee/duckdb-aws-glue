@@ -50,6 +50,18 @@ HiveFileFormat HiveFileFormatFromString(const string &format);
 enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
 HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde);
 
+//! How the files of a csv table are read
+struct HiveCSVOptions {
+	string delimiter = ",";
+	string quote = "\"";
+	string escape = "\"";
+	//! The header lines every file starts with
+	idx_t skip_lines = 0;
+	string null_string;
+	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
+	bool serde_fields = false;
+};
+
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
 //! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.
 enum class GlueTableType : uint8_t { EXTERNAL_TABLE, VIRTUAL_VIEW, OTHER };
@@ -86,12 +98,6 @@ struct GlueTableInfo {
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
-	//! The CSV dialect to create a csv table with (CreateHiveTable); for a fetched table use GetFieldDelimiter(),
-	//! GetQuoteCharacter() and GetEscapeCharacter(). With a quote or escape character the table gets OpenCSVSerde
-	//! (which quotes), without both LazySimpleSerDe (which does not)
-	string csv_delimiter = ",";
-	string csv_quote;
-	string csv_escape;
 
 public:
 	bool IsView() const {
@@ -138,6 +144,8 @@ public:
 	string GetQuoteCharacter() const;
 	//! OpenCSVSerde's escapeChar, else its quote character; empty for LazySimpleSerDe
 	string GetEscapeCharacter() const;
+	//! How the files of a csv table are read
+	HiveCSVOptions GetCSVOptions() const;
 
 private:
 	//! A non-negative integer property, 0 when not set

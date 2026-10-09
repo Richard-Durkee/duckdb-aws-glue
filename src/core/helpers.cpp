@@ -6,7 +6,7 @@
 
 namespace duckdb {
 
-bool TryParseJavaInteger(const string &value, int64_t min, int64_t max, int64_t &result) {
+bool TryParseInteger(const string &value, int64_t min, int64_t max, int64_t &result) {
 	if (value.empty()) {
 		return false;
 	}

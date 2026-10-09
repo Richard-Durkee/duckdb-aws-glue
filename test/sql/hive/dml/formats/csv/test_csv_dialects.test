@@ -302,3 +302,33 @@ DROP TABLE my_datalake.default.formats_csv_squote;
 
 statement ok
 DROP TABLE my_datalake.default.formats_csv_dquote;
+
+# CREATE TABLE AS writes its files in the dialect the new table records
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_ctas WITH (format = 'csv') AS SELECT 1 AS id, 'a' AS name;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_ctas_pipe WITH (format = 'csv', delimiter = '|') AS SELECT 1 AS id, 'a' AS name;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_ctas_quoted WITH (format = 'csv', quote = '"') AS SELECT 1 AS id, 'a,b' AS name;
+
+foreach table formats_csv_ctas formats_csv_ctas_pipe
+
+query II
+SELECT id, name FROM my_datalake.default.{table};
+----
+1	a
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_ctas_quoted;
+----
+1	a,b
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_ctas_quoted;

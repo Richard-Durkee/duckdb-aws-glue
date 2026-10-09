@@ -322,7 +322,7 @@ has the nested column 'tags' (array<string>)
 statement ok
 DROP TABLE my_datalake.default.formats_csv_nested;
 
-# leading zeros do not count towards a line count's digits, as in Java
+# leading zeros do not count towards a line count's digits
 statement ok
 CREATE TABLE my_datalake.default.formats_csv_zeros (id INTEGER) WITH (format = 'csv', 'skip.header.line.count' = '0000000000000000000001');
 
@@ -452,8 +452,8 @@ SELECT id, name FROM my_datalake.default.formats_csv_bad;
 statement ok
 DROP TABLE my_datalake.default.formats_csv_bad;
 
-# a negative header line count is refused; fractional values are accepted by rounding (e.g. 1.5 -> 1)
-foreach count -1
+# a line count must be a non-negative number
+foreach count -1 abc
 
 statement ok
 CREATE TABLE my_datalake.default.formats_csv_bad (id INTEGER) WITH (format = 'csv', 'skip.header.line.count' = '{count}');
@@ -468,7 +468,7 @@ DROP TABLE my_datalake.default.formats_csv_bad;
 
 endloop
 
-# a byte code may carry a sign, as in Java's Byte.parseByte: '+9' is a tab
+# a byte code may carry a sign: '+9' is a tab
 statement ok
 CREATE TABLE my_datalake.default.formats_csv_signed_delim (id INTEGER, name VARCHAR) WITH (format = 'csv', 'field.delim' = '+9');
 

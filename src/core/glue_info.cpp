@@ -101,8 +101,7 @@ string GlueTableInfo::DescribeBucketing() const {
 
 HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	auto serde = StringUtil::Lower(serde_library);
-	// an empty SerDe means the table is being created (CTAS before execution); default to Parquet
-	if (serde.empty() || StringUtil::Contains(serde, "parquet")) {
+	if (StringUtil::Contains(serde, "parquet")) {
 		return HiveFileFormat::PARQUET;
 	}
 	if (StringUtil::Contains(serde, "lazysimpleserde") || StringUtil::Contains(serde, "opencsvserde")) {
@@ -155,8 +154,8 @@ static string LazySimpleSeparator(const GlueTableInfo &table, const string &valu
 		return "\x01";
 	}
 	int64_t number;
-	auto separator = TryParseJavaInteger(value, -128, 127, number) ? static_cast<uint8_t>(number & 0xFF)
-	                                                               : static_cast<uint8_t>(value[0]);
+	auto separator = TryParseInteger(value, -128, 127, number) ? static_cast<uint8_t>(number & 0xFF)
+	                                                           : static_cast<uint8_t>(value[0]);
 	if (separator == 0 || separator == '\n' || separator == '\r' || separator >= 0x80) {
 		throw NotImplementedException("Hive table '%s.%s' has the field delimiter '%s', a byte DuckDB can not split "
 		                              "fields on; only ASCII delimiters other than NUL and line breaks are supported",
@@ -190,7 +189,7 @@ idx_t GlueTableInfo::GetCountProperty(const string &key) const {
 		return 0;
 	}
 	int64_t count;
-	if (!TryParseJavaInteger(value, 0, NumericLimits<int32_t>::Maximum(), count)) {
+	if (!TryParseInteger(value, 0, NumericLimits<int32_t>::Maximum(), count)) {
 		throw InvalidInputException("Hive table '%s.%s' has an invalid '%s' of '%s', expected a non-negative number",
 		                            database_name, name, key, value);
 	}
@@ -301,6 +300,18 @@ string GlueTableInfo::GetQuoteCharacter() const {
 
 string GlueTableInfo::GetEscapeCharacter() const {
 	return IsOpenCSVSerde() ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
+}
+
+HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
+	HiveCSVOptions options;
+	options.delimiter = GetFieldDelimiter();
+	options.quote = GetQuoteCharacter();
+	options.escape = GetEscapeCharacter();
+	options.skip_lines = GetHeaderLineCount();
+	// OpenCSVSerde has no NULL: "\n" matches no unquoted field
+	options.null_string = IsOpenCSVSerde() ? "\n" : GetNullFormat();
+	options.serde_fields = true;
+	return options;
 }
 
 GlueTableFormat GlueTableInfo::GetFormat() const {

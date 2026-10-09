@@ -46,9 +46,9 @@ demand. Other SerDes (ORC, Ion, ...) are not supported. Text tables are read the
   nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
   `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
   NULL string. Writes need a single-byte delimiter.
-- As in Hive, a table property overrides the SerDe property of the same name, keys are case-sensitive, and line counts
-  and byte codes are digits with an optional sign (`'1.5'` is not a number). Partitions are read with the table's
-  SerDe properties, not their own. `hive_scan()` uses plain `read_csv` rules.
+- As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
+  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
+  their own. `hive_scan()` uses plain `read_csv` rules.
 
 Breaking change: csv tables written by earlier versions of this extension store NULL as an empty field and may quote
 fields. To read such a table as before, set `serialization.null.format` to `''` and switch its SerDe to OpenCSVSerde.

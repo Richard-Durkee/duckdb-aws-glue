@@ -39,9 +39,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	bool header = false;
 	//! The partition keys, in order
 	vector<string> partition_keys;
-	//! The partitions registered in Glue (empty for an unpartitioned table)
-	vector<GluePartitionInfo> partitions;
-	//! The partition (index into 'partitions') each listed data file belongs to. Filled in while the file list expands,
+	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
@@ -55,6 +53,15 @@ struct HiveScanInfo : public TableFunctionInfo {
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
 	//! A description of the table for error messages
 	string Describe() const;
+	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every
+	//! scan of the table in the query. Never replaced once set, so indexes into it stay valid
+	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
+	bool PartitionsLoaded() const;
+	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+
+private:
+	mutable annotated_mutex partitions_lock;
+	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
@@ -65,14 +72,18 @@ struct HiveScanInfo : public TableFunctionInfo {
 //! one listing of its location. An unpartitioned table is one listing of the root location.
 class HiveMultiFileList : public LazyMultiFileList {
 public:
-	//! 'partition_indexes' are the partitions (indexes into HiveScanInfo::partitions) to read
+	//! 'partition_indexes' are the partitions to read
 	HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info, vector<idx_t> partition_indexes);
+	//! Every partition of the table, resolved when PartitionIndexes() is first asked
+	HiveMultiFileList(ClientContext &context, shared_ptr<HiveScanInfo> scan_info);
 
-	const vector<idx_t> &PartitionIndexes() const {
-		return partition_indexes;
-	}
+	//! The partitions to read, as indexes into HiveScanInfo::Partitions()
+	shared_ptr<const vector<idx_t>> PartitionIndexes() const;
 	const HiveScanInfo &ScanInfo() const {
 		return *scan_info;
+	}
+	ClientContext &Context() const {
+		return client_context;
 	}
 	FileExpandResult GetExpandResult() const override;
 	//! Prune on the table filters pushed in when the scan starts
@@ -116,14 +127,16 @@ private:
 	//! members
 	ClientContext &client_context;
 	shared_ptr<HiveScanInfo> scan_info;
-	vector<idx_t> partition_indexes;
+	mutable annotated_mutex indexes_lock;
+	//! Null for every partition of the table until PartitionIndexes() resolves it
+	mutable shared_ptr<const vector<idx_t>> partition_indexes DUCKDB_GUARDED_BY(indexes_lock);
 	mutable bool planned = false;
 	mutable vector<ListingJob> listing_jobs;
 	//! The next entry of 'listing_jobs' to run
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::partitions
+	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::Partitions()
 	mutable unordered_map<string, idx_t> partition_by_location;
 	mutable bool partition_locations_built = false;
 };

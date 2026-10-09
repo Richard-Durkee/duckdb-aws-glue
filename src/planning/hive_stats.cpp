@@ -11,6 +11,8 @@
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
+#include "api/glue_api.hpp"
+#include "catalog/glue_catalog.hpp"
 #include "core/glue_types.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 
@@ -30,7 +32,7 @@ static optional_idx ListedFileSize(const OpenFileInfo &file) {
 }
 
 //===--------------------------------------------------------------------===//
-// Per-query partition listing
+// Per-query cache
 //===--------------------------------------------------------------------===//
 //! The measurement of one directory of a table
 struct HiveTableSample {
@@ -53,14 +55,22 @@ struct HiveTableSampleEntry {
 	unique_ptr<HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
 };
 
-static constexpr const char *HIVE_SAMPLE_CACHE = "glue_hive_sample";
+//! The partitions of a table, fetched once per query for every scan of the table
+struct HiveTablePartitionsEntry {
+	annotated_mutex lock;
+	//! Null until the first scan of the table asks for them
+	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
+};
 
-//! The table samples taken in the running query and the directory listings, dropped when the query ends
-class HiveSampleCache : public ClientContextState {
+static constexpr const char *HIVE_QUERY_CACHE = "glue_hive_query_cache";
+
+//! What the scans of the running query share per table and directory, dropped when the query ends
+class HiveQueryCache : public ClientContextState {
 public:
 	void QueryEnd(ClientContext &context) override {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		samples.clear();
+		partitions.clear();
 		directory_listings.clear();
 	}
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table) {
@@ -70,6 +80,14 @@ public:
 			sample = make_shared_ptr<HiveTableSampleEntry>();
 		}
 		return sample;
+	}
+	shared_ptr<HiveTablePartitionsEntry> GetPartitions(const string &table) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &entry = partitions[table];
+		if (!entry) {
+			entry = make_shared_ptr<HiveTablePartitionsEntry>();
+		}
+		return entry;
 	}
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
@@ -84,9 +102,18 @@ public:
 private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<HiveTablePartitionsEntry>> partitions DUCKDB_GUARDED_BY(lock);
 	//! The recursive listing of a directory, fetched page by page as it is read
 	unordered_map<string, shared_ptr<MultiFileList>> directory_listings DUCKDB_GUARDED_BY(lock);
 };
+
+static shared_ptr<HiveQueryCache> GetQueryCache(ClientContext &context) {
+	return context.registered_state->GetOrCreate<HiveQueryCache>(HIVE_QUERY_CACHE);
+}
+
+static string TableKey(const HiveScanInfo &info) {
+	return info.catalog_name + "." + info.Describe();
+}
 
 static string DirectoryKey(const string &location) {
 	auto directory = location;
@@ -95,8 +122,19 @@ static string DirectoryKey(const string &location) {
 }
 
 shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory) {
-	auto cache = context.registered_state->GetOrCreate<HiveSampleCache>(HIVE_SAMPLE_CACHE);
-	return cache->GetDirectoryListing(context, DirectoryKey(directory));
+	return GetQueryCache(context)->GetDirectoryListing(context, DirectoryKey(directory));
+}
+
+shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
+	auto entry = GetQueryCache(context)->GetPartitions(TableKey(info));
+	// per table, so the Glue calls for different tables do not wait on each other
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->partitions) {
+		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
+		entry->partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
+		    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
+	}
+	return entry->partitions;
 }
 
 //===--------------------------------------------------------------------===//
@@ -283,12 +321,11 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
 	auto &info = hive_list.ScanInfo();
 	// pruning has already happened by the time the cardinality is asked for, so these are the partitions read
-	auto partitions = info.partition_keys.empty() ? idx_t(1) : hive_list.PartitionIndexes().size();
+	auto partitions = info.partition_keys.empty() ? idx_t(1) : hive_list.PartitionIndexes()->size();
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
 	}
-	auto cache = context.registered_state->GetOrCreate<HiveSampleCache>(HIVE_SAMPLE_CACHE);
-	auto listing = cache->GetSample(info.catalog_name + "." + info.Describe());
+	auto listing = GetQueryCache(context)->GetSample(TableKey(info));
 	HiveTableSample sample;
 	{
 		annotated_lock_guard<annotated_mutex> guard(listing->lock);
@@ -347,15 +384,16 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 	}
 
 	// the partitions left after pruning: filter pushdown runs before statistics are asked for
-	auto &partition_indexes = hive_list.PartitionIndexes();
-	if (partition_indexes.empty()) {
+	auto partition_indexes = hive_list.PartitionIndexes();
+	if (partition_indexes->empty()) {
 		return nullptr;
 	}
 	auto &type = bind_data.columns[input.column_index.GetPrimaryIndex()].type;
 	unique_ptr<BaseStatistics> result;
 	value_set_t distinct_values;
-	for (auto partition_index : partition_indexes) {
-		auto &partition = info.partitions[partition_index];
+	auto partitions = info.Partitions(context);
+	for (auto partition_index : *partition_indexes) {
+		auto &partition = (*partitions)[partition_index];
 		if (key_index >= partition.values.size()) {
 			// Glue registered the partition with fewer values than the table has keys
 			return nullptr;

@@ -67,12 +67,12 @@ SELECT
 query II
 EXPLAIN SELECT * FROM my_datalake.default.card_large;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~[1-9][0-9,]{6,} rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~[1-9][0-9,]{6,} rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.card_small;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~[1-9],?[0-9]{0,3} rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~[1-9],?[0-9]{0,3} rows.*
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.card_wide;
@@ -92,7 +92,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.card_wide')), 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.card_wide;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~[1-9],?[0-9]{0,3} rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~[1-9],?[0-9]{0,3} rows.*
 
 statement ok
 DROP TABLE my_datalake.default.card_small;

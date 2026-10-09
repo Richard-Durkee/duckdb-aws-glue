@@ -110,6 +110,44 @@ SELECT id, note FROM hive_scan('{TEST_DIR}/fmt_json', format := 'json',
 3	NULL
 
 #---------------------------------------------------------------------------
+# filters on data columns: every format scans with its own reader, so a filter it does not take is applied after it
+#---------------------------------------------------------------------------
+foreach fmt parquet csv json
+
+query I
+SELECT count(*) FROM hive_scan('{TEST_DIR}/fmt_${fmt}', format := '${fmt}',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
+WHERE id + 1 > 2;
+----
+2
+
+query I
+SELECT sum(id) FROM hive_scan('{TEST_DIR}/fmt_${fmt}', format := '${fmt}',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
+WHERE amount > 15 AND id::VARCHAR <> '3';
+----
+2
+
+# a hive_scan() call is serialized like the scan of a Glue table and bound again from it
+statement ok
+SET debug_verify_serializer = true;
+
+query II
+SELECT id, dt FROM hive_scan('{TEST_DIR}/fmt_${fmt}', format := '${fmt}',
+    schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
+WHERE id + 1 > 2 AND dt = '2016-05-14';
+----
+2	2016-05-14
+
+statement ok
+SET debug_verify_serializer = false;
+
+endloop
+
+#---------------------------------------------------------------------------
 # avro: the files carry their schema, columns are matched by name
 #---------------------------------------------------------------------------
 statement ok

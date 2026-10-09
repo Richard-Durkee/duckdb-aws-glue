@@ -146,6 +146,9 @@ private:
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
+//! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan
+//! binds the same scan again
+void SetHiveScanSerialization(TableFunction &function);
 
 //! MultiFileReader for Hive tables registered in Glue. It reads the files Glue's partitions point to (whatever their
 //! directory names), binds the schema Glue defines rather than the schema of the first file (a column missing from a

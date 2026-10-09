@@ -1,0 +1,126 @@
+# name: test/sql/hive/hive_scan/plan_serialization.test
+# description: A plan scanning a Glue table round-trips through plan serialization: the deserialized hive_scan binds
+# group: [hive_scan]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ps_orders;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ps_events;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ps_lines;
+
+statement ok
+CREATE TABLE my_datalake.default.ps_orders (id INTEGER, amount DECIMAL(10,2), dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.ps_orders VALUES (1, 10.50, '2016-05-14'), (2, 20.25, '2016-05-15'), (3, 30.00, '2016-05-15');
+
+statement ok
+CREATE TABLE my_datalake.default.ps_events WITH (format = 'csv', delimiter = '|') AS
+SELECT 1 AS id, 'start' AS kind UNION ALL SELECT 2, 'stop';
+
+statement ok
+CREATE TABLE my_datalake.default.ps_lines WITH (format = 'json') AS SELECT 7 AS n, {'a': 1} AS s;
+
+# with the verifier on, every plan below is serialized, deserialized and run as deserialized
+statement ok
+SET debug_verify_serializer = true;
+
+query I
+SELECT sum(amount) FROM my_datalake.default.ps_orders;
+----
+60.75
+
+# the partitions the filter pruned stay pruned in the deserialized plan
+query II
+SELECT id, amount FROM my_datalake.default.ps_orders WHERE dt = '2016-05-15' ORDER BY id;
+----
+2	20.25
+3	30.00
+
+query II
+SELECT dt, count(*) FROM my_datalake.default.ps_orders WHERE dt <> '2016-05-15' GROUP BY dt;
+----
+2016-05-14	1
+
+# the two identical scans are still one common subplan
+query I
+SELECT count(*) FROM (
+    SELECT id FROM my_datalake.default.ps_orders WHERE dt = '2016-05-15'
+    UNION ALL
+    SELECT id FROM my_datalake.default.ps_orders WHERE dt = '2016-05-15');
+----
+4
+
+# a csv table keeps its reader and its dialect
+query II
+SELECT id, kind FROM my_datalake.default.ps_events ORDER BY id;
+----
+1	start
+2	stop
+
+query I
+SELECT id FROM my_datalake.default.ps_events WHERE id + 1 > 2;
+----
+2
+
+query II
+SELECT n, s.a FROM my_datalake.default.ps_lines;
+----
+7	1
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.ps_orders;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.ps_events;
+----
+physical_plan	<REGEX>:.*HIVE_SCAN.*
+
+statement error
+SELECT * FROM hive_scan(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orders']);
+----
+hive_scan takes a single root location, not a list of files
+
+# read_parquet itself is still the format reader
+query I
+SELECT count(*) FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orders/*/*.parquet');
+----
+3
+
+# a hive_scan() call is bound again from its arguments
+query I
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ps_orders',
+    schema := {id: 'INTEGER', amount: 'DECIMAL(10,2)', dt: 'VARCHAR'},
+    partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
+----
+3
+
+statement ok
+SET debug_verify_serializer = false;
+
+statement ok
+DROP TABLE my_datalake.default.ps_lines;
+
+statement ok
+DROP TABLE my_datalake.default.ps_events;
+
+statement ok
+DROP TABLE my_datalake.default.ps_orders;

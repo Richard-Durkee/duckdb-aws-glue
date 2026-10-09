@@ -43,14 +43,14 @@ SELECT (SELECT count(*) FROM my_datalake.default.up_small), (SELECT count(*) FRO
 query II
 EXPLAIN SELECT * FROM my_datalake.default.up_big;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~100,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~100,000 rows.*
 
 # the other half of the pair: the small table must not get the big one's estimate, so a fix that
 # returns any constant fails here.
 query II
 EXPLAIN SELECT * FROM my_datalake.default.up_small;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~4,000 rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # Many files of equal size: the measured file holds a tenth of the table's bytes, so the estimate has to
@@ -79,7 +79,7 @@ SELECT count(*) FROM my_datalake.default.up_many;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.up_many;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~50,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~50,000 rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # No files at all: nothing to sample, and the estimate must not fall back to a fabricated constant.
@@ -99,7 +99,7 @@ SELECT count(*) FROM my_datalake.default.up_empty;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.up_empty;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~0 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~0 rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # Files of UNEQUAL size: 10 rows in one file and 90,000 in another, so the table holds 90,010. Bytes
@@ -128,7 +128,7 @@ SELECT count(*) FROM my_datalake.default.up_skew;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.up_skew;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~90,[0-9]{3} rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~90,[0-9]{3} rows.*
 
 statement ok
 DROP TABLE my_datalake.default.up_small;

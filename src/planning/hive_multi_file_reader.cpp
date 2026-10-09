@@ -534,10 +534,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(109, "partition_keys", info.partition_keys);
 	serializer.WriteProperty(110, "columns", info.names);
 	serializer.WriteProperty(111, "column_types", info.types);
-	serializer.WriteProperty(112, "delimiter", info.delimiter);
-	serializer.WriteProperty(113, "quote", info.quote);
-	serializer.WriteProperty(114, "escape", info.escape);
-	serializer.WriteProperty(115, "header", info.header);
+	serializer.WriteProperty(112, "csv_options", info.csv_options);
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
@@ -555,10 +552,7 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	info->partition_keys = deserializer.ReadProperty<vector<string>>(109, "partition_keys");
 	info->names = deserializer.ReadProperty<vector<Identifier>>(110, "columns");
 	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
-	info->delimiter = deserializer.ReadProperty<string>(112, "delimiter");
-	info->quote = deserializer.ReadProperty<string>(113, "quote");
-	info->escape = deserializer.ReadProperty<string>(114, "escape");
-	info->header = deserializer.ReadProperty<bool>(115, "header");
+	info->csv_options = deserializer.ReadProperty<HiveCSVOptions>(112, "csv_options");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());

@@ -1,0 +1,55 @@
+# name: test/sql/hive/ddl/drop_schema/list_tables_of_dropped_database.test
+# description: Listing the tables of a Glue database that was dropped after the databases were listed finds none
+# group: [drop_schema]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the same catalog a second time, to drop the database behind the first one's back
+statement ok
+attach '{GLUE_CATALOG_ID}' as other_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS other_datalake.ddl_dropped_db CASCADE;
+
+statement ok
+CREATE SCHEMA other_datalake.ddl_dropped_db;
+
+statement ok
+CREATE TABLE other_datalake.ddl_dropped_db.orders (id INTEGER);
+
+# my_datalake lists the databases, then the database is dropped before it lists its tables
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name = 'ddl_dropped_db';
+----
+1
+
+statement ok
+DROP SCHEMA other_datalake.ddl_dropped_db CASCADE;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = 'ddl_dropped_db';
+----
+0
+
+statement ok
+SHOW ALL TABLES;
+
+query I
+SELECT count(*) FROM (SHOW TABLES FROM my_datalake.ddl_dropped_db);
+----
+0

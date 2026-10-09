@@ -2,6 +2,7 @@
 #include "api/glue_http_client.hpp"
 
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/logging/logger.hpp"
 
 #include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreateTableRequest.h>
@@ -30,6 +31,16 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 		}
 		auto outcome = client->GetTables(request);
 		if (!outcome.IsSuccess()) {
+			// the database was dropped after it was listed: it has no tables to list
+			if (IsEntityNotFound(outcome)) {
+				return {};
+			}
+			// a database whose tables we may not list must not fail listing the ones we may
+			if (IsAccessDenied(outcome)) {
+				DUCKDB_LOG_WARNING(context, "Not listing the tables of Glue database '%s': %s", database_name,
+				                   ToStdString(outcome.GetError().GetMessage()));
+				return {};
+			}
 			ThrowGlueError(outcome, StringUtil::Format("GetTables (database '%s')", database_name));
 		}
 		auto &tables = outcome.GetResult();

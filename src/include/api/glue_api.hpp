@@ -28,7 +28,7 @@ public:
 	//! object of the response as JSON.
 	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        GlueDatabaseInfo &result, string *raw_json = nullptr);
-	//! List all tables of a database
+	//! List all tables of a database; none when the database no longer exists or its tables may not be listed
 	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name);
 	//! Returns false if the database holds no tables (or views), otherwise true with the name of one of them
 	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,

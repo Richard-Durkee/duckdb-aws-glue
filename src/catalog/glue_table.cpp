@@ -90,13 +90,13 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 		latest_info.CheckTextSerdeSupported(scan_info->file_format);
 	}
 	if (scan_info->file_format == HiveFileFormat::CSV) {
-		scan_info->csv.delimiter = latest_info.GetFieldDelimiter();
-		scan_info->csv.quote = latest_info.GetQuoteCharacter();
-		scan_info->csv.escape = latest_info.GetEscapeCharacter();
-		scan_info->csv.skip_lines = latest_info.GetHeaderLineCount();
+		scan_info->csv_options.delimiter = latest_info.GetFieldDelimiter();
+		scan_info->csv_options.quote = latest_info.GetQuoteCharacter();
+		scan_info->csv_options.escape = latest_info.GetEscapeCharacter();
+		scan_info->csv_options.skip_lines = latest_info.GetHeaderLineCount();
 		// OpenCSVSerde has no NULL: "\n" matches no unquoted field
-		scan_info->csv.null_string = latest_info.IsOpenCSVSerde() ? "\n" : latest_info.GetNullFormat();
-		scan_info->csv.serde_fields = true;
+		scan_info->csv_options.null_string = latest_info.IsOpenCSVSerde() ? "\n" : latest_info.GetNullFormat();
+		scan_info->csv_options.serde_fields = true;
 	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());

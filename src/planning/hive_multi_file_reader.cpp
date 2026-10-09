@@ -593,7 +593,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	for (idx_t i = 0; i < scan_info->names.size(); i++) {
 		if (scan_info->GetPartitionKeyIndex(scan_info->names[i].GetIdentifierName()) == DConstants::INVALID_INDEX) {
 			// with SerDe fields every column is read as text; InitializeReader converts it to the column's type
-			auto type = scan_info->csv.serde_fields ? LogicalType::VARCHAR : scan_info->types[i];
+			auto type = scan_info->csv_options.serde_fields ? LogicalType::VARCHAR : scan_info->types[i];
 			data_columns.emplace_back(scan_info->names[i], Value(type.ToString()));
 		}
 	}
@@ -610,14 +610,14 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["auto_detect"] = Value::BOOLEAN(false);
 		param_map["header"] = Value::BOOLEAN(false);
-		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->csv.skip_lines));
-		param_map["delim"] = Value(scan_info->csv.delimiter);
-		param_map["quote"] = Value(scan_info->csv.quote);
-		param_map["escape"] = Value(scan_info->csv.escape);
-		param_map["nullstr"] = Value(scan_info->csv.null_string);
+		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->csv_options.skip_lines));
+		param_map["delim"] = Value(scan_info->csv_options.delimiter);
+		param_map["quote"] = Value(scan_info->csv_options.quote);
+		param_map["escape"] = Value(scan_info->csv_options.escape);
+		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
-		if (scan_info->csv.serde_fields) {
+		if (scan_info->csv_options.serde_fields) {
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);
 			param_map["strict_mode"] = Value::BOOLEAN(false);
@@ -637,7 +637,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		break;
 	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
-	if (scan_info->csv.serde_fields) {
+	if (scan_info->csv_options.serde_fields) {
 		// read_csv would convert the text itself, strictly: have the column mapping cast it, so InitializeReader can
 		// make the casts TRY_CASTs
 		auto &info = scan_function.function_info->Cast<TableFunctionMultiFileInfo>();
@@ -987,7 +987,7 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
                                                            ClientContext &context, MultiFileGlobalState &gstate) {
 	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
 	                                                table_filters, context, gstate);
-	if (!ScanInfo().csv.serde_fields) {
+	if (!ScanInfo().csv_options.serde_fields) {
 		return result;
 	}
 	if (!reader_data.reader->expression_map.empty()) {

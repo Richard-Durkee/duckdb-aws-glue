@@ -6,6 +6,8 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/serializer/serializer.hpp"
+#include "duckdb/common/serializer/deserializer.hpp"
 
 namespace duckdb {
 
@@ -375,6 +377,26 @@ string GlueTableInfo::GetMetadataLocation() const {
 bool GlueTableInfo::IsFormatParameter(const string &key) {
 	return StringUtil::CIEquals(key, "table_type") || StringUtil::CIEquals(key, "spark.sql.sources.provider") ||
 	       StringUtil::CIEquals(key, "metadata_location");
+}
+
+void HiveCSVOptions::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty(100, "delimiter", delimiter);
+	serializer.WriteProperty(101, "quote", quote);
+	serializer.WriteProperty(102, "escape", escape);
+	serializer.WriteProperty(103, "skip_lines", skip_lines);
+	serializer.WriteProperty(104, "null_string", null_string);
+	serializer.WriteProperty(105, "serde_fields", serde_fields);
+}
+
+HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
+	HiveCSVOptions result;
+	result.delimiter = deserializer.ReadProperty<string>(100, "delimiter");
+	result.quote = deserializer.ReadProperty<string>(101, "quote");
+	result.escape = deserializer.ReadProperty<string>(102, "escape");
+	result.skip_lines = deserializer.ReadProperty<idx_t>(103, "skip_lines");
+	result.null_string = deserializer.ReadProperty<string>(104, "null_string");
+	result.serde_fields = deserializer.ReadProperty<bool>(105, "serde_fields");
+	return result;
 }
 
 } // namespace duckdb

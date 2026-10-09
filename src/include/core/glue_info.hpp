@@ -8,6 +8,9 @@
 
 namespace duckdb {
 
+class Serializer;
+class Deserializer;
+
 //! The (open) table format a Glue table is stored in, derived from the table parameters
 enum class GlueTableFormat : uint8_t { ICEBERG, DELTA, HUDI, HIVE, UNKNOWN };
 
@@ -55,6 +58,10 @@ struct HiveCSVOptions {
 	string null_string;
 	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
 	bool serde_fields = false;
+
+public:
+	void Serialize(Serializer &serializer) const;
+	static HiveCSVOptions Deserialize(Deserializer &deserializer);
 };
 
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,

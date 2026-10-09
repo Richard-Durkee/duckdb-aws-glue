@@ -339,7 +339,7 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	if (!base.constraints.empty()) {
 		throw NotImplementedException("Constraints are not supported when creating tables in a Glue catalog");
 	}
-  for (auto &column : base.columns.Logical()) {
+	for (auto &column : base.columns.Logical()) {
 		ThrowIfUnsupportedColumn(column);
 	}
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();

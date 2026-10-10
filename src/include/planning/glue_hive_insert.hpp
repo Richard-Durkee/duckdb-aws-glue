@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_create_table.hpp"
@@ -13,9 +14,12 @@ class GlueCatalog;
 class GlueSchemaEntry;
 class GlueTable;
 
+//! hive_insert_existing_partitions_behavior: what INSERT does with the data in the partitions it writes
+enum class HiveExistingPartitionsBehavior : uint8_t { APPEND, OVERWRITE, ERROR };
+
 //! Writes rows into a Hive table registered in Glue: a COPY into the table location (one <key=value> directory level
 //! per partition key, or the location of an existing partition), then the new partition directories are registered in
-//! Glue.
+//! Glue. When overwriting, the data files that were in the partitions it wrote are deleted after that.
 class GlueHiveInsert : public PhysicalOperator {
 public:
 	GlueHiveInsert(PhysicalPlan &physical_plan, LogicalOperator &op, GlueCatalog &catalog, GlueTableInfo table_info);
@@ -58,6 +62,13 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
+	//! hive_insert_existing_partitions_behavior = 'error': fail (removing the written files) if any of the partitions
+	//! written already exists
+	void CheckNoExistingPartitions(ClientContext &context, const vector<GluePartitionInput> &written,
+	                               const vector<string> &written_files) const;
+	//! Delete the data files of 'directories' (partition locations) that this insert did not write
+	void DeleteReplacedFiles(ClientContext &context, const vector<string> &directories,
+	                         const unordered_set<string> &written_files) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).
@@ -66,6 +77,7 @@ public:
 	GlueTableInfo table_info;
 	//! The directories of existing partitions not laid out as <key=value>, with their Glue values.
 	unordered_map<string, vector<string>> partition_directories;
+	HiveExistingPartitionsBehavior existing_partitions = HiveExistingPartitionsBehavior::APPEND;
 };
 
 } // namespace duckdb

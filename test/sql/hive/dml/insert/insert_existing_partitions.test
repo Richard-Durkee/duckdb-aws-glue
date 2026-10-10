@@ -1,0 +1,222 @@
+# name: test/sql/hive/dml/insert/insert_existing_partitions.test
+# description: hive_insert_existing_partitions_behavior: 'overwrite' replaces the data of the partitions an INSERT
+# group: [insert]
+
+#              writes (and of an unpartitioned table) and leaves other partitions, hidden files and partitions
+#              registered inside a written one alone; 'error' refuses to write to an existing partition
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+SET hive_insert_existing_partitions_behavior = 'replace';
+----
+<REGEX>:.*Unknown hive_insert_existing_partitions_behavior 'replace', expected 'append', 'overwrite' or 'error'.*
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ow_parts;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ow_plain;
+
+#---------------------------------------------------------------------------
+# partitioned: only the partitions written are replaced
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.ow_parts (id INTEGER, val VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.ow_parts VALUES (1, 'a', 'd1'), (2, 'b', 'd1'), (3, 'c', 'd2');
+
+# a second file in d1, so the overwrite has more than one file to replace
+statement ok
+INSERT INTO my_datalake.default.ow_parts VALUES (4, 'd', 'd1');
+
+statement ok
+SET hive_insert_existing_partitions_behavior = 'OVERWRITE';
+
+query I
+SELECT current_setting('hive_insert_existing_partitions_behavior');
+----
+overwrite
+
+statement ok
+INSERT INTO my_datalake.default.ow_parts VALUES (10, 'new', 'd1');
+
+query III
+SELECT id, val, dt FROM my_datalake.default.ow_parts ORDER BY id;
+----
+3	c	d2
+10	new	d1
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ow_parts/dt=d1/*');
+----
+1
+
+# rows for a new partition and an existing one: the existing one is replaced, the new one created
+statement ok
+INSERT INTO my_datalake.default.ow_parts VALUES (20, 'x', 'd2'), (30, 'y', 'd3');
+
+query III
+SELECT id, val, dt FROM my_datalake.default.ow_parts ORDER BY id;
+----
+10	new	d1
+20	x	d2
+30	y	d3
+
+# reading the partition being overwritten: the scan finishes before anything is deleted
+statement ok
+INSERT INTO my_datalake.default.ow_parts SELECT id + 1, val || '!', dt FROM my_datalake.default.ow_parts WHERE dt = 'd2';
+
+query III
+SELECT id, val, dt FROM my_datalake.default.ow_parts ORDER BY id;
+----
+10	new	d1
+21	x!	d2
+30	y	d3
+
+# no rows: no partition is written, so none is replaced
+statement ok
+INSERT INTO my_datalake.default.ow_parts SELECT * FROM my_datalake.default.ow_parts WHERE false;
+
+query I
+SELECT count(*) FROM my_datalake.default.ow_parts;
+----
+3
+
+# a partition registered inside the directory of d1 belongs to itself, not to d1, and hidden files are no data files
+statement ok
+COPY (SELECT 40 AS id, 'inner' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ow_parts/dt=d1/inner/data.parquet';
+
+statement ok
+CALL glue_add_partition('my_datalake.default.ow_parts', {dt: 'inner'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ow_parts/dt=d1/inner');
+
+statement ok
+COPY (SELECT 1 AS marker) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ow_parts/dt=d1/_SUCCESS.csv';
+
+statement ok
+INSERT INTO my_datalake.default.ow_parts VALUES (11, 'newer', 'd1');
+
+query III
+SELECT id, val, dt FROM my_datalake.default.ow_parts ORDER BY id;
+----
+11	newer	d1
+21	x!	d2
+30	y	d3
+40	inner	inner
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ow_parts/dt=d1/_SUCCESS.csv');
+----
+1
+
+# overwriting the inner partition leaves d1 alone
+statement ok
+INSERT INTO my_datalake.default.ow_parts VALUES (41, 'inner2', 'inner');
+
+query III
+SELECT id, val, dt FROM my_datalake.default.ow_parts WHERE dt IN ('d1', 'inner') ORDER BY id;
+----
+11	newer	d1
+41	inner2	inner
+
+#---------------------------------------------------------------------------
+# unpartitioned: every insert replaces the table, even one without rows
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.ow_plain (id INTEGER, val VARCHAR);
+
+statement ok
+SET hive_insert_existing_partitions_behavior = 'append';
+
+statement ok
+INSERT INTO my_datalake.default.ow_plain VALUES (1, 'a'), (2, 'b');
+
+statement ok
+INSERT INTO my_datalake.default.ow_plain VALUES (3, 'c');
+
+statement ok
+SET hive_insert_existing_partitions_behavior = 'overwrite';
+
+statement ok
+INSERT INTO my_datalake.default.ow_plain VALUES (4, 'd');
+
+query II
+SELECT * FROM my_datalake.default.ow_plain;
+----
+4	d
+
+statement ok
+INSERT INTO my_datalake.default.ow_plain SELECT * FROM my_datalake.default.ow_plain WHERE false;
+
+query I
+SELECT count(*) FROM my_datalake.default.ow_plain;
+----
+0
+
+#---------------------------------------------------------------------------
+# error: existing partitions are refused, and nothing of the insert is left
+#---------------------------------------------------------------------------
+statement ok
+SET hive_insert_existing_partitions_behavior = 'error';
+
+statement ok
+INSERT INTO my_datalake.default.ow_parts VALUES (50, 'fresh', 'd4');
+
+# d5 is new but d1 exists: the d5 rows are not inserted either
+statement error
+INSERT INTO my_datalake.default.ow_parts VALUES (51, 'other', 'd5'), (12, 'again', 'd1');
+----
+<REGEX>:.*Can not insert into existing partition \[d1\] of Hive table 'ow_parts'.*nothing was inserted.*
+
+query III
+SELECT id, val, dt FROM my_datalake.default.ow_parts WHERE dt IN ('d1', 'd4', 'd5') ORDER BY id;
+----
+11	newer	d1
+50	fresh	d4
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ow_parts/dt=d5/*');
+----
+0
+
+statement error
+INSERT INTO my_datalake.default.ow_plain VALUES (7, 'g');
+----
+<REGEX>:.*Can not insert into unpartitioned Hive table 'ow_plain'.*
+
+#---------------------------------------------------------------------------
+# append is the default again after RESET
+#---------------------------------------------------------------------------
+statement ok
+RESET hive_insert_existing_partitions_behavior;
+
+statement ok
+INSERT INTO my_datalake.default.ow_plain VALUES (5, 'e');
+
+statement ok
+INSERT INTO my_datalake.default.ow_plain VALUES (6, 'f');
+
+query II
+SELECT * FROM my_datalake.default.ow_plain ORDER BY id;
+----
+5	e
+6	f
+
+statement ok
+DROP TABLE my_datalake.default.ow_parts;
+
+statement ok
+DROP TABLE my_datalake.default.ow_plain;

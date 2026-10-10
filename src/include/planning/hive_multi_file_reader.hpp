@@ -141,6 +141,8 @@ private:
 	mutable bool partition_locations_built = false;
 };
 
+//! Whether a path below a location is hidden: Hive skips _* and .* files and directories
+bool IsHiddenPath(const string &relative_path);
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of
 //! 'scan_info' with the HiveMultiFileReader. Returns the bound table function and fills in 'bind_data'; the scan
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.

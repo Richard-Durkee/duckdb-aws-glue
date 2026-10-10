@@ -100,6 +100,16 @@ their codec themselves.
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
   (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
+- `SET hive_insert_existing_partitions_behavior = 'overwrite'` (default `'append'`) makes `INSERT INTO` replace the
+  data of every partition it writes rows to, like Hive's `INSERT OVERWRITE` (and Trino's setting of the same name):
+  partitions it writes no rows to keep their data, and an unpartitioned table is replaced as a whole, even by an
+  insert without rows. The new files are written first; once all are written, the data files that were in those
+  partitions are deleted. Hidden files (`_*`, `.*`) and the files of partitions registered inside a replaced one are
+  kept. As S3 has no transactions, a query reading the table meanwhile may see old and new files, and an insert that
+  fails while deleting leaves both.
+  `'error'` refuses to write to a partition that already exists: the files the insert wrote are deleted again and
+  nothing is inserted (a query reading the table meanwhile may see them). Every insert into an unpartitioned table is
+  refused, as its data is one partition, which exists.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.

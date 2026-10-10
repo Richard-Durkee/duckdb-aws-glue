@@ -3,6 +3,7 @@
 #include "glue_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/storage_extension.hpp"
@@ -43,6 +44,16 @@ static void InitAWSAPI() {
 	});
 }
 
+static void SetInsertExistingPartitionsBehavior(ClientContext &context, SetScope scope, Value &parameter) {
+	auto behavior = StringUtil::Lower(parameter.ToString());
+	if (behavior != "append" && behavior != "overwrite" && behavior != "error") {
+		throw InvalidInputException(
+		    "Unknown hive_insert_existing_partitions_behavior '%s', expected 'append', 'overwrite' or 'error'",
+		    parameter.ToString());
+	}
+	parameter = Value(behavior);
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
@@ -71,6 +82,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "When a scan reads at least this many partitions below the table location, the location "
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
+
+	config.AddExtensionOption("hive_insert_existing_partitions_behavior",
+	                          "What INSERT into a Hive table does with the data already in the partitions it writes: "
+	                          "'append' (the default) keeps it, 'overwrite' replaces it, like Hive's INSERT OVERWRITE, "
+	                          "and 'error' refuses to write to an existing partition. An unpartitioned table is one "
+	                          "partition that every INSERT writes.",
+	                          LogicalType::VARCHAR, Value("append"), SetInsertExistingPartitionsBehavior);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();

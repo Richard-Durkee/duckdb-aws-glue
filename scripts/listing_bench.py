@@ -86,4 +86,35 @@ def main():
         summary.write(table + "\n")
 
 
+DIAGNOSE = """
+SET redact_http_logs = false;
+SET hive_partition_listing_threshold = 1000000;
+CALL enable_logging('HTTP', storage := 'memory');
+CALL truncate_duckdb_logs();
+SELECT count(*) FROM lake.default.listing_bench;
+CREATE TEMP TABLE r AS
+SELECT CASE WHEN request.url LIKE '%list-type=2%' THEN 'list'
+            WHEN request.url LIKE '%:5555%' THEN 'glue'
+            ELSE request.type END AS kind,
+       request.start_time AS s,
+       request.start_time + to_milliseconds(request.duration_ms) AS e,
+       request.duration_ms AS d
+FROM duckdb_logs_parsed('HTTP');
+SELECT kind, count(*) AS requests, sum(d) AS total_ms,
+       epoch_ms(max(e)) - epoch_ms(min(s)) AS span_ms,
+       epoch_ms(min(s)) - (SELECT epoch_ms(min(s)) FROM r) AS first_at_ms,
+       (SELECT max(c) FROM (SELECT count(*) AS c FROM r a JOIN r b ON a.kind = b.kind AND b.s <= a.s AND b.e > a.s
+                            WHERE a.kind = r.kind GROUP BY a.s)) AS max_concurrent
+FROM r GROUP BY kind ORDER BY first_at_ms;
+SELECT kind, epoch_ms(s) - (SELECT epoch_ms(min(s)) FROM r) AS at_ms, d AS ms FROM r ORDER BY s LIMIT 40;
+"""
+
+
+def diagnose():
+    for p in SETTINGS:
+        print(f"=== HTTP timeline, parallelism {p}, 32 threads, cold ===")
+        print(run(PREAMBLE + f"SET hive_partition_listing_parallelism = {p};\nSET threads = 32;\n" + DIAGNOSE))
+
+
 main()
+diagnose()

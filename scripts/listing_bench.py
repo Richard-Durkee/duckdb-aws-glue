@@ -1,11 +1,19 @@
 """Times Hive scans that list partitions one directory each, with hive_partition_listing_parallelism 1 (one listing
 at a time, as before) and 16, against the local Glue + S3 fixture with network latency added by tc netem."""
+import os
 import statistics
 import subprocess
 import sys
 
 DUCKDB = "./build/release/duckdb"
-PREAMBLE = """
+# the extensions are loadable files in the build's repository, unsigned, as the test runner installs them
+REPOSITORY = os.path.abspath("build/release/repository")
+PREAMBLE = f"""
+SET autoinstall_extension_repository = '{REPOSITORY}';
+INSTALL httpfs FROM '{REPOSITORY}';
+INSTALL glue FROM '{REPOSITORY}';
+LOAD httpfs;
+LOAD glue;
 CREATE SECRET (TYPE S3, KEY_ID 'minio', SECRET 'minio123', REGION 'us-east-1', ENDPOINT 'localhost:9100',
     USE_SSL false, URL_STYLE 'path');
 ATTACH '123456789012' AS lake (TYPE glue, ENDPOINT 'http://localhost:5555',
@@ -26,7 +34,7 @@ REPEATS = 7
 
 
 def run(sql):
-    result = subprocess.run([DUCKDB, "-batch"], input=sql, capture_output=True, text=True)
+    result = subprocess.run([DUCKDB, "-batch", "-unsigned"], input=sql, capture_output=True, text=True)
     if result.returncode != 0:
         sys.exit(f"duckdb failed:\n{sql}\n{result.stdout}\n{result.stderr}")
     return result.stdout

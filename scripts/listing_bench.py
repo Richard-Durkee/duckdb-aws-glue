@@ -30,7 +30,14 @@ QUERIES = {
     "200 partitions, one listing each": "SET hive_partition_listing_threshold = 1000000;\n.timer on\nSELECT count(*) FROM lake.default.listing_bench;",
 }
 SETTINGS = [1, 16]
-REPEATS = 7
+# (label, threads, warm): warm runs the query once untimed in the same process with the parquet metadata cache on, so
+# the timed run reads footers from memory and lists again (listings are cached per query only)
+SCENARIOS = [
+    ("cold, default threads (4)", None, False),
+    ("cold, 32 threads", 32, False),
+    ("warm caches, default threads (4)", None, True),
+]
+REPEATS = 5
 
 
 def run(sql):
@@ -40,28 +47,41 @@ def run(sql):
     return result.stdout
 
 
-def time_query(parallelism, query):
-    out = run(PREAMBLE + f"SET hive_partition_listing_parallelism = {parallelism};\n" +
-              (query if query.startswith("SET") else ".timer on\n" + query))
+def time_query(parallelism, query, threads, warm):
+    sql = PREAMBLE + f"SET hive_partition_listing_parallelism = {parallelism};\n"
+    if threads:
+        sql += f"SET threads = {threads};\n"
+    if query.startswith("SET"):
+        setting, select = query.split("\n.timer on\n")
+        sql += setting + "\n"
+    else:
+        select = query
+    if warm:
+        sql += "SET parquet_metadata_cache = true;\n" + select + "\n"
+    sql += ".timer on\n" + select + "\n"
+    out = run(sql)
     times = [float(line.split()[4]) for line in out.splitlines() if line.startswith("Run Time (s): real")]
     return times[-1]
 
 
 def main():
     print(run(SETUP))
-    results = {(name, p): [] for name in QUERIES for p in SETTINGS}
-    for _ in range(REPEATS):
-        for name, query in QUERIES.items():
-            for p in SETTINGS:
-                results[(name, p)].append(time_query(p, query))
-    lines = ["| Query | parallelism 1 (before) | parallelism 16 | Speedup |", "|---|---|---|---|"]
-    for name in QUERIES:
-        before = statistics.median(results[(name, 1)])
-        after = statistics.median(results[(name, 16)])
-        lines.append(f"| {name} | {before:.3f} s | {after:.3f} s | {before / after:.1f}x |")
+    lines = ["| Scenario | Query | parallelism 1 (before) | parallelism 16 | Speedup |", "|---|---|---|---|---|"]
+    raw = {}
+    for label, threads, warm in SCENARIOS:
+        results = {(name, p): [] for name in QUERIES for p in SETTINGS}
+        for _ in range(REPEATS):
+            for name, query in QUERIES.items():
+                for p in SETTINGS:
+                    results[(name, p)].append(time_query(p, query, threads, warm))
+        for name in QUERIES:
+            before = statistics.median(results[(name, 1)])
+            after = statistics.median(results[(name, 16)])
+            lines.append(f"| {label} | {name} | {before:.3f} s | {after:.3f} s | {before / after:.1f}x |")
+        raw[label] = {f"{k[0]} / {k[1]}": v for k, v in results.items()}
     table = "\n".join(lines)
     print(table)
-    print({f"{k[0]} / {k[1]}": v for k, v in results.items()})
+    print(raw)
     with open(sys.argv[1], "a") as summary:
         summary.write(table + "\n")
 

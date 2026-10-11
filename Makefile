@@ -13,9 +13,11 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 # Local Glue (moto) + S3 (SeaweedFS) test servers, see scripts/docker-compose.yml (the compose file also creates the
 # bucket and the Glue database 'default')
 GLUE_COMPOSE=docker compose -f scripts/docker-compose.yml
+# --wait does not wait for moto to answer: the init container does, and then creates the bucket and 'default'
 glue-fixture:
 	rm -f duckdb_benchmark_data/*.duckdb duckdb_benchmark_data/*.duckdb.wal
 	$(GLUE_COMPOSE) up -d --wait
+	test "$$(docker wait glue-init)" = 0
 glue-fixture-down:
 	$(GLUE_COMPOSE) down -v --remove-orphans
 # Run the sqllogictests against the local servers (start them with `make glue-fixture` first), or against a live

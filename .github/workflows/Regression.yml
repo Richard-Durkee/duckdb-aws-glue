@@ -194,8 +194,13 @@ jobs:
       - name: Set up Docker Compose
         uses: docker/setup-compose-action@v1
 
+      # --wait only waits for the containers to run, not for moto to answer: wait for the init container too, which
+      # retries until moto and S3 answer and then creates the bucket and the Glue database 'default'. Without it the
+      # first benchmark (heavily_partitioned_table, whose load attaches right away) got no response from moto.
       - name: Start Glue (moto) and S3
-        run: docker compose -f scripts/docker-compose.yml up -d --wait
+        run: |
+          docker compose -f scripts/docker-compose.yml up -d --wait
+          test "$(docker wait glue-init)" = 0
 
       # The benchmark files of the PR checkout are run by both runners (the benchmark runner resolves the paths
       # against the working directory, which test_runner.py isolates per runner).

@@ -72,6 +72,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
+	config.AddExtensionOption("hive_partition_listing_parallelism",
+	                          "How many partitions a scan lists at the same time when it lists them one directory "
+	                          "each (partitions outside the table location, or fewer than "
+	                          "hive_partition_listing_threshold below it). 1 lists one at a time. Default 16.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(16));
+
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();

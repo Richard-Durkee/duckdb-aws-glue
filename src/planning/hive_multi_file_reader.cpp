@@ -103,8 +103,7 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! Whether a path below a location is hidden: Hive skips _* and .* files and directories
-static bool IsHiddenPath(const string &relative_path) {
+bool IsHiddenPath(const string &relative_path) {
 	for (auto &component : StringUtil::Split(relative_path, '/')) {
 		if (component.empty() || component[0] == '_' || component[0] == '.') {
 			return true;

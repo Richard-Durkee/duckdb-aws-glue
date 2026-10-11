@@ -100,6 +100,11 @@ their codec themselves.
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
   (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
+- `SET hive_insert_existing_partitions_behavior = 'overwrite'` (default `'append'`) makes `INSERT INTO` replace the
+  data of the partitions it writes rows to, like Hive's `INSERT OVERWRITE`; an unpartitioned table is replaced whole.
+  The old data files are deleted only after all new files are written. Hidden files (`_*`, `.*`) and partitions
+  registered inside a replaced one are kept. It is not atomic: readers may briefly see old and new files, and two
+  concurrent inserts into the same partition can delete each other's files.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.

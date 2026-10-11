@@ -1,8 +1,11 @@
 #include "planning/glue_hive_insert.hpp"
 
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
+#include "duckdb/common/file_system.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -25,8 +28,30 @@
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
 #include "execution/hive_copy.hpp"
+#include "planning/hive_multi_file_reader.hpp"
 
 namespace duckdb {
+
+bool IsHiveInsertOverwrite(const string &value) {
+	auto behavior = StringUtil::Lower(value);
+	if (behavior != "append" && behavior != "overwrite") {
+		throw InvalidInputException(
+		    "Unknown hive_insert_existing_partitions_behavior '%s', expected 'append' or 'overwrite'", value);
+	}
+	return behavior == "overwrite";
+}
+
+//! An overwrite deletes the files below a location: refuse an empty one or the root of a bucket
+static void CheckOverwriteLocation(const GlueTableInfo &table_info, const string &location) {
+	auto directory = location;
+	StringUtil::RTrim(directory, "/");
+	auto scheme = directory.find("://");
+	if (directory.empty() || (scheme != string::npos && directory.find('/', scheme + 3) == string::npos)) {
+		throw InvalidInputException("Cannot overwrite data of Hive table '%s' at '%s': the location is empty or the "
+		                            "root of a bucket",
+		                            table_info.name, location);
+	}
+}
 
 //===--------------------------------------------------------------------===//
 // Planning
@@ -70,7 +95,7 @@ static string RelativePartitionPath(const string &table_location, const string &
 static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, optional_ptr<GlueTable> existing_table,
                                                   const GlueTableInfo &table_info, const string &location,
                                                   const vector<Identifier> &names, const vector<LogicalType> &types,
-                                                  const vector<idx_t> &partition_columns,
+                                                  const vector<idx_t> &partition_columns, bool overwrite,
                                                   unordered_map<string, vector<string>> &partition_directories) {
 	FunctionBinder function_binder(context);
 	vector<unique_ptr<Expression>> components;
@@ -94,12 +119,26 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.database_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
+	unordered_map<string, vector<string>> partition_by_location;
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
 			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values, but the table has %d "
 			                            "partition keys",
 			                            StringUtil::Join(partition.values, ", "), table_info.name,
 			                            partition.values.size(), partition_columns.size());
+		}
+		if (overwrite) {
+			// overwriting one of two partitions sharing a location would delete the other's files
+			CheckOverwriteLocation(table_info, partition.location);
+			auto shared_location = partition.location;
+			StringUtil::RTrim(shared_location, "/");
+			auto other = partition_by_location.emplace(shared_location, partition.values);
+			if (!other.second) {
+				throw InvalidInputException("Cannot overwrite partitions of Hive table '%s': partitions [%s] and [%s] "
+				                            "share the location '%s'",
+				                            table_info.name, StringUtil::Join(other.first->second, ", "),
+				                            StringUtil::Join(partition.values, ", "), partition.location);
+			}
 		}
 		string hive_directory;
 		vector<unique_ptr<Expression>> conditions;
@@ -337,8 +376,9 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		copy.partition_columns = partition_columns;
 		copy.write_partition_columns = false;
 		copy.hive_file_pattern = true;
-		copy.partition_path_expression = CreatePartitionPath(context, existing_table, table_info, location, copy_names,
-		                                                     copy_types, partition_columns, partition_directories);
+		copy.partition_path_expression =
+		    CreatePartitionPath(context, existing_table, table_info, location, copy_names, copy_types,
+		                        partition_columns, insert.overwrite, partition_directories);
 		// with partitioned output the copy must not initialize a single (partition-less) output file
 		copy.write_empty_file = true;
 		copy.per_thread_output = false;
@@ -384,6 +424,13 @@ PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPla
 	auto table_info = table.RefreshTableInfo(context);
 	auto &catalog = table.catalog.Cast<GlueCatalog>();
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
+	Value behavior;
+	if (context.TryGetCurrentSetting("hive_insert_existing_partitions_behavior", behavior) && !behavior.IsNull()) {
+		insert.overwrite = IsHiveInsertOverwrite(behavior.ToString());
+	}
+	if (insert.overwrite) {
+		CheckOverwriteLocation(table_info, table_info.location);
+	}
 	PlanWrite(context, planner, op, insert, table, table_info, *plan, names, types, nullptr, nullptr);
 	return insert;
 }
@@ -455,7 +502,17 @@ using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
-	if (table_info.partition_keys.empty() || state.written_files.empty()) {
+	if (table_info.partition_keys.empty()) {
+		if (overwrite) {
+			// the table is one partition, which every insert writes (even one without rows)
+			GluePartitionInput table_partition;
+			table_partition.location = table_info.location;
+			StringUtil::RTrim(table_partition.location, "/");
+			DeleteReplacedFiles(context, {table_partition}, state.written_files);
+		}
+		return SinkFinalizeType::READY;
+	}
+	if (state.written_files.empty()) {
 		return SinkFinalizeType::READY;
 	}
 
@@ -490,7 +547,75 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		to_register.push_back(entry.second);
 	}
 	GlueAPI::BatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
+	if (overwrite) {
+		DeleteReplacedFiles(context, to_register, state.written_files);
+	}
 	return SinkFinalizeType::READY;
+}
+
+void GlueHiveInsert::DeleteReplacedFiles(ClientContext &context, const vector<GluePartitionInput> &written,
+                                         const vector<string> &written_file_list) const {
+	unordered_set<string> written_files(written_file_list.begin(), written_file_list.end());
+	// A file belongs to the deepest partition location containing it, as when reading: leave the files of partitions
+	// registered inside a written one alone
+	vector<string> partition_locations;
+	if (!table_info.partition_keys.empty()) {
+		for (auto &partition : GlueAPI::GetPartitions(context, catalog, table_info.database_name, table_info.name)) {
+			auto partition_location = partition.location;
+			StringUtil::RTrim(partition_location, "/");
+			partition_locations.push_back(std::move(partition_location));
+		}
+	}
+	auto &fs = FileSystem::GetFileSystem(context);
+	vector<string> to_delete;
+	for (auto &partition : written) {
+		auto &directory = partition.location;
+		auto prefix = directory + "/";
+		vector<string> nested;
+		for (auto &partition_location : partition_locations) {
+			if (StringUtil::StartsWith(partition_location, prefix)) {
+				nested.push_back(partition_location + "/");
+			}
+		}
+		idx_t written_below = 0;
+		for (auto &written_file : written_files) {
+			if (StringUtil::StartsWith(written_file, prefix)) {
+				written_below++;
+			}
+		}
+		// listed now, not from the query's listing cache: that one may predate the files this insert wrote
+		auto listing = fs.GlobFileList(prefix + "**", FileGlobOptions::ALLOW_EMPTY);
+		idx_t written_listed = 0;
+		for (auto &file : listing->GetAllFiles()) {
+			auto &path = file.path;
+			if (written_files.count(path)) {
+				written_listed++;
+				continue;
+			}
+			if (!StringUtil::StartsWith(path, prefix) || IsHiddenPath(path.substr(prefix.size()))) {
+				continue;
+			}
+			bool in_nested_partition = false;
+			for (auto &nested_prefix : nested) {
+				if (StringUtil::StartsWith(path, nested_prefix)) {
+					in_nested_partition = true;
+					break;
+				}
+			}
+			if (!in_nested_partition) {
+				to_delete.push_back(path);
+			}
+		}
+		// new and old files are told apart by path: delete nothing unless the listing shows every new one
+		if (written_listed != written_below) {
+			throw IOException("Overwriting '%s' of Hive table '%s': its listing shows %d of the %d files this insert "
+			                  "wrote, so its old files are not deleted",
+			                  directory, table_info.name, written_listed, written_below);
+		}
+	}
+	if (!to_delete.empty()) {
+		fs.RemoveFiles(to_delete);
+	}
 }
 
 SourceResultType GlueHiveInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,

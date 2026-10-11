@@ -13,9 +13,13 @@ class GlueCatalog;
 class GlueSchemaEntry;
 class GlueTable;
 
+//! Whether a hive_insert_existing_partitions_behavior value (case-insensitive) is 'overwrite' rather than 'append';
+//! throws for any other value
+bool IsHiveInsertOverwrite(const string &value);
+
 //! Writes rows into a Hive table registered in Glue: a COPY into the table location (one <key=value> directory level
 //! per partition key, or the location of an existing partition), then the new partition directories are registered in
-//! Glue.
+//! Glue. When overwriting, the data files that were in the partitions it wrote are deleted after that.
 class GlueHiveInsert : public PhysicalOperator {
 public:
 	GlueHiveInsert(PhysicalPlan &physical_plan, LogicalOperator &op, GlueCatalog &catalog, GlueTableInfo table_info);
@@ -58,6 +62,9 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
+	//! Delete the data files in the locations of 'written' that this insert did not write
+	void DeleteReplacedFiles(ClientContext &context, const vector<GluePartitionInput> &written,
+	                         const vector<string> &written_files) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).
@@ -66,6 +73,9 @@ public:
 	GlueTableInfo table_info;
 	//! The directories of existing partitions not laid out as <key=value>, with their Glue values.
 	unordered_map<string, vector<string>> partition_directories;
+	//! hive_insert_existing_partitions_behavior = 'overwrite': delete the data files that were in the partitions
+	//! written
+	bool overwrite = false;
 };
 
 } // namespace duckdb

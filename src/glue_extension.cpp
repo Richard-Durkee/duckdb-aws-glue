@@ -3,12 +3,14 @@
 #include "glue_extension.hpp"
 
 #include "duckdb.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
 #include "functions/glue_functions.hpp"
+#include "planning/glue_hive_insert.hpp"
 #include "grammar/glue_grammar.hpp"
 #include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
@@ -43,6 +45,11 @@ static void InitAWSAPI() {
 	});
 }
 
+static void SetInsertExistingPartitionsBehavior(ClientContext &context, SetScope scope, Value &parameter) {
+	IsHiveInsertOverwrite(parameter.ToString());
+	parameter = Value(StringUtil::Lower(parameter.ToString()));
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &instance = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(instance);
@@ -71,6 +78,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "When a scan reads at least this many partitions below the table location, the location "
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
+
+	config.AddExtensionOption("hive_insert_existing_partitions_behavior",
+	                          "What INSERT into a Hive table does with the data already in the partitions it writes: "
+	                          "'append' (the default) keeps it, 'overwrite' replaces it, like Hive's INSERT OVERWRITE.",
+	                          LogicalType::VARCHAR, Value("append"), SetInsertExistingPartitionsBehavior);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();

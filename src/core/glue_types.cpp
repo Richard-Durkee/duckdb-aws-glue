@@ -269,6 +269,9 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 	case LogicalTypeId::STRUCT: {
 		vector<string> fields;
 		auto &children = StructType::GetChildTypes(type);
+		if (children.empty()) {
+			throw NotImplementedException("DuckDB type '%s' can not be converted to a Glue type", type.ToString());
+		}
 		for (auto &child : children) {
 			auto &name = child.first.GetIdentifierName();
 			// Hive type strings do not quote field names, so these would change the type's structure

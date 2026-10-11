@@ -1,6 +1,6 @@
 # Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
 #
-# A relassert build: DuckDB's assertions and the sanitizers are on, like the build used locally.
+# A release build with DuckDB's assertions and the sanitizers on, i.e. relassert without debug info.
 
 name: Local Glue tests
 
@@ -27,7 +27,7 @@ jobs:
         with:
           submodules: recursive
 
-      # the relassert build (debug info + ASAN) and the test data otherwise fill the runner's disk
+      # the sanitizer build and the test data otherwise fill the runner's disk
       - name: Free disk space
         uses: ./duckdb/.github/actions/cleanup_runner
 
@@ -47,15 +47,17 @@ jobs:
           # PR caches are only visible to the PR itself; at this size they would evict main's from the 10 GB budget
           save: ${{ github.ref == 'refs/heads/main' }}
 
+      # relassert without debug info: on Linux -g makes each loadable extension ~1.5 GB, and the test runner
+      # installs and loads avro, httpfs and glue from build/*/repository for every test database (~25s per test)
       - name: Build
         uses: duckdb/duckdb-ci/build-duckdb@main
         with:
-          build-type: relassert
-          build: make relassert
+          build-type: release
+          build: make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
 
       - name: Run tests
-        run: make test-local TEST_BUILD=relassert
+        run: make test-local TEST_BUILD=release
 
       - name: Server logs
         if: always()

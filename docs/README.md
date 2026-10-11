@@ -78,8 +78,9 @@ their codec themselves.
   (JsonSerDe, one object per line) or avro (AvroSerDe)
   Hive table at `location`, else `<DEFAULT_LOCATION>/<database>/<table>`, else `<database LocationUri>/<table>`;
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
-  PartitionKeys and are listed last in the table's columns. Unknown `WITH` keys are stored as Glue table parameters.
-  Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
+  PartitionKeys and are listed last in the table's columns. Generated columns, column defaults and collated columns
+  (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
+  parameters. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
   `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
@@ -95,11 +96,13 @@ their codec themselves.
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
   into a partition whose location is not below the table location fails; the rows of other partitions can still be
   inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
-  column list must list them last. `CREATE TABLE ... AS` creates the Glue table before the query runs; if the query
-  fails the (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
+  column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
+  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
+  (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created.
-- `ALTER TABLE ... ADD COLUMN` (appended last, no defaults), `DROP COLUMN` (not the last data column, not a
-  partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` update the Glue definition with UpdateTable.
+- `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
+  column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
+  definition with UpdateTable.
   Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped. `ALTER COLUMN ... TYPE ...
   USING <expr>` is refused, since the data files can not be rewritten.
@@ -200,8 +203,10 @@ becomes `CALL glue_alter_table(table, [actions])`: every action is checked again
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.
 
-Listing the partitions of a table - `glue_partitions`, and the binding of every scan of a partitioned table - pages
-through Glue's `GetPartitions`. The pages are asked for in parallel with Glue's Segment API:
+Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
+Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
+`DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query shares one
+fetch. The pages are asked for in parallel with Glue's Segment API:
 `glue_get_partitions_segments` requests run at the same time, each over a segment of the partitions that does not
 overlap with the others. `0`, the default, uses 8 requests against AWS and 1 against a Glue compatible server given
 with `ENDPOINT` (moto ignores `Segment` and answers every segment with the whole table, so the partitions a segment
@@ -237,6 +242,7 @@ The AWS SDK's Glue calls are routed through DuckDB's HTTP layer (httpfs), so the
 certificate settings and appear in the HTTP log:
 
 ```sql
+SET redact_http_logs = false; -- header values (incl. x-amz-target) are redacted by default
 CALL enable_logging('HTTP', storage='memory');
 -- ... run queries ...
 SELECT request.type, request.url, request.headers['x-amz-target'], response.status FROM duckdb_logs_parsed('HTTP');
@@ -271,10 +277,12 @@ environment or a profile the AWS SDK asks the EC2 instance metadata service for 
 minutes per client. A test config can not export process environment variables, so this stays on the command.
 
 `make test-local` runs the tests through DuckDB's `duckdb/scripts/ci/run_tests.py` (Python 3.10+; pick the
-interpreter with `PYTHON=python3.14`), one test per process and one at a time, and reruns a failing test up to twice:
-against the local servers a read right after a write occasionally comes back with no rows. Every retry is reported in
-the output. `TEST_BUILD=release` runs the `release` build instead of
-`relassert`.
+interpreter with `PYTHON=python3.14`), one at a time in batches of `TEST_BATCH_SIZE` (10) tests per process, and reruns
+a failing batch up to twice: against the local servers a read right after a write occasionally comes back with no rows.
+Every retry is reported in the output. `TEST_BUILD=release` runs the `release` build instead of `relassert`. Every
+process first installs the loadable extensions from `build/<type>/repository`; on Linux the debug info of `relassert`
+makes them ~1.5 GB each, so CI tests a `make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1` build (assertions and
+sanitizers, no debug info).
 
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.

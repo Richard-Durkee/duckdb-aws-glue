@@ -37,8 +37,8 @@ SQLLogicTests under `test/sql/`. They need a `--test-config` that sets `GLUE_CAT
 
 - `test/configs/local_glue.json`: moto (Glue, port 5555) + SeaweedFS (S3, port 9100) from `scripts/docker-compose.yml`.
   `make glue-fixture` / `make glue-fixture-down`; `make test-local` runs everything through DuckDB's
-  `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially, retrying a failing test twice: against the local
-  servers a read right after a write occasionally comes back empty.
+  `scripts/ci/run_tests.py` (Python 3.10+, `PYTHON=...`), serially in batches of 10 tests per process, retrying a
+  failing batch twice: against the local servers a read right after a write occasionally comes back empty.
 - `test/configs/cloud_glue.json`: live AWS (credential chain, eu-central-1). `test/sql/cloud/` only runs here
   (`require-env GLUE_TEST_CONFIG cloud`) and reads pre-existing tables in the account.
 
@@ -90,8 +90,9 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   partition filters are pushed down to Glue's partition values before any S3 listing. The `hive_scan` table function
   (`src/functions/hive_scan_function.cpp`) reuses the same reader with schema/partitions given as arguments.
 - **Writing** `src/planning/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format
-  with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. CTAS creates
-  the Glue table at plan time.
+  with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. The copy is
+  `GlueHiveCopy` (`src/execution/hive_copy.cpp`); for CTAS it carries the bound CREATE TABLE and creates the Glue table
+  when the sink starts, before any output is initialized, as `PhysicalInsert` does.
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition

@@ -1,0 +1,90 @@
+# name: test/sql/hive/ddl/create_table/create_table_collate.test
+# description: Collated columns are refused for Glue tables (CREATE TABLE, CTAS, ADD COLUMN, ALTER COLUMN TYPE): a Glue schema can not hold a collation
+# group: [create_table]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.collate_t;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.collate_ctas;
+
+statement error
+CREATE TABLE my_datalake.default.collate_t (id INTEGER, s VARCHAR COLLATE NOCASE);
+----
+Not implemented Error: Collation "NOCASE" of column "s" is not supported for tables in a Glue catalog
+
+statement error
+CREATE TABLE my_datalake.default.collate_t (id INTEGER, s VARCHAR COLLATE NOACCENT.NOCASE) PARTITIONED BY (s);
+----
+of column "s" is not supported
+
+# a collated expression of the query carries the collation into the table
+statement error
+CREATE TABLE my_datalake.default.collate_ctas AS SELECT 'Hello' COLLATE NOCASE AS s;
+----
+Collation "NOCASE" of column "s" is not supported
+
+# nothing was created in Glue
+statement error
+SELECT * FROM my_datalake.default.collate_t;
+----
+does not exist
+
+statement error
+SELECT * FROM my_datalake.default.collate_ctas;
+----
+does not exist
+
+statement ok
+CREATE TABLE my_datalake.default.collate_t (id INTEGER, s VARCHAR);
+
+statement error
+ALTER TABLE my_datalake.default.collate_t ADD COLUMN t VARCHAR COLLATE NOCASE;
+----
+Collation "NOCASE" of column "t" is not supported
+
+statement error
+ALTER TABLE my_datalake.default.collate_t ALTER COLUMN s TYPE VARCHAR COLLATE NOCASE;
+----
+Collation "NOCASE" of column "s" is not supported
+
+statement ok
+INSERT INTO my_datalake.default.collate_t VALUES (1, 'Hello');
+
+# without a stored collation comparisons are case sensitive, an explicit COLLATE in the query still works
+query I
+SELECT count(*) FROM my_datalake.default.collate_t WHERE s = 'hello';
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.collate_t WHERE s COLLATE NOCASE = 'hello';
+----
+1
+
+statement ok
+CREATE TABLE my_datalake.default.collate_ctas AS SELECT s FROM my_datalake.default.collate_t;
+
+query I
+SELECT s FROM my_datalake.default.collate_ctas;
+----
+Hello
+
+statement ok
+DROP TABLE my_datalake.default.collate_ctas;
+
+statement ok
+DROP TABLE my_datalake.default.collate_t;

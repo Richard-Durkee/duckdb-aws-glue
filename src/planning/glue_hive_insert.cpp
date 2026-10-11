@@ -24,15 +24,17 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
+#include "execution/hive_copy.hpp"
 
 namespace duckdb {
 
 //===--------------------------------------------------------------------===//
 // Planning
 //===--------------------------------------------------------------------===//
-GlueHiveInsert::GlueHiveInsert(PhysicalPlan &physical_plan, LogicalOperator &op, GlueTable &table, bool discard)
+GlueHiveInsert::GlueHiveInsert(PhysicalPlan &physical_plan, LogicalOperator &op, GlueCatalog &catalog,
+                               GlueTableInfo table_info_p)
     : PhysicalOperator(physical_plan, PhysicalOperatorType::EXTENSION, {LogicalType::BIGINT}, op.estimated_cardinality),
-      table(table), discard(discard) {
+      catalog(catalog), table_info(std::move(table_info_p)) {
 }
 
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
@@ -65,7 +67,7 @@ static string RelativePartitionPath(const string &table_location, const string &
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
 //! at other locations, which are written to their own location. 'partition_directories' receives the directories of
 //! those partitions with their Glue values.
-static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, GlueTable &table,
+static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, optional_ptr<GlueTable> existing_table,
                                                   const GlueTableInfo &table_info, const string &location,
                                                   const vector<Identifier> &names, const vector<LogicalType> &types,
                                                   const vector<idx_t> &partition_columns,
@@ -82,7 +84,14 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, GlueTa
 	}
 	auto hive_path = function_binder.BindScalarFunction(PathJoinFun::GetFunction(), std::move(components));
 
-	auto &glue_catalog = table.catalog.Cast<GlueCatalog>();
+	// A table created by this CTAS cannot have existing partitions. Planning from
+	// the local definition therefore needs no Glue call and writes every new
+	// partition to the canonical <key>=<value> path below the table location.
+	if (!existing_table) {
+		return hive_path;
+	}
+	D_ASSERT(existing_table);
+	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.database_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	for (auto &partition : partitions) {
@@ -156,12 +165,14 @@ static string ParquetCodecExtension(const string &codec) {
 	return string();
 }
 
-PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &planner, LogicalOperator &op,
-                                            GlueTable &table, PhysicalOperator &plan, const vector<Identifier> &names,
-                                            const vector<LogicalType> &types) {
-	// Ask Glue for the current definition: the location (and the format) may have changed since the entry was
-	// created, e.g. through ALTER TABLE ... SET LOCATION
-	auto table_info = table.RefreshTableInfo(context);
+void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &planner, LogicalOperator &op,
+                               GlueHiveInsert &insert, optional_ptr<GlueTable> existing_table,
+                               const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
+                               const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
+                               unique_ptr<BoundCreateTableInfo> create_info) {
+	const bool creating_table = create_info != nullptr;
+	D_ASSERT(creating_table == static_cast<bool>(create_schema));
+	D_ASSERT(creating_table != static_cast<bool>(existing_table));
 	auto location = table_info.location;
 	StringUtil::RTrim(location, "/");
 
@@ -183,8 +194,10 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 		}
 	}
 
-	// the files are written in the table's format (from its SerDe)
-	auto file_format = table_info.GetFileFormat();
+	// For INSERT, derive the file format from Glue's current SerDe. For CTAS the
+	// table does not exist yet, so use the validated CREATE TABLE option stored in
+	// the local definition.
+	auto file_format = creating_table ? table_info.file_format : table_info.GetFileFormat();
 	auto format_name = HiveFileFormatToString(file_format);
 	// the operator feeding the copy and the columns it produces
 	optional_ptr<PhysicalOperator> source = &plan;
@@ -210,13 +223,25 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	case HiveFileFormat::AVRO:
 		ExtensionHelper::AutoLoadExtension(context, "avro");
 		break;
-	case HiveFileFormat::CSV:
-		// Hive CSV files: the table's dialect, a header line only when the table says so
+	case HiveFileFormat::CSV: {
+		// Hive CSV files: the table's dialect, a header line only when the table says so. For CTAS, take the dialect
+		// from the CREATE TABLE options because there is no fetched SerDe yet; apply the same defaults as
+		// CreateHiveTable + the fetched GlueTableInfo getters.
+		auto delimiter = creating_table ? table_info.csv_delimiter : table_info.GetFieldDelimiter();
+		auto quote = creating_table ? table_info.csv_quote : table_info.GetQuoteCharacter();
+		if (quote.empty()) {
+			quote = "\"";
+		}
+		auto escape = creating_table ? table_info.csv_escape : table_info.GetEscapeCharacter();
+		if (escape.empty()) {
+			escape = quote;
+		}
 		copy_options[Identifier("header")] = {Value::BOOLEAN(table_info.HasHeader())};
-		copy_options[Identifier("delimiter")] = {Value(table_info.GetFieldDelimiter())};
-		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
-		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		copy_options[Identifier("delimiter")] = {Value(delimiter)};
+		copy_options[Identifier("quote")] = {Value(quote)};
+		copy_options[Identifier("escape")] = {Value(escape)};
 		break;
+	}
 	case HiveFileFormat::JSON: {
 		// DuckDB writes JSON the way COPY ... (FORMAT json) does: every row becomes one JSON object (to_json over a
 		// struct of the data columns) and the objects are written line by line with the CSV writer. The partition
@@ -297,10 +322,11 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(copy_types, partition_columns, false);
 	auto function_data = copy_function->function.copy_to_bind(context, bind_input, names_to_write, types_to_write);
 
-	auto &physical_copy = planner.Make<PhysicalCopyToFile>(
-	    GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST), copy_function->function,
-	    std::move(function_data), op.estimated_cardinality);
-	auto &copy = physical_copy.Cast<PhysicalCopyToFile>();
+	auto return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST);
+	auto &copy = planner
+	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
+	                                     op.estimated_cardinality, create_schema, std::move(create_info), table_info)
+	                 .Cast<GlueHiveCopy>();
 	copy.use_tmp_file = false;
 	// files of earlier inserts are kept, so every file needs a unique name
 	copy.filename_pattern.SetFilenamePattern("{uuid}");
@@ -311,7 +337,7 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 		copy.partition_columns = partition_columns;
 		copy.write_partition_columns = false;
 		copy.hive_file_pattern = true;
-		copy.partition_path_expression = CreatePartitionPath(context, table, table_info, location, copy_names,
+		copy.partition_path_expression = CreatePartitionPath(context, existing_table, table_info, location, copy_names,
 		                                                     copy_types, partition_columns, partition_directories);
 		// with partitioned output the copy must not initialize a single (partition-less) output file
 		copy.write_empty_file = true;
@@ -330,10 +356,8 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	copy.expected_types = copy_types;
 	copy.children.push_back(*source);
 
-	auto &insert = planner.Make<GlueHiveInsert>(op, table, false).Cast<GlueHiveInsert>();
 	insert.partition_directories = std::move(partition_directories);
-	insert.children.push_back(physical_copy);
-	return insert;
+	insert.children.push_back(copy);
 }
 
 PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
@@ -355,7 +379,13 @@ PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPla
 		names.push_back(column.Name());
 		types.push_back(column.Type());
 	}
-	return PlanWrite(context, planner, op, table, *plan, names, types);
+	// Ask Glue for the current definition: the location, format, partition layout or dialect may have changed since the
+	// entry was cached (for example through ALTER TABLE ... SET LOCATION).
+	auto table_info = table.RefreshTableInfo(context);
+	auto &catalog = table.catalog.Cast<GlueCatalog>();
+	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
+	PlanWrite(context, planner, op, insert, table, table_info, *plan, names, types, nullptr, nullptr);
+	return insert;
 }
 
 PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,
@@ -368,28 +398,25 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 			    option.first);
 		}
 	}
-	// Create the table in Glue first (Glue has no transactions, the table exists from here on even if the insert
-	// fails), then write the query result into it
-	auto &glue_catalog = op.schema.catalog.Cast<GlueCatalog>();
-	auto transaction = glue_catalog.GetCatalogTransaction(context);
-	auto entry = glue_catalog.CreateTable(transaction, op.schema, *op.info);
 
+	// no Glue call here: PREPARE and prepared statement rebinds plan more than once, the copy creates the table
+	auto &schema = op.schema.Cast<GlueSchemaEntry>();
+	auto &catalog = schema.catalog.Cast<GlueCatalog>();
+	// Catalog::CreateTable would check this, but the copy creates the table through the schema entry
+	auto supported = catalog.SupportsCreateTable(*op.info);
+	if (supported.HasError()) {
+		supported.Throw();
+	}
+	auto table_info = schema.BuildTableInfo(context, op.info->Base());
 	vector<Identifier> names;
 	vector<LogicalType> types;
 	for (auto &column : op.info->Base().columns.Logical()) {
 		names.push_back(column.Name());
 		types.push_back(column.Type());
 	}
-	if (!entry) {
-		// CREATE TABLE IF NOT EXISTS on an existing table: nothing is created and nothing is inserted
-		auto &base = op.info->Base();
-		EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(base.GetTableName()));
-		auto existing = op.schema.LookupEntry(transaction, lookup);
-		auto &insert = planner.Make<GlueHiveInsert>(op, existing->Cast<GlueTable>(), true);
-		insert.children.push_back(plan);
-		return insert;
-	}
-	return PlanWrite(context, planner, op, entry->Cast<GlueTable>(), plan, names, types);
+	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
+	PlanWrite(context, planner, op, insert, nullptr, table_info, plan, names, types, schema, std::move(op.info));
+	return insert;
 }
 
 //===--------------------------------------------------------------------===//
@@ -408,10 +435,7 @@ unique_ptr<GlobalSinkState> GlueHiveInsert::GetGlobalSinkState(ClientContext &co
 SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk, OperatorSinkInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
 	lock_guard<mutex> guard(state.lock);
-	if (discard) {
-		return SinkResultType::NEED_MORE_INPUT;
-	}
-	// the COPY reports (rows written, files written)
+	// The COPY reports (rows written, files written)
 	for (idx_t r = 0; r < chunk.size(); r++) {
 		state.insert_count += chunk.GetValue(0, r).GetValue<idx_t>();
 		auto files = chunk.GetValue(1, r);
@@ -431,8 +455,7 @@ using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
-	auto &table_info = table.table_info;
-	if (discard || table_info.partition_keys.empty() || state.written_files.empty()) {
+	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		return SinkFinalizeType::READY;
 	}
 
@@ -466,8 +489,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	for (auto &entry : partitions) {
 		to_register.push_back(entry.second);
 	}
-	auto &glue_catalog = table.catalog.Cast<GlueCatalog>();
-	GlueAPI::BatchCreatePartitions(context, glue_catalog, table_info.database_name, table_info.name, to_register);
+	GlueAPI::BatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
 	return SinkFinalizeType::READY;
 }
 
@@ -485,7 +507,7 @@ string GlueHiveInsert::GetName() const {
 
 InsertionOrderPreservingMap<string> GlueHiveInsert::ParamsToString() const {
 	InsertionOrderPreservingMap<string> result;
-	result["Table Name"] = table.name.GetIdentifierName();
+	result["Table Name"] = table_info.name;
 	return result;
 }
 

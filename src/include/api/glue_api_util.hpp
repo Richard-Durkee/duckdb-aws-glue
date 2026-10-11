@@ -36,6 +36,11 @@ bool IsEntityNotFound(const OUTCOME &outcome) {
 }
 
 template <class OUTCOME>
+bool IsAccessDenied(const OUTCOME &outcome) {
+	return outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::ACCESS_DENIED;
+}
+
+template <class OUTCOME>
 bool IsAlreadyExists(const OUTCOME &outcome) {
 	return outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::ALREADY_EXISTS;
 }

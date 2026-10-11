@@ -1,6 +1,7 @@
 add_subdirectory(api)
 add_subdirectory(catalog)
 add_subdirectory(core)
+add_subdirectory(execution)
 add_subdirectory(functions)
 add_subdirectory(grammar)
 add_subdirectory(planning)

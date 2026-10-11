@@ -118,43 +118,43 @@ SELECT d FROM glue_partitions('my_datalake.default.dkey_card') ORDER BY d;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.dkey_card;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~400 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~400 rows.*
 
 # a half-open range each way: 2 partitions of 4, holding 200 rows
 query II
 EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d >= DATE '2026-07-01';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/4.*~200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/4.*~200 rows.*
 
 query II
 EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d < DATE '2026-07-01';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/4.*~200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/4.*~200 rows.*
 
 # an exact date: the one partition, holding 100
 query II
 EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d = DATE '2026-01-01';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 1/4.*~100 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/4.*~100 rows.*
 
 # past every partition: pruned to nothing, and zero needs no selectivity to be right
 query II
 EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d > DATE '2027-06-01';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 0/4.*~0 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 0/4.*~0 rows.*
 
 # the control: an IN over two dates is not pushed into the scan, so the scan's own count over the two
 # partitions it kept is visible and exact
 query II
 EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d IN (DATE '2026-01-01', DATE '2026-07-20');
 ----
-physical_plan	<REGEX>:.*Read Parquet.*Scanning Files: 2/4.*~200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/4.*~200 rows.*
 
 # a BETWEEN spanning every partition prunes nothing, and is true of every row
 query II
 EXPLAIN SELECT * FROM my_datalake.default.dkey_card WHERE d BETWEEN DATE '2026-01-01' AND DATE '2026-10-28';
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~400 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~400 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.dkey;

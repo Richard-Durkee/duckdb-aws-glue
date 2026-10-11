@@ -73,7 +73,7 @@ void GlueCatalog::Initialize(bool load_builtin) {
 
 ErrorData GlueCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	auto &base = info.Base().Cast<CreateTableInfo>();
-	// PARTITIONED BY is accepted here and validated in GlueSchemaEntry::CreateTable (Hive tables only, plain
+	// PARTITIONED BY is accepted here and validated in GlueSchemaEntry::BuildTableInfo (Hive tables only, plain
 	// column references)
 	if (!base.sort_keys.empty()) {
 		return ErrorData(ExceptionType::CATALOG, "SORTED BY is not supported for tables in a Glue catalog, the sort "
@@ -173,7 +173,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 	} else if (StringUtil::CIEquals(key, "location")) {
 		StringUtil::RTrim(string_value, "/");
 		if (string_value.empty()) {
-			throw BinderException("The location of Glue database \"%s\" must not be empty", database.name);
+			throw InvalidInputException("The location of Glue database \"%s\" must not be empty", database.name);
 		}
 		database.location_uri = string_value;
 	} else {

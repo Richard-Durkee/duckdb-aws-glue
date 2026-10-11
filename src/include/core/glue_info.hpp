@@ -129,6 +129,7 @@ public:
 
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB
 struct GlueViewInfo {
+	//! The Glue database (a DuckDB schema) the view lives in
 	string database_name;
 	string name;
 	//! The SELECT as DuckDB prints it; unqualified names in it belong to database_name

@@ -1,0 +1,60 @@
+# One-off benchmark for hive_partition_listing_parallelism, not part of the PR: runs on pushes to this branch only.
+name: Listing benchmark
+
+on:
+  push:
+    branches:
+      - hive-parallel-listing-bench
+
+jobs:
+  listing-benchmark:
+    runs-on: ubuntu-latest
+
+    env:
+      GEN: ninja
+      AWS_EC2_METADATA_DISABLED: "true"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Free disk space
+        uses: ./duckdb/.github/actions/cleanup_runner
+
+      - uses: docker/setup-compose-action@v1
+
+      - name: Start Glue (moto) and S3 (SeaweedFS)
+        run: docker compose -f scripts/docker-compose.yml up -d --wait
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y -qq
+          sudo apt-get install -y -qq ninja-build iproute2
+
+      - name: Setup Ccache
+        uses: ./duckdb/.github/actions/ccache-action
+        with:
+          save: false
+
+      - name: Build
+        uses: duckdb/duckdb-ci/build-duckdb@main
+        with:
+          build-type: release
+          build: make release
+          vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
+
+      - name: Add 10 ms latency each way (20 ms round trip) to the fixture's traffic
+        run: |
+          rtt() { for i in 1 2 3; do curl -o /dev/null -s -w '%{time_total}\n' http://localhost:9100/; done; }
+          echo "before:"; rtt
+          sudo tc qdisc add dev lo root netem delay 10ms
+          echo "after (lo):"; rtt
+          # with the userland proxy off, published ports bypass lo
+          if [ "$(rtt | sort -n | head -1 | awk '{print ($1 < 0.015)}')" = "1" ]; then
+            sudo tc qdisc add dev docker0 root netem delay 10ms
+            echo "after (docker0):"; rtt
+          fi
+
+      - name: Benchmark
+        run: python3 scripts/listing_bench.py "$GITHUB_STEP_SUMMARY"

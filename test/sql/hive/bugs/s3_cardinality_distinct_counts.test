@@ -20,6 +20,10 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
+# off by default
+statement ok
+SET hive_parquet_footer_statistics = true;
+
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.ndv_dim;
 
@@ -63,6 +67,36 @@ query II
 EXPLAIN SELECT count(*) FROM my_datalake.default.ndv_dim a, my_datalake.default.ndv_dim b WHERE a.low = b.low AND a.id < 10;
 ----
 physical_plan	<REGEX>:.*Hash Join.*~[0-9]{2},[0-9]{3} rows.*
+
+# without the footers: the row count from one file, and no distinct count, so the filter takes the default 0.2
+statement ok
+SET hive_parquet_footer_statistics = false;
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.ndv_dim;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~100,000 rows.*
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.ndv_dim WHERE low = 'v3';
+----
+physical_plan	<REGEX>:.*Hive Scan.*~20,000 rows.*
+
+statement ok
+RESET hive_parquet_footer_statistics;
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.ndv_dim WHERE low = 'v3';
+----
+physical_plan	<REGEX>:.*Hive Scan.*~20,000 rows.*
+
+statement ok
+SET hive_parquet_footer_statistics = true;
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.ndv_dim WHERE low = 'v3';
+----
+physical_plan	<REGEX>:.*Hive Scan.*~10,000 rows.*
 
 # the statistics are only a distinct count: no min/max, so nothing is pruned on them
 query IIII

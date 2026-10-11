@@ -175,6 +175,14 @@ static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &
 	return optional_idx();
 }
 
+static bool FooterStatisticsEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_parquet_footer_statistics", setting) && !setting.IsNull()) {
+		return setting.GetValue<bool>();
+	}
+	return false;
+}
+
 //! Measure the table a scan reads, the first time a scan of it asks in this query. It measures files, which a
 //! predicate does not change: the predicate only decides how many partitions a scan reads.
 static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindData &bind_data,
@@ -225,7 +233,7 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 			return sample;
 		}
 		if (info.file_format == HiveFileFormat::PARQUET && info.partition_keys.empty() &&
-		    listed.size() <= FOOTER_STATISTICS_MAX_FILES) {
+		    listed.size() <= FOOTER_STATISTICS_MAX_FILES && FooterStatisticsEnabled(context)) {
 			// the listing holds every file the scans read, so their footers describe the whole table
 			HiveFooterStatistics footers;
 			if (ReadFooterStatistics(context, info, listed, footers)) {

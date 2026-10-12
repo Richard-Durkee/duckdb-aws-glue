@@ -105,7 +105,7 @@ SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_null
 2	\N	false	3.5
 
 #---------------------------------------------------------------------------
-# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse fails the scan
+# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse is NULL
 #---------------------------------------------------------------------------
 statement ok
 COPY (SELECT * FROM (VALUES

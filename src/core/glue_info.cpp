@@ -138,10 +138,11 @@ HiveSerDe GlueTableInfo::GetSerDe() const {
 	if (StringUtil::Contains(serde, "avro")) {
 		return HiveSerDe::AVRO;
 	}
-	throw NotImplementedException("Hive table '%s.%s' uses SerDe '%s', only parquet (ParquetHiveSerDe), csv "
-	                              "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe) and avro (AvroSerDe) tables are "
-	                              "supported",
-	                              database_name, name, serde_library);
+	throw NotImplementedException(
+	    "Hive table '%s.%s' uses SerDe '%s', only parquet (ParquetHiveSerDe), csv "
+	    "(LazySimpleSerDe, OpenCSVSerde), json (JsonSerDe) and avro (AvroSerDe) tables can be "
+	    "read and written; use glue_get_table_response() to inspect the table definition",
+	    database_name, name, serde_library);
 }
 
 HiveFileFormat GlueTableInfo::GetFileFormat() const {

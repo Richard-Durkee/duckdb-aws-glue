@@ -68,7 +68,9 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 	case GlueTableFormat::HIVE:
 		return GetHiveScanFunction(context, bind_data, latest_info);
 	default:
-		throw NotImplementedException("Scan from table with type %s", latest_info.GetFormatName());
+		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
+		                              "glue_get_table_response() to inspect its definition",
+		                              latest_info.database_name, latest_info.name, latest_info.GetFormatName());
 	}
 }
 

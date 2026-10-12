@@ -62,6 +62,13 @@ struct HiveTablePartitionsEntry {
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
 };
 
+//! A directory's recursive listing, fetched a page at a time as it's read
+struct HiveDirectoryListingEntry {
+	annotated_mutex lock;
+	//! Stays null until some scan first asks for this directory
+	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
+};
+
 static constexpr const char *HIVE_QUERY_CACHE = "glue_hive_query_cache";
 
 //! What the scans of the running query share per table and directory, dropped when the query ends
@@ -89,22 +96,20 @@ public:
 		}
 		return entry;
 	}
-	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory) {
+	shared_ptr<HiveDirectoryListingEntry> GetDirectoryListing(const string &directory) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &listing = directory_listings[directory];
-		if (!listing) {
-			auto &fs = FileSystem::GetFileSystem(context);
-			listing = shared_ptr<MultiFileList>(fs.GlobFileList(directory + "/**", FileGlobOptions::ALLOW_EMPTY));
+		auto &entry = directory_listings[directory];
+		if (!entry) {
+			entry = make_shared_ptr<HiveDirectoryListingEntry>();
 		}
-		return listing;
+		return entry;
 	}
 
 private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTablePartitionsEntry>> partitions DUCKDB_GUARDED_BY(lock);
-	//! The recursive listing of a directory, fetched page by page as it is read
-	unordered_map<string, shared_ptr<MultiFileList>> directory_listings DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
 };
 
 static shared_ptr<HiveQueryCache> GetQueryCache(ClientContext &context) {
@@ -122,7 +127,16 @@ static string DirectoryKey(const string &location) {
 }
 
 shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory) {
-	return GetQueryCache(context)->GetDirectoryListing(context, DirectoryKey(directory));
+	auto key = DirectoryKey(directory);
+	auto entry = GetQueryCache(context)->GetDirectoryListing(key);
+	// lock per directory: GlobFileList fetches the first page right away, and we don't want listings of other
+	// directories stuck behind it
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->listing) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		entry->listing = shared_ptr<MultiFileList>(fs.GlobFileList(key + "/**", FileGlobOptions::ALLOW_EMPTY));
+	}
+	return entry->listing;
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {

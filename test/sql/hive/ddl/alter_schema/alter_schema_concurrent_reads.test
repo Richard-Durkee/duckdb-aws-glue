@@ -1,0 +1,57 @@
+# name: test/sql/hive/ddl/alter_schema/alter_schema_concurrent_reads.test
+# description: ALTER SCHEMA while other connections read tables of the schema
+# group: [alter_schema]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.alter_schema_reads CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.alter_schema_reads;
+
+statement ok
+CREATE TABLE my_datalake.alter_schema_reads.events (id INTEGER);
+
+statement ok
+INSERT INTO my_datalake.alter_schema_reads.events VALUES (1), (2), (3);
+
+# every ALTER SCHEMA replaces the cached schema entry and the table entries it holds, which statements running on
+# other connections may still be using
+concurrentloop threadid 0 8
+
+loop i 0 5
+
+statement ok
+ALTER SCHEMA my_datalake.alter_schema_reads SET (comment = 'run {threadid}-{i}');
+
+query I
+SELECT sum(id) FROM my_datalake.alter_schema_reads.events
+----
+6
+
+statement ok
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = 'alter_schema_reads'
+
+endloop
+
+endloop
+
+query I
+SELECT sum(id) FROM my_datalake.alter_schema_reads.events
+----
+6
+
+statement ok
+DROP SCHEMA my_datalake.alter_schema_reads CASCADE;

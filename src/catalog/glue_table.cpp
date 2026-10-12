@@ -79,7 +79,9 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 	case GlueTableFormat::HIVE:
 		return GetHiveScanFunction(context, bind_data, *latest_info);
 	default:
-		throw NotImplementedException("Scan from table with type %s", latest_info->GetFormatName());
+		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
+		                              "glue_get_table_response() to inspect its definition",
+		                              latest_info->database_name, latest_info->name, latest_info->GetFormatName());
 	}
 }
 
@@ -97,10 +99,12 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->table = this;
 	scan_info->root_location = latest_info.location;
 	scan_info->file_format = latest_info.GetFileFormat();
-	scan_info->delimiter = latest_info.GetFieldDelimiter();
-	scan_info->quote = latest_info.GetQuoteCharacter();
-	scan_info->escape = latest_info.GetEscapeCharacter();
-	scan_info->header = latest_info.HasHeader();
+	if (IsTextFileFormat(scan_info->file_format)) {
+		latest_info.CheckTextSerdeSupported(scan_info->file_format);
+	}
+	if (scan_info->file_format == HiveFileFormat::CSV) {
+		scan_info->csv_options = latest_info.GetCSVOptions();
+	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

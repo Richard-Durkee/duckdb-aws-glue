@@ -24,13 +24,15 @@ public:
 	//! Insert a (new) schema entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<GlueSchemaEntry> entry);
 	void RemoveEntry(const string &name);
-	void ClearEntries();
 
 	//! Build a schema catalog entry from a Glue database definition
 	unique_ptr<GlueSchemaEntry> CreateSchemaEntry(const GlueDatabaseInfo &database);
 
 private:
 	void LoadEntries(ClientContext &context);
+	//! Move an entry out of the set; the transaction manager keeps it, and the tables it caches, alive while a
+	//! running statement may use them. Called with entry_lock held.
+	void RetireEntry(const string &name);
 
 private:
 	GlueCatalog &catalog;

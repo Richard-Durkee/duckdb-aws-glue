@@ -301,6 +301,10 @@ PhysicalOperator &GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlan
 	    GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST), copy_function->function,
 	    std::move(function_data), op.estimated_cardinality);
 	auto &copy = physical_copy.Cast<PhysicalCopyToFile>();
+	// as the COPY binder does: without it every chunk becomes a batch of its own (a 2048-row parquet row group)
+	if (copy.function.desired_batch_size) {
+		copy.batch_size = copy.function.desired_batch_size(context, *copy.bind_data);
+	}
 	copy.use_tmp_file = false;
 	// files of earlier inserts are kept, so every file needs a unique name
 	copy.filename_pattern.SetFilenamePattern("{uuid}");

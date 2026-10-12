@@ -127,7 +127,6 @@ public:
 	HiveSerDe GetSerDe() const;
 	//! The file format of the data files, derived from the SerDe; throws NotImplementedException for other SerDes
 	HiveFileFormat GetFileFormat() const;
-	bool IsOpenCSVSerde() const;
 	//! A property of the table as Hive hands it to the SerDe: a table parameter, else a SerDe parameter
 	bool TryGetProperty(const string &key, string &result) const;
 	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'

@@ -283,7 +283,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 			                              table_info.database_name, table_info.name, header_lines);
 		}
 		auto delimiter = table_info.GetFieldDelimiter();
-		auto quoted = table_info.IsOpenCSVSerde();
+		auto quoted = table_info.GetSerDe() == HiveSerDe::OPEN_CSV;
 		auto null_string = table_info.GetNullFormat();
 		if (delimiter.size() > 1) {
 			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: DuckDB writes single-byte "

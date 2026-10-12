@@ -148,10 +148,6 @@ HiveFileFormat GlueTableInfo::GetFileFormat() const {
 	return HiveSerDeFileFormat(GetSerDe());
 }
 
-bool GlueTableInfo::IsOpenCSVSerde() const {
-	return StringUtil::Contains(StringUtil::Lower(serde_library), "opencsvserde");
-}
-
 bool GlueTableInfo::TryGetProperty(const string &key, string &result) const {
 	// as Hive: the table's parameters override the SerDe's, and keys are case-sensitive
 	for (auto properties : {&parameters, &serde_parameters}) {
@@ -194,7 +190,7 @@ static string LazySimpleSeparator(const GlueTableInfo &table, const string &valu
 }
 
 string GlueTableInfo::GetFieldDelimiter() const {
-	if (IsOpenCSVSerde()) {
+	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
 		return GetOpenCSVCharacter("separatorChar", ",");
 	}
 	string delimiter;
@@ -205,7 +201,7 @@ string GlueTableInfo::GetFieldDelimiter() const {
 }
 
 string GlueTableInfo::GetNullFormat() const {
-	if (IsOpenCSVSerde()) {
+	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
 		return string();
 	}
 	string null_format;
@@ -250,7 +246,7 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 			                          column.type));
 		}
 	}
-	if (IsOpenCSVSerde()) {
+	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
 		if (GetQuoteCharacter().size() > 1 || GetEscapeCharacter().size() > 1) {
 			refuse("has a quoteChar or escapeChar of more than one byte");
 		}
@@ -324,11 +320,11 @@ string GlueTableInfo::GetCompressionLevel() const {
 
 string GlueTableInfo::GetQuoteCharacter() const {
 	// LazySimpleSerDe does not quote
-	return IsOpenCSVSerde() ? GetOpenCSVCharacter("quoteChar", "\"") : string();
+	return GetSerDe() == HiveSerDe::OPEN_CSV ? GetOpenCSVCharacter("quoteChar", "\"") : string();
 }
 
 string GlueTableInfo::GetEscapeCharacter() const {
-	return IsOpenCSVSerde() ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
+	return GetSerDe() == HiveSerDe::OPEN_CSV ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
 }
 
 HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
@@ -338,7 +334,7 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	options.escape = GetEscapeCharacter();
 	options.skip_lines = GetHeaderLineCount();
 	// OpenCSVSerde has no NULL: "\n" matches no unquoted field
-	options.null_string = IsOpenCSVSerde() ? "\n" : GetNullFormat();
+	options.null_string = GetSerDe() == HiveSerDe::OPEN_CSV ? "\n" : GetNullFormat();
 	options.serde_fields = true;
 	return options;
 }

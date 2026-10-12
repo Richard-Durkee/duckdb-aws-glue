@@ -132,8 +132,8 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 		storage_descriptor.SetInputFormat("org.apache.hadoop.mapred.TextInputFormat");
 		storage_descriptor.SetOutputFormat("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat");
 		parameters.emplace("classification", "csv");
-		parameters.emplace("delimiter",
-		                   table.serde_parameters.at(table.IsOpenCSVSerde() ? "separatorChar" : "field.delim"));
+		parameters.emplace("delimiter", table.serde_parameters.at(
+		                                    table.GetSerDe() == HiveSerDe::OPEN_CSV ? "separatorChar" : "field.delim"));
 		break;
 	case HiveFileFormat::JSON:
 		// one JSON object per line

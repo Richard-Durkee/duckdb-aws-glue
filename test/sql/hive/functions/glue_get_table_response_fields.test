@@ -1,0 +1,61 @@
+# name: test/sql/hive/functions/glue_get_table_response_fields.test
+# description: glue_get_table_response has the Glue table's fields as typed columns, so none of them needs the VARIANT
+# group: [functions]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET glue_create_bucketed_tables = true;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.response_fields;
+
+statement ok
+CREATE TABLE my_datalake.default.response_fields (id INTEGER, v VARCHAR)
+WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'SortOrder': 0}]);
+
+query IIIIII
+SELECT input_format, output_format, compressed, number_of_buckets, bucket_columns, sort_columns
+FROM glue_get_table_response('my_datalake.default.response_fields');
+----
+org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat	org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat	false	4	[id]	[{'name': id, 'sort_order': DESC}]
+
+# the times are TIMESTAMPs, the create time recent
+query II
+SELECT typeof(create_time), create_time > now()::TIMESTAMP - INTERVAL 1 DAY
+FROM glue_get_table_response('my_datalake.default.response_fields');
+----
+TIMESTAMP	true
+
+# the typed columns agree with the raw response
+query I
+SELECT number_of_buckets = response.StorageDescriptor.NumberOfBuckets::INTEGER
+FROM glue_get_table_response('my_datalake.default.response_fields');
+----
+true
+
+# an unbucketed, unsorted table: no buckets and no sort columns
+statement ok
+DROP TABLE my_datalake.default.response_fields;
+
+statement ok
+CREATE TABLE my_datalake.default.response_fields (id INTEGER);
+
+query III
+SELECT number_of_buckets, bucket_columns, sort_columns FROM glue_get_table_response('my_datalake.default.response_fields');
+----
+NULL	[]	[]
+
+statement ok
+DROP TABLE my_datalake.default.response_fields;

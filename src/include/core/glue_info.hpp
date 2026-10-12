@@ -86,6 +86,10 @@ struct GlueTableInfo {
 	string view_expanded_text;
 	//! Table Description
 	string description;
+	//! Owner, and CreateTime / LastAccessTime in seconds since the epoch (-1 when Glue has none)
+	string owner;
+	int64_t create_time = -1;
+	int64_t last_access_time = -1;
 	//! StorageDescriptor.Location
 	string location;
 	string input_format;
@@ -93,6 +97,8 @@ struct GlueTableInfo {
 	//! StorageDescriptor.SerdeInfo: decides how the data files are read
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
+	//! StorageDescriptor.Compressed
+	bool compressed = false;
 	vector<GlueColumn> columns;
 	vector<GlueColumn> partition_keys;
 	//! StorageDescriptor.BucketColumns / NumberOfBuckets / SortColumns

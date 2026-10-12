@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/qualified_name.hpp"
@@ -37,8 +38,12 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	auto column_type = LogicalType::LIST(LogicalType::STRUCT(
 	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}));
 	auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
-	names = {"database_name", "table_name",     "table_type", "glue_table_type",  "location", "serde_library",
-	         "columns",       "partition_keys", "parameters", "serde_parameters", "response"};
+	auto sort_type =
+	    LogicalType::LIST(LogicalType::STRUCT({{"name", LogicalType::VARCHAR}, {"sort_order", LogicalType::VARCHAR}}));
+	names = {"database_name", "table_name",        "table_type",       "glue_table_type", "location",
+	         "serde_library", "columns",           "partition_keys",   "parameters",      "serde_parameters",
+	         "owner",         "create_time",       "last_access_time", "input_format",    "output_format",
+	         "compressed",    "number_of_buckets", "bucket_columns",   "sort_columns",    "response"};
 	return_types = {LogicalType::VARCHAR,
 	                LogicalType::VARCHAR,
 	                LogicalType::VARCHAR,
@@ -49,6 +54,15 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	                column_type,
 	                map_type,
 	                map_type,
+	                LogicalType::VARCHAR,
+	                LogicalType::TIMESTAMP,
+	                LogicalType::TIMESTAMP,
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::BOOLEAN,
+	                LogicalType::INTEGER,
+	                LogicalType::LIST(LogicalType::VARCHAR),
+	                sort_type,
 	                LogicalType::VARIANT()};
 	return std::move(result);
 }
@@ -97,11 +111,37 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 	output.data[7].Append(ColumnsToValue(table.partition_keys, output.data[7].GetType()));
 	output.data[8].Append(MapToValue(table.parameters));
 	output.data[9].Append(MapToValue(table.serde_parameters));
+	// the rest of the Glue table's fields, so a query needs no VARIANT for them
+	auto time_value = [](int64_t seconds) {
+		return seconds < 0 ? Value(LogicalType::TIMESTAMP) : Value::TIMESTAMP(Timestamp::FromEpochSeconds(seconds));
+	};
+	auto text_value = [](const string &text) {
+		return text.empty() ? Value(LogicalType::VARCHAR) : Value(text);
+	};
+	output.data[10].Append(text_value(table.owner));
+	output.data[11].Append(time_value(table.create_time));
+	output.data[12].Append(time_value(table.last_access_time));
+	output.data[13].Append(text_value(table.input_format));
+	output.data[14].Append(text_value(table.output_format));
+	output.data[15].Append(Value::BOOLEAN(table.compressed));
+	output.data[16].Append(table.number_of_buckets < 0 ? Value(LogicalType::INTEGER)
+	                                                   : Value::INTEGER(table.number_of_buckets));
+	vector<Value> bucket_columns;
+	for (auto &column : table.bucket_columns) {
+		bucket_columns.emplace_back(column);
+	}
+	output.data[17].Append(Value::LIST(LogicalType::VARCHAR, std::move(bucket_columns)));
+	vector<Value> sort_columns;
+	for (auto &column : table.sort_columns) {
+		sort_columns.push_back(
+		    Value::STRUCT({{"name", Value(column.name)}, {"sort_order", Value(column.DescribeSortOrder())}}));
+	}
+	output.data[18].Append(Value::LIST(ListType::GetChildType(output.data[18].GetType()), std::move(sort_columns)));
 
 	// The complete Glue Table object: JSON as serialized by the AWS SDK, cast to VARIANT
 	Vector json(LogicalType::JSON(), 1);
 	json.SetValue(0, Value(bind_data.raw_json));
-	VectorOperations::Cast(context, json, output.data[10], 1);
+	VectorOperations::Cast(context, json, output.data[19], 1);
 
 	output.CheckCardinality(1);
 }

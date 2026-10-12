@@ -251,8 +251,9 @@ SELECT * FROM glue_get_table_response('my_datalake.default.some_table');
 SELECT response.StorageDescriptor.Location FROM glue_get_table_response('my_datalake.default.some_table');
 ```
 
-It returns one row with the classification, the Glue table type, location, SerDe, columns, partition keys and
-parameters as columns, plus the complete Glue `Table` object as a VARIANT in `response`. A partially qualified name
+It returns one row with the classification, the Glue table type, location, SerDe, columns, partition keys,
+parameters, owner, create and last access times (UTC `TIMESTAMP`s), input and output format, compression, buckets and
+sort columns as columns, plus the complete Glue `Table` object as a VARIANT in `response`. A partially qualified name
 (`'default.some_table'`, or `'some_table'` after `USE my_datalake.default`) is resolved like in a query, through the
 table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
 name.

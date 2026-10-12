@@ -11,7 +11,8 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 
 //! glue_get_table_response('<catalog>.<schema>.<table>'): the Glue GetTable response for a table of an attached
 //! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
-//! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.
+//! One row with the Glue Table's fields as typed columns (times as UTC TIMESTAMPs) and the complete Glue Table
+//! object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
 //! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (schema) of an
 //! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and

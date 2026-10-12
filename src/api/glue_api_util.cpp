@@ -52,12 +52,20 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	if (table.DescriptionHasBeenSet()) {
 		result.description = ToStdString(table.GetDescription());
 	}
+	result.owner = ToStdString(table.GetOwner());
+	if (table.CreateTimeHasBeenSet()) {
+		result.create_time = table.GetCreateTime().Seconds();
+	}
+	if (table.LastAccessTimeHasBeenSet()) {
+		result.last_access_time = table.GetLastAccessTime().Seconds();
+	}
 	auto &storage_descriptor = table.GetStorageDescriptor();
 	result.location = ToStdString(storage_descriptor.GetLocation());
 	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
 	result.output_format = ToStdString(storage_descriptor.GetOutputFormat());
 	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
+	result.compressed = storage_descriptor.GetCompressed();
 	result.columns = ToColumns(storage_descriptor.GetColumns());
 	result.partition_keys = ToColumns(table.GetPartitionKeys());
 	for (auto &column : storage_descriptor.GetBucketColumns()) {

@@ -102,7 +102,7 @@ SELECT count(*) FROM my_datalake.default.csv_un1;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_un1;
 ----
-physical_plan	<REGEX>:.*Read Csv.*~1,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,000 rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.csv_un3 (id INTEGER, v VARCHAR) WITH (format = 'csv');
@@ -124,7 +124,7 @@ SELECT count(*) FROM my_datalake.default.csv_un3;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_un3;
 ----
-physical_plan	<REGEX>:.*Read Csv.*~1,200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,200 rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.csv_p1 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv');
@@ -141,7 +141,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.csv_p1')), (SE
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_p1;
 ----
-physical_plan	<REGEX>:.*Read Csv.*~1,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,000 rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.csv_p3 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv');
@@ -163,7 +163,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.csv_p3')), (SE
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_p3;
 ----
-physical_plan	<REGEX>:.*Read Csv.*~1,200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,200 rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # csv, skewed: the partitions differ in files per partition AND in rows per file
@@ -218,7 +218,7 @@ SELECT
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_skw;
 ----
-physical_plan	<REGEX>:.*Read Csv.*~40 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~40 rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # json -- the same five shapes. json is written one object per line, so it is line-counted like csv.
@@ -238,7 +238,7 @@ SELECT count(*) FROM my_datalake.default.json_un1;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.json_un1;
 ----
-physical_plan	<REGEX>:.*Read Json.*~1,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,000 rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.json_un3 (id INTEGER, v VARCHAR) WITH (format = 'json');
@@ -258,7 +258,7 @@ SELECT count(*) FROM my_datalake.default.json_un3;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.json_un3;
 ----
-physical_plan	<REGEX>:.*Read Json.*~1,200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,200 rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.json_p1 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'json');
@@ -274,7 +274,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.json_p1')), (S
 query II
 EXPLAIN SELECT * FROM my_datalake.default.json_p1;
 ----
-physical_plan	<REGEX>:.*Read Json.*~1,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,000 rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.json_p3 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'json');
@@ -294,7 +294,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.json_p3')), (S
 query II
 EXPLAIN SELECT * FROM my_datalake.default.json_p3;
 ----
-physical_plan	<REGEX>:.*Read Json.*~1,200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~1,200 rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.json_skw (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'json');
@@ -324,7 +324,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.json_skw')), (
 query II
 EXPLAIN SELECT * FROM my_datalake.default.json_skw;
 ----
-physical_plan	<REGEX>:.*Read Json.*~40 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~40 rows.*
 
 # ----------------------------------------------------------------------------------------------------
 # compressed csv -- the lines of a compressed prefix are noise, and its size is not the file's. gzip
@@ -349,7 +349,7 @@ SELECT count(*) FROM my_datalake.default.csv_gz;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_gz;
 ----
-physical_plan	<REGEX>:.*Read Csv.*~2[0-3],[0-9]{3} rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~2[0-3],[0-9]{3} rows.*
 
 statement ok
 CREATE TABLE my_datalake.default.csv_zst (id INTEGER, v VARCHAR) WITH (format = 'csv');
@@ -367,7 +367,7 @@ SELECT count(*) FROM my_datalake.default.csv_zst;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_zst;
 ----
-physical_plan	<REGEX>:.*Read Csv.*~1 row.*
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
 # snappy, lz4, bzip2 and deflate are not measured either. DuckDB writes none of them, so gzip bytes stand in
 # under each extension; that is what one of these files looks like to the sampler, and a line count of them
@@ -387,7 +387,7 @@ TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/csv_{codec}/data.csv.{codec}' (FORM
 query II
 EXPLAIN SELECT * FROM my_datalake.default.csv_{codec};
 ----
-physical_plan	<REGEX>:.*Read Csv.*~1 row.*
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
 statement ok
 DROP TABLE my_datalake.default.csv_{codec};
@@ -416,7 +416,7 @@ SELECT count(*) FROM my_datalake.default.avro_un1;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.avro_un1;
 ----
-physical_plan	<REGEX>:.*Read Avro.*~1 row.*
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
 statement ok
 CREATE TABLE my_datalake.default.avro_un3 (id INTEGER, v VARCHAR) WITH (format = 'avro');
@@ -436,7 +436,7 @@ SELECT count(*) FROM my_datalake.default.avro_un3;
 query II
 EXPLAIN SELECT * FROM my_datalake.default.avro_un3;
 ----
-physical_plan	<REGEX>:.*Read Avro.*~1 row.*
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
 statement ok
 CREATE TABLE my_datalake.default.avro_p1 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'avro');
@@ -452,7 +452,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.avro_p1')), (S
 query II
 EXPLAIN SELECT * FROM my_datalake.default.avro_p1;
 ----
-physical_plan	<REGEX>:.*Read Avro.*~1 row.*
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
 statement ok
 CREATE TABLE my_datalake.default.avro_p3 (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'avro');
@@ -472,7 +472,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.avro_p3')), (S
 query II
 EXPLAIN SELECT * FROM my_datalake.default.avro_p3;
 ----
-physical_plan	<REGEX>:.*Read Avro.*~1 row.*
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
 statement ok
 CREATE TABLE my_datalake.default.avro_skw (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'avro');
@@ -502,7 +502,7 @@ SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.avro_skw')), (
 query II
 EXPLAIN SELECT * FROM my_datalake.default.avro_skw;
 ----
-physical_plan	<REGEX>:.*Read Avro.*~1 row.*
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
 
 statement ok
 DROP TABLE my_datalake.default.csv_un1;

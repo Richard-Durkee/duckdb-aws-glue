@@ -73,7 +73,7 @@ void GlueCatalog::Initialize(bool load_builtin) {
 
 ErrorData GlueCatalog::SupportsCreateTable(BoundCreateTableInfo &info) {
 	auto &base = info.Base().Cast<CreateTableInfo>();
-	// PARTITIONED BY is accepted here and validated in GlueSchemaEntry::CreateTable (Hive tables only, plain
+	// PARTITIONED BY is accepted here and validated in GlueSchemaEntry::BuildTableInfo (Hive tables only, plain
 	// column references)
 	if (!base.sort_keys.empty()) {
 		return ErrorData(ExceptionType::CATALOG, "SORTED BY is not supported for tables in a Glue catalog, the sort "
@@ -173,7 +173,7 @@ void GlueCatalog::SetDatabaseOption(GlueDatabaseInfo &database, const string &ke
 	} else if (StringUtil::CIEquals(key, "location")) {
 		StringUtil::RTrim(string_value, "/");
 		if (string_value.empty()) {
-			throw BinderException("The location of Glue database \"%s\" must not be empty", database.name);
+			throw InvalidInputException("The location of Glue database \"%s\" must not be empty", database.name);
 		}
 		database.location_uri = string_value;
 	} else {
@@ -293,6 +293,14 @@ GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char 
 		                              "write a bucketed layout.",
 		                              statement, table.name.GetIdentifierName(),
 		                              glue_table.table_info.DescribeBucketing());
+	}
+	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
+	// keys DuckDB writes
+	if (glue_table.table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
+		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses the OpenX JSON SerDe "
+		                              "'%s', DuckDB writes JSON tables only with the Hive JsonSerDe "
+		                              "(org.apache.hive.hcatalog.data.JsonSerDe)",
+		                              statement, table.name.GetIdentifierName(), glue_table.table_info.serde_library);
 	}
 	return glue_table;
 }

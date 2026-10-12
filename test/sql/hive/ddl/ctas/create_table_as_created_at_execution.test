@@ -1,0 +1,274 @@
+# name: test/sql/hive/ddl/ctas/create_table_as_created_at_execution.test
+# description: CREATE TABLE AS creates the Glue table when execution starts, not while planning: EXPLAIN creates nothing, IF NOT EXISTS on an existing table writes nothing, the options are resolved once, and partitioned tables keep their column order in Glue and in the files
+# group: [ctas]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ctas_plan_side_effect;
+
+# EXPLAIN builds the physical CTAS plan but never executes it, so planning must
+# not call Glue CreateTable (PREPARE and a prepared statement's rebind plan the
+# same way).
+statement ok
+EXPLAIN CREATE TABLE my_datalake.default.ctas_plan_side_effect
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect') AS
+SELECT range AS id, range * 2 AS twice FROM range(10);
+
+# No catalog entry was created by physical planning.
+statement error
+SELECT * FROM glue_get_table_response('my_datalake.default.ctas_plan_side_effect');
+----
+does not exist
+
+# Validation still happens while planning, before any Glue call. In debug builds
+# this also verifies the diagnostic's format arguments.
+statement error
+CREATE TABLE my_datalake.default.ctas_duplicate_partition
+(id INTEGER, p VARCHAR) PARTITIONED BY (p, p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_duplicate_partition');
+----
+PARTITIONED BY column 'p' is listed twice for table 'ctas_duplicate_partition'
+
+# CTAS input may interleave partition and data columns. Glue stores data columns
+# separately and partition keys in PARTITIONED BY order; Parquet stores only data columns.
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ctas_partition_order;
+
+statement ok
+CREATE TABLE my_datalake.default.ctas_partition_order
+PARTITIONED BY (year, region)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_partition_order') AS
+SELECT CASE range % 2 WHEN 0 THEN 'east' ELSE 'west' END AS region,
+       range AS id,
+       2020 + (range % 2) AS year,
+       concat('row-', range::VARCHAR) AS payload
+FROM range(4);
+
+query II
+SELECT column_name, data_type FROM duckdb_columns()
+WHERE database_name = 'my_datalake' AND table_name = 'ctas_partition_order'
+ORDER BY column_index;
+----
+id	BIGINT
+payload	VARCHAR
+year	BIGINT
+region	VARCHAR
+
+query IIII
+SELECT response.StorageDescriptor.Columns[1].Name::VARCHAR,
+       response.StorageDescriptor.Columns[2].Name::VARCHAR,
+       response.PartitionKeys[1].Name::VARCHAR,
+       response.PartitionKeys[2].Name::VARCHAR
+FROM glue_get_table_response('my_datalake.default.ctas_partition_order');
+----
+id	payload	year	region
+
+query II
+SELECT DISTINCT column_id, name
+FROM parquet_schema('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_partition_order/year=*/region=*/*.parquet')
+WHERE type IS NOT NULL
+ORDER BY column_id, name;
+----
+1	id
+2	payload
+
+query IIII
+SELECT * FROM my_datalake.default.ctas_partition_order ORDER BY id;
+----
+0	row-0	2020	east
+1	row-1	2021	west
+2	row-2	2020	east
+3	row-3	2021	west
+
+# Executing the same statement creates the table once and writes its rows.
+statement ok
+CREATE TABLE my_datalake.default.ctas_plan_side_effect
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect') AS
+SELECT range AS id, range * 2 AS twice FROM range(10);
+
+query II
+SELECT count(*), sum(twice) FROM my_datalake.default.ctas_plan_side_effect;
+----
+10	90
+
+query I
+SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect'
+FROM glue_get_table_response('my_datalake.default.ctas_plan_side_effect');
+----
+true
+
+# IF NOT EXISTS on an existing table: core plans no query, so nothing is
+# written and the table keeps its rows and files.
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.default.ctas_plan_side_effect
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect') AS
+SELECT 99 AS id, 99 AS twice;
+
+query II
+SELECT count(*), sum(twice) FROM my_datalake.default.ctas_plan_side_effect;
+----
+10	90
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_plan_side_effect/*');
+----
+1
+
+# IF NOT EXISTS on a missing table creates and fills it like a plain CTAS.
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ctas_if_not_exists;
+
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.default.ctas_if_not_exists
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_if_not_exists') AS
+SELECT range AS id FROM range(3);
+
+query I
+SELECT sum(id) FROM my_datalake.default.ctas_if_not_exists;
+----
+3
+
+# The resolved definition is carried from planning into execution. A volatile
+# location expression is evaluated once: Glue and the writer use the same path,
+# so the table sees the row that CTAS wrote.
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ctas_resolved_once;
+
+statement ok
+CREATE TABLE my_datalake.default.ctas_resolved_once
+WITH (location = concat('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_resolved_once-', uuid()::VARCHAR)) AS
+SELECT 42 AS id;
+
+query I
+SELECT count(*) FROM my_datalake.default.ctas_resolved_once;
+----
+1
+
+query I
+SELECT starts_with(location, '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_resolved_once-')
+FROM glue_get_table_response('my_datalake.default.ctas_resolved_once');
+----
+true
+
+# Creating the Glue table is the first action of the COPY sink. Glue has no
+# transactions, so inside an explicit transaction that creation fails when the
+# sink initializes: the error surfaces at execution time, no table exists in
+# Glue and COPY never initialized its output path, so no file is written.
+statement ok
+BEGIN;
+
+statement error
+CREATE TABLE my_datalake.default.ctas_txn_failure
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_txn_failure') AS
+SELECT range AS id FROM range(10);
+----
+<REGEX>:TransactionContext Error.*This connection is currently in a transaction.*
+
+statement ok
+ROLLBACK;
+
+statement error
+SELECT * FROM glue_get_table_response('my_datalake.default.ctas_txn_failure');
+----
+does not exist
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_txn_failure/*');
+----
+0
+
+# Against a READ_ONLY attachment the statement is still planned, then core
+# refuses to execute it. Planning alone leaves neither a Glue table nor a file.
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS read_only_glue (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    READ_ONLY
+);
+
+statement error
+CREATE TABLE read_only_glue.default.ctas_read_only_failure
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_read_only_failure') AS
+SELECT range AS id FROM range(10);
+----
+read-only mode
+
+statement error
+SELECT * FROM glue_get_table_response('my_datalake.default.ctas_read_only_failure');
+----
+does not exist
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_read_only_failure/*');
+----
+0
+
+# The same holds when the table location comes from the ATTACH DEFAULT_LOCATION
+# instead of a CREATE TABLE option: planning derives <default>/<database>/<table>
+# without creating anything, execution creates the table there.
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS default_location_glue (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS default_location_glue.default.ctas_default_location;
+
+statement ok
+EXPLAIN CREATE TABLE default_location_glue.default.ctas_default_location AS
+SELECT range AS id FROM range(5);
+
+statement error
+SELECT * FROM glue_get_table_response('default_location_glue.default.ctas_default_location');
+----
+does not exist
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ctas_default_location/*');
+----
+0
+
+statement ok
+CREATE TABLE default_location_glue.default.ctas_default_location AS
+SELECT range AS id FROM range(5);
+
+query II
+SELECT count(*), sum(id) FROM default_location_glue.default.ctas_default_location;
+----
+5	10
+
+query I
+SELECT location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ctas_default_location'
+FROM glue_get_table_response('default_location_glue.default.ctas_default_location');
+----
+true
+
+statement ok
+DROP TABLE default_location_glue.default.ctas_default_location;
+
+statement ok
+DROP TABLE my_datalake.default.ctas_partition_order;
+
+statement ok
+DROP TABLE my_datalake.default.ctas_plan_side_effect;
+
+statement ok
+DROP TABLE my_datalake.default.ctas_if_not_exists;
+
+statement ok
+DROP TABLE my_datalake.default.ctas_resolved_once;

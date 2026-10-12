@@ -119,7 +119,7 @@ UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~4,000 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~4,000 rows.*
 
 # and one partition is 200: the equality is always true of the partition left, so it takes no selectivity
 query II
@@ -128,7 +128,7 @@ UNION ALL SELECT * FROM my_datalake.default.plancost_wide WHERE dt = 'd7'
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide
 UNION ALL SELECT * FROM my_datalake.default.plancost_wide;
 ----
-physical_plan	<REGEX>:.*Read Parquet.*~200 rows.*
+physical_plan	<REGEX>:.*Hive Scan.*~200 rows.*
 
 statement ok
 DROP TABLE my_datalake.default.plancost_wide;

@@ -1,0 +1,54 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_join_filter_partition_values.test
+# description: Join filters prune partitions on the value Glue stores, read verbatim like the scan reads it
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.jf_escaped;
+
+statement ok
+CREATE TABLE my_datalake.default.jf_escaped (id INTEGER, tag VARCHAR) PARTITIONED BY (tag);
+
+statement ok
+INSERT INTO my_datalake.default.jf_escaped VALUES (1, 'plain'), (2, 'other'), (3, 'third');
+
+# a partition whose Glue value looks URL-escaped
+statement ok
+COPY (SELECT 4 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom/data.parquet';
+
+statement ok
+CALL glue_add_partition('my_datalake.default.jf_escaped', {tag: 'a%20b'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom');
+
+query II
+SELECT id, tag FROM my_datalake.default.jf_escaped WHERE tag = 'a%20b';
+----
+4	a%20b
+
+statement ok
+CREATE TEMP TABLE wanted_tags AS SELECT 'a%20b' AS t;
+
+query II
+SELECT o.id, o.tag FROM my_datalake.default.jf_escaped o, wanted_tags w WHERE o.tag = w.t;
+----
+4	a%20b
+
+# the unescaped spelling is a different value
+statement ok
+CREATE TEMP TABLE unescaped_tags AS SELECT 'a b' AS t;
+
+query I
+SELECT count(*) FROM my_datalake.default.jf_escaped o, unescaped_tags w WHERE o.tag = w.t;
+----
+0

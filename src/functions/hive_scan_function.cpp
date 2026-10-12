@@ -62,6 +62,7 @@ void ParsePartitions(HiveScanInfo &info, const Value &partitions) {
 		throw BinderException("hive_scan: 'partitions' must be a list of structs, one per partition: the partition "
 		                      "columns with their values and optionally 'location'");
 	}
+	vector<GluePartitionInfo> result;
 	for (auto &partition_value : ListValue::GetChildren(partitions)) {
 		if (partition_value.IsNull() || partition_value.type().id() != LogicalTypeId::STRUCT) {
 			throw BinderException("hive_scan: every entry of 'partitions' must be a struct");
@@ -99,15 +100,16 @@ void ParsePartitions(HiveScanInfo &info, const Value &partitions) {
 		}
 		for (idx_t k = 0; k < info.partition_keys.size(); k++) {
 			if (!seen[k]) {
-				throw BinderException("hive_scan: partition %d has no value for partition key '%s'",
-				                      info.partitions.size() + 1, info.partition_keys[k]);
+				throw BinderException("hive_scan: partition %d has no value for partition key '%s'", result.size() + 1,
+				                      info.partition_keys[k]);
 			}
 		}
 		if (partition.location.empty()) {
 			partition.location = DefaultPartitionLocation(info, partition.values);
 		}
-		info.partitions.push_back(std::move(partition));
+		result.push_back(std::move(partition));
 	}
+	info.SetPartitions(std::move(result));
 }
 
 unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindInput &input,
@@ -177,13 +179,20 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 	names = scan_info->names;
 	return_types = scan_info->types;
 	unique_ptr<FunctionData> bind_data;
-	BindHiveScan(context, std::move(scan_info), bind_data);
+	// the scan runs as its format's reader, like the scan of a Glue table: hive_scan itself is read_parquet, whose
+	// pushdown capabilities are not those of the other formats
+	input.table_function = BoundTableFunction(BindHiveScan(context, std::move(scan_info), bind_data));
 	return bind_data;
+}
+
+unique_ptr<FunctionData> HiveScanListBind(ClientContext &context, TableFunctionBindInput &input,
+                                          vector<LogicalType> &return_types, vector<Identifier> &names) {
+	throw BinderException("hive_scan takes a single root location, not a list of files");
 }
 
 } // namespace
 
-TableFunction GetHiveScanFunction(DatabaseInstance &db) {
+TableFunctionSet GetHiveScanFunction(DatabaseInstance &db) {
 	// hive_scan is read_parquet with its own bind: the schema and partitions come from the arguments instead of from a
 	// Glue table, and the bind picks the reader for the format (read_parquet, read_csv, read_json)
 	auto &system_catalog = Catalog::GetSystemCatalog(db);
@@ -225,10 +234,22 @@ TableFunction GetHiveScanFunction(DatabaseInstance &db) {
 	function.bind_replace = nullptr;
 	function.get_multi_file_reader = HiveMultiFileReader::CreateInstance;
 	function.function_info = nullptr;
-	// the bind data holds a reader with state that a serialized plan can not carry
+	// the bind replaces this function with the format's reader, which serializes the scan
 	function.serialize = nullptr;
 	function.deserialize = nullptr;
-	return function;
+
+	// a Hive scan, of a Glue table or a hive_scan() call, is its format's reader named hive_scan: a serialized one
+	// records the reader's list argument, so deserializing it resolves to this overload, which binds the scan again
+	TableFunction list_function = *base;
+	list_function.name = "hive_scan";
+	list_function.bind = HiveScanListBind;
+	list_function.bind_replace = nullptr;
+	SetHiveScanSerialization(list_function);
+
+	TableFunctionSet set("hive_scan");
+	set.AddFunction(std::move(function));
+	set.AddFunction(std::move(list_function));
+	return set;
 }
 
 } // namespace duckdb

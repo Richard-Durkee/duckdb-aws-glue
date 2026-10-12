@@ -37,6 +37,29 @@ GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database) {
 	return result;
 }
 
+void ApplyStorageDescriptor(const Aws::Glue::Model::StorageDescriptor &storage_descriptor, GlueTableInfo &result) {
+	result.compressed = storage_descriptor.GetCompressed();
+	result.location = ToStdString(storage_descriptor.GetLocation());
+	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
+	result.output_format = ToStdString(storage_descriptor.GetOutputFormat());
+	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
+	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
+	result.columns = ToColumns(storage_descriptor.GetColumns());
+	for (auto &column : storage_descriptor.GetBucketColumns()) {
+		result.bucket_columns.push_back(ToStdString(column));
+	}
+	if (storage_descriptor.NumberOfBucketsHasBeenSet()) {
+		result.number_of_buckets = storage_descriptor.GetNumberOfBuckets();
+	}
+	for (auto &column : storage_descriptor.GetSortColumns()) {
+		GlueColumn sort_column;
+		sort_column.name = ToStdString(column.GetColumn());
+		// Glue's SortOrder is 1 for ascending, 0 for descending
+		sort_column.sort_order = column.GetSortOrder() == 0 ? GlueSortOrder::DESCENDING : GlueSortOrder::ASCENDING;
+		result.sort_columns.push_back(std::move(sort_column));
+	}
+}
+
 GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	GlueTableInfo result;
 	result.name = ToStdString(table.GetName());
@@ -52,27 +75,16 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	if (table.DescriptionHasBeenSet()) {
 		result.description = ToStdString(table.GetDescription());
 	}
-	auto &storage_descriptor = table.GetStorageDescriptor();
-	result.location = ToStdString(storage_descriptor.GetLocation());
-	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
-	result.output_format = ToStdString(storage_descriptor.GetOutputFormat());
-	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
-	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
-	result.columns = ToColumns(storage_descriptor.GetColumns());
+	result.owner = ToStdString(table.GetOwner());
+	if (table.CreateTimeHasBeenSet()) {
+		result.create_time = table.GetCreateTime().Seconds();
+	}
+	if (table.LastAccessTimeHasBeenSet()) {
+		result.last_access_time = table.GetLastAccessTime().Seconds();
+	}
+	result.retention = table.GetRetention();
+	ApplyStorageDescriptor(table.GetStorageDescriptor(), result);
 	result.partition_keys = ToColumns(table.GetPartitionKeys());
-	for (auto &column : storage_descriptor.GetBucketColumns()) {
-		result.bucket_columns.push_back(ToStdString(column));
-	}
-	if (storage_descriptor.NumberOfBucketsHasBeenSet()) {
-		result.number_of_buckets = storage_descriptor.GetNumberOfBuckets();
-	}
-	for (auto &column : storage_descriptor.GetSortColumns()) {
-		GlueColumn sort_column;
-		sort_column.name = ToStdString(column.GetColumn());
-		// Glue's SortOrder is 1 for ascending, 0 for descending
-		sort_column.sort_order = column.GetSortOrder() == 0 ? GlueSortOrder::DESCENDING : GlueSortOrder::ASCENDING;
-		result.sort_columns.push_back(std::move(sort_column));
-	}
 	result.parameters = ToStdMap(table.GetParameters());
 	return result;
 }

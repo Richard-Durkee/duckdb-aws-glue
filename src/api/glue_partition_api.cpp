@@ -59,7 +59,8 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 }
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                           const string &table_name, const vector<string> &values, GluePartitionInfo &result) {
+                           const string &table_name, const vector<string> &values, GluePartitionInfo &result,
+                           GlueTableInfo *details, string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetPartitionRequest request;
@@ -81,6 +82,15 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 		result.values.push_back(ToStdString(value));
 	}
 	result.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+	if (details) {
+		ApplyStorageDescriptor(partition.GetStorageDescriptor(), *details);
+		details->parameters = ToStdMap(partition.GetParameters());
+		details->create_time = partition.CreationTimeHasBeenSet() ? partition.GetCreationTime().Seconds() : -1;
+		details->last_access_time = partition.LastAccessTimeHasBeenSet() ? partition.GetLastAccessTime().Seconds() : -1;
+	}
+	if (raw_json) {
+		*raw_json = ToStdString(partition.Jsonize().View().WriteReadable());
+	}
 	return true;
 }
 

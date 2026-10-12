@@ -16,21 +16,10 @@
 
 namespace duckdb {
 
-namespace {
-
 //===--------------------------------------------------------------------===//
 // Shared: resolving the table and the partition spec
 //===--------------------------------------------------------------------===//
-struct GluePartitionTarget {
-	GlueCatalog *catalog = nullptr;
-	GlueTableInfo table;
-
-	string TableName() const {
-		return table.database_name + "." + table.name;
-	}
-};
-
-void ThrowIsView(const string &function_name, const string &table_name, bool require_partitions) {
+static void ThrowIsView(const string &function_name, const string &table_name, bool require_partitions) {
 	if (require_partitions) {
 		throw BinderException("%s: Glue view '%s' has no partitions", function_name, table_name);
 	}
@@ -38,7 +27,7 @@ void ThrowIsView(const string &function_name, const string &table_name, bool req
 }
 
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
-                                     bool require_partitions = true) {
+                                     bool require_partitions) {
 	auto name = ResolveGlueTableName(context, function_name, table_name.GetValue<string>());
 	GluePartitionTarget result;
 	result.catalog = &Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
@@ -111,6 +100,8 @@ vector<string> ParsePartitionSpec(const string &function_name, const GluePartiti
 	}
 	return result;
 }
+
+namespace {
 
 //! Turn (key, value) pairs into the partition values in partition key order; NULL values (empty optional) become
 //! the default partition

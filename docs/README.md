@@ -257,9 +257,23 @@ parameters as columns, plus the complete Glue `Table` object as a VARIANT in `re
 table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
 name.
 
-`glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
-description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
-`'<database>'` is resolved like in a query, through the search path.
+`glue_describe_table` lays a table out the way Hive's `DESCRIBE` and `DESCRIBE FORMATTED` do, as `(col_name, data_type,
+comment)` rows with the Glue type names: the data columns and partition keys, then the partition keys again under `#
+Partition Information`. With `mode := 'formatted'` it adds `# Detailed Table Information` (database, owner, times,
+location, table type and parameters; the view text for a view) and `# Storage Information` (SerDe, input and output
+format, buckets, sort columns and SerDe parameters). With `mode := 'extended'` it adds one `Detailed Table Information`
+row holding Glue's definition of the table as JSON, where Hive prints Thrift. `partition := {key: value, ...}` describes
+one partition of a Hive table instead: `'formatted'` then shows the partition's values, times, location, parameters and
+storage, and `'extended'` its Glue definition. The table name is resolved as for `glue_get_table_response`.
+
+```sql
+SELECT * FROM glue_describe_table('my_datalake.default.some_table', mode := 'formatted');
+SELECT * FROM glue_describe_table('my_datalake.default.some_table', mode := 'extended', partition := {'dt': '2024-01-01'});
+```
+
+`glue_get_database_response('<catalog>.<database>')` does what `glue_get_table_response` does for a Glue database (a
+DuckDB schema): its description, location and parameters as columns and the complete Glue `Database` object in
+`response`. An unqualified `'<database>'` is resolved like in a query, through the search path.
 
 ## HTTP transport and logging
 

@@ -3,16 +3,44 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 
+#include "core/glue_info.hpp"
+
 namespace duckdb {
 
 //! Resolve the table argument of a glue_* function to a fully qualified name in a Glue catalog; a partially qualified
 //! name is resolved like in a query (search path, default catalog)
 QualifiedName ResolveGlueTableName(ClientContext &context, const string &function_name, const string &table_name);
 
+class GlueCatalog;
+
+//! A Hive table of an attached Glue catalog that a glue_* function works on
+struct GluePartitionTarget {
+	GlueCatalog *catalog = nullptr;
+	GlueTableInfo table;
+
+	string TableName() const {
+		return table.database_name + "." + table.name;
+	}
+};
+
+//! Resolve and fetch the Hive table a glue_* function names. Throws for a view, a table that is not Hive and, with
+//! 'require_partitions', an unpartitioned table.
+GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
+                                     bool require_partitions = true);
+//! Turn a partition spec {key: value, ...} into the partition values (as strings) in partition key order. The spec
+//! must name every partition key and nothing else.
+vector<string> ParsePartitionSpec(const string &function_name, const GluePartitionTarget &target, const Value &spec);
+
 //! glue_get_table_response('<catalog>.<schema>.<table>'): the Glue GetTable response for a table of an attached
 //! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
 //! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
+//! glue_describe_table('<catalog>.<schema>.<table>', mode, partition): a table described the way Hive's DESCRIBE lays
+//! it out, as (col_name, data_type, comment) rows: the columns, then the partition keys under '# Partition
+//! Information'. mode := 'formatted' adds DESCRIBE FORMATTED's table and storage details, mode := 'extended' the whole
+//! Glue definition as JSON (Hive prints it as Thrift). With a 'partition' struct ({key: value, ...}) those details are
+//! the partition's own.
+TableFunction GetGlueDescribeTableFunction();
 //! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (schema) of an
 //! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and
 //! parameters as columns and the complete Glue Database object as VARIANT.

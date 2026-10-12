@@ -1,0 +1,236 @@
+# name: test/sql/hive/functions/glue_describe_table.test
+# description: glue_describe_table lays a table out the way Hive's DESCRIBE and DESCRIBE FORMATTED do
+# group: [functions]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table describe_orders describe_unpart describe_ice
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.describe_view;
+
+statement ok
+CREATE TABLE my_datalake.default.describe_orders (num BIGINT, name VARCHAR, part INTEGER) PARTITIONED BY (part) WITH (format = 'csv', delimiter = '|');
+
+# the columns, then the partition keys under their own heading
+query III
+SELECT * FROM glue_describe_table('my_datalake.default.describe_orders');
+----
+num	bigint	(empty)
+name	string	(empty)
+part	int	(empty)
+(empty)	(empty)	(empty)
+# Partition Information	(empty)	(empty)
+# col_name	data_type	comment
+(empty)	(empty)	(empty)
+part	int	(empty)
+
+# FORMATTED adds the table and its storage; the name is resolved like in a query
+statement ok
+USE my_datalake.default;
+
+query II
+SELECT col_name, data_type FROM glue_describe_table('describe_orders', mode := 'formatted')
+WHERE col_name IN ('# Detailed Table Information', 'Database:', 'Table Type:', '# Storage Information', 'SerDe Library:',
+                   'InputFormat:', 'OutputFormat:', 'Compressed:', 'Num Buckets:', 'Bucket Columns:', 'Sort Columns:',
+                   'Protect Mode:', 'Retention:');
+----
+# Detailed Table Information	(empty)
+Database:	default
+Protect Mode:	None
+Retention:	0
+Table Type:	EXTERNAL_TABLE
+# Storage Information	(empty)
+SerDe Library:	org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+InputFormat:	org.apache.hadoop.mapred.TextInputFormat
+OutputFormat:	org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+Compressed:	No
+Num Buckets:	-1
+Bucket Columns:	[]
+Sort Columns:	[]
+
+query I
+SELECT data_type FROM glue_describe_table('describe_orders', mode := 'formatted') WHERE col_name = 'CreateTime:';
+----
+<REGEX>:(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d\d \d\d:\d\d:\d\d UTC \d{4}
+
+query I
+SELECT data_type LIKE '%/default/describe_orders' FROM glue_describe_table('describe_orders', mode := 'formatted') WHERE col_name = 'Location:';
+----
+true
+
+# the table and SerDe parameters, by key, under their headings
+query III
+SELECT col_name, data_type, comment FROM (SELECT *, row_number() OVER () AS i FROM glue_describe_table('describe_orders', mode := 'formatted'))
+WHERE i > (SELECT min(i) FROM (SELECT col_name, row_number() OVER () AS i FROM glue_describe_table('describe_orders', mode := 'formatted')) WHERE col_name = 'Storage Desc Params:')
+ORDER BY i;
+----
+(empty)	field.delim	|
+(empty)	serialization.format	|
+
+query II
+SELECT data_type, comment FROM glue_describe_table('describe_orders', mode := 'formatted') WHERE col_name = '' AND data_type IN ('classification', 'EXTERNAL');
+----
+EXTERNAL	TRUE
+classification	csv
+
+# no mode is the plain layout; an unpartitioned table has no partition section
+statement ok
+CREATE TABLE describe_unpart (id INTEGER);
+
+query III
+SELECT * FROM glue_describe_table('describe_unpart');
+----
+id	int	(empty)
+
+# a bucketed, sorted table
+statement ok
+SET glue_create_bucketed_tables = true;
+
+statement ok
+DROP TABLE describe_unpart;
+
+statement ok
+CREATE TABLE describe_unpart (id INTEGER, v VARCHAR) WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'SortOrder': 0}]);
+
+query II
+SELECT col_name, data_type FROM glue_describe_table('describe_unpart', mode := 'formatted') WHERE col_name IN ('Num Buckets:', 'Bucket Columns:', 'Sort Columns:');
+----
+Num Buckets:	4
+Bucket Columns:	[id]
+Sort Columns:	[Order(col:id, order:0)]
+
+# a table in another format reports it in its table parameters
+statement ok
+CREATE TABLE describe_ice (id INTEGER) WITH (table_type = 'ICEBERG');
+
+query II
+SELECT data_type, comment FROM glue_describe_table('describe_ice', mode := 'formatted') WHERE col_name = '' AND data_type = 'table_type';
+----
+table_type	ICEBERG
+
+# a view shows its text instead of a location and storage
+statement ok
+CREATE VIEW describe_view AS SELECT num FROM describe_orders;
+
+query I
+SELECT col_name FROM glue_describe_table('describe_view', mode := 'formatted') WHERE col_name LIKE '#%' OR col_name IN ('Location:', 'View Original Text:');
+----
+# Detailed Table Information
+# View Information
+View Original Text:
+
+# EXTENDED adds the whole Glue definition as one JSON row, instead of Hive's Thrift
+query II
+SELECT col_name, json_extract_string(data_type, '$.Name') FROM glue_describe_table('describe_orders', mode := 'extended')
+WHERE col_name = 'Detailed Table Information';
+----
+Detailed Table Information	describe_orders
+
+query I
+SELECT count(*) FROM glue_describe_table('describe_orders', mode := 'extended') WHERE col_name LIKE '#%Information';
+----
+1
+
+statement error
+SELECT * FROM glue_describe_table('describe_orders', mode := 'thrift');
+----
+'mode' is 'formatted' or 'extended', not 'thrift'
+
+# the mode is not case-sensitive
+query I
+SELECT count(*) > 8 FROM glue_describe_table('describe_orders', mode := 'FORMATTED');
+----
+true
+
+# a partition: its own location, parameters and storage
+statement ok
+INSERT INTO describe_orders VALUES (1, 'a', 7);
+
+query II
+SELECT col_name, data_type FROM glue_describe_table('describe_orders', mode := 'formatted', partition := {'part': 7})
+WHERE col_name IN ('# Detailed Partition Information', 'Partition Value:', 'Database:', 'Table:', '# Storage Information',
+                   'SerDe Library:');
+----
+# Detailed Partition Information	(empty)
+Partition Value:	[7]
+Database:	default
+Table:	describe_orders
+# Storage Information	(empty)
+SerDe Library:	org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe
+
+query I
+SELECT data_type LIKE '%/describe_orders/part=7' FROM glue_describe_table('describe_orders', mode := 'formatted', partition := {'part': 7})
+WHERE col_name = 'Location:';
+----
+true
+
+# no table details for a partition: they are the table's, not the partition's
+query I
+SELECT count(*) FROM glue_describe_table('describe_orders', mode := 'formatted', partition := {'part': 7})
+WHERE col_name IN ('# Detailed Table Information', 'Owner:', 'Table Type:');
+----
+0
+
+query II
+SELECT col_name, json_extract(data_type, '$.Values')::VARCHAR FROM glue_describe_table('describe_orders', mode := 'extended', partition := {'part': 7})
+WHERE col_name = 'Detailed Partition Information';
+----
+Detailed Partition Information	["7"]
+
+# without formatted or extended a partition shows the table's columns
+query I
+SELECT count(*) FROM glue_describe_table('describe_orders', partition := {'part': 7});
+----
+8
+
+statement error
+SELECT * FROM glue_describe_table('describe_orders', partition := {'part': 8});
+----
+Partition [8] of table 'default.describe_orders' does not exist
+
+statement error
+SELECT * FROM glue_describe_table('describe_orders', partition := {'nope': 7});
+----
+'nope' is not a partition key of table 'default.describe_orders'
+
+statement error
+SELECT * FROM glue_describe_table('describe_unpart', partition := {'id': 1});
+----
+Table 'default.describe_unpart' is not partitioned
+
+statement error
+SELECT * FROM glue_describe_table('describe_ice', partition := {'id': 1});
+----
+glue_describe_table only works on Hive tables
+
+statement error
+SELECT * FROM glue_describe_table('my_datalake.default.no_such_table');
+----
+Table 'default.no_such_table' does not exist in Glue catalog 'my_datalake'
+
+statement ok
+DROP VIEW describe_view;
+
+foreach table describe_orders describe_unpart describe_ice
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

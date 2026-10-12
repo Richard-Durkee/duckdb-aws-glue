@@ -16,6 +16,9 @@ string ToStdString(const Aws::String &input);
 unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> &input);
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input);
 GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database);
+//! Fill the storage fields of 'result' (location, formats, SerDe, columns, buckets, sort columns) from a Glue
+//! StorageDescriptor, a table's or a partition's
+void ApplyStorageDescriptor(const Aws::Glue::Model::StorageDescriptor &storage_descriptor, GlueTableInfo &result);
 GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table);
 Aws::Map<Aws::String, Aws::String> ToAwsMap(const unordered_map<string, string> &input);
 Aws::Vector<Aws::Glue::Model::Column> ToAwsColumns(const vector<GlueColumn> &input);

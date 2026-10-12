@@ -53,12 +53,6 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
   count with their own size, the others with the average of those. A scan that lists the same directory reuses
   the listing. Avro tables are not measured, so planning them lists nothing.
-- With `SET hive_parquet_footer_statistics = true` (default false), an unpartitioned parquet table of at most 32
-  files has the footers of all its files read instead (8 at a time, with `parquet_metadata`): the row count is exact,
-  and the columns get a distinct count for the join order optimizer, the dictionary size the writer recorded or the
-  width of an integer column's min/max. The statistics claim nothing else (no min/max), so nothing is pruned on them.
-  It is off by default: on TPC-DS SF10 it speeds up some queries (q95, q72) and slows down others about as much,
-  where a dimension filter then also counts against a fact table its partition filter already pruned (q39, q51).
 - The Glue table definition and the partition list are fetched once per query and table, however often the
   query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched

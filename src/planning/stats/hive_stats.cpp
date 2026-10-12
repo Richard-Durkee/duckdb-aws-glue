@@ -1,6 +1,5 @@
 #include "planning/stats/hive_stats.hpp"
 
-#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -16,7 +15,6 @@
 #include "core/glue_types.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
-#include "planning/stats/footer_stats.hpp"
 
 namespace duckdb {
 
@@ -53,10 +51,6 @@ struct HiveTableSample {
 	//! The rows and size of the file measured, the largest
 	optional_idx file_rows;
 	optional_idx file_bytes;
-	//! From the footers of every file of an unpartitioned parquet table: its rows, and the distinct counts of the
-	//! columns whose footers bound them
-	optional_idx table_rows;
-	case_insensitive_map_t<idx_t> distinct_counts;
 	//! The files and bytes of each partition listed (of a partitioned table): the totals above are over these
 	unordered_map<idx_t, HivePartitionSize> partition_sizes;
 };
@@ -175,14 +169,6 @@ static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &
 	return optional_idx();
 }
 
-static bool FooterStatisticsEnabled(ClientContext &context) {
-	Value setting;
-	if (context.TryGetCurrentSetting("hive_parquet_footer_statistics", setting) && !setting.IsNull()) {
-		return setting.GetValue<bool>();
-	}
-	return false;
-}
-
 //! Measure the table a scan reads, the first time a scan of it asks in this query. It measures files, which a
 //! predicate does not change: the predicate only decides how many partitions a scan reads.
 static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindData &bind_data,
@@ -232,16 +218,6 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		if (listed.empty()) {
 			return sample;
 		}
-		if (info.file_format == HiveFileFormat::PARQUET && info.partition_keys.empty() &&
-		    listed.size() <= FOOTER_STATISTICS_MAX_FILES && FooterStatisticsEnabled(context)) {
-			// the listing holds every file the scans read, so their footers describe the whole table
-			HiveFooterStatistics footers;
-			if (ReadFooterStatistics(context, info, listed, footers)) {
-				sample.table_rows = footers.rows;
-				sample.distinct_counts = std::move(footers.distinct_counts);
-				return sample;
-			}
-		}
 		auto &file = listed[measured.IsValid() ? measured.GetIndex() : 0];
 		sample.file_bytes = ListedFileSize(file);
 		sample.file_rows = RowsInFile(context, bind_data, info, file);
@@ -290,9 +266,6 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	}
 	auto sample_ptr = SampleTable(context, bind_data, hive_list);
 	auto &sample = *sample_ptr;
-	if (sample.table_rows.IsValid()) {
-		return make_uniq<NodeStatistics>(sample.table_rows.GetIndex());
-	}
 	if (!sample.file_rows.IsValid()) {
 		if (sample.listed && sample.files == 0 && info.partition_keys.empty()) {
 			// the only directory of the table holds no data file
@@ -345,35 +318,6 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 //===--------------------------------------------------------------------===//
 // Partition column statistics
 //===--------------------------------------------------------------------===//
-//! The distinct count the footers give for a data column of an unpartitioned table, on statistics that otherwise
-//! claim nothing: min/max of the files would be pruned on, a distinct count is only ever an estimate
-static unique_ptr<BaseStatistics> WithFooterDistinctCount(ClientContext &context,
-                                                          TableFunctionGetStatisticsInput &input,
-                                                          unique_ptr<BaseStatistics> result) {
-	auto &bind_data = input.bind_data->Cast<MultiFileBindData>();
-	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
-	auto &info = hive_list.ScanInfo();
-	if (info.file_format != HiveFileFormat::PARQUET || !info.partition_keys.empty() ||
-	    !input.column_index.HasPrimaryIndex() || input.column_index.HasChildren() ||
-	    input.column_index.GetPrimaryIndex() >= bind_data.columns.size()) {
-		return result;
-	}
-	if (result && result->GetDistinctCount() > 0) {
-		return result;
-	}
-	auto &column = bind_data.columns[input.column_index.GetPrimaryIndex()];
-	auto sample = SampleTable(context, bind_data, hive_list);
-	auto entry = sample->distinct_counts.find(column.name.GetIdentifierName());
-	if (entry == sample->distinct_counts.end()) {
-		return result;
-	}
-	if (!result) {
-		result = BaseStatistics::CreateUnknown(column.type).ToUnique();
-	}
-	result->SetDistinctCount(entry->second);
-	return result;
-}
-
 //! Statistics for a partition column, from the values of the partitions the scan will read. We get the
 //! complete set of values the column takes and can derive min/max, the distinct count and has-null.
 //! Columns that are not partition keys are left to the format's own function.
@@ -392,8 +336,7 @@ unique_ptr<BaseStatistics> HivePartitionStatistics(ClientContext &context, Table
 	}
 	if (key_index == DConstants::INVALID_INDEX) {
 		// a data column, a struct field or a virtual column
-		auto result = info.format_statistics ? info.format_statistics(context, input) : nullptr;
-		return WithFooterDistinctCount(context, input, std::move(result));
+		return info.format_statistics ? info.format_statistics(context, input) : nullptr;
 	}
 
 	// the partitions left after pruning: filter pushdown runs before statistics are asked for

@@ -72,13 +72,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
-	config.AddExtensionOption("hive_parquet_footer_statistics",
-	                          "Read the footers of all files of an unpartitioned parquet table (at most 32 files) "
-	                          "while planning, for its exact row count and the distinct counts of its columns. When "
-	                          "false the row count is estimated from one file, and the columns get no distinct count. "
-	                          "Default false.",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
-
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();

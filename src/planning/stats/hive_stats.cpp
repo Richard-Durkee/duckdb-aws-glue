@@ -8,6 +8,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "api/glue_api.hpp"
@@ -183,8 +184,19 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		auto listed = files.ListSampleDirectory();
 		sample.listed = true;
 		sample.files = listed.size();
-		// the largest file carries the least per-file format overhead, so it is the least misleading one to measure
+		// The file measured is the largest of the partitions the scan reads: the largest carries the least per-file
+		// format overhead, so it is the least misleading one, and a file of a partition the scan does not read is
+		// not opened. The others listed only count with their sizes.
+		unordered_set<idx_t> reading;
+		if (!info.partition_keys.empty()) {
+			auto partition_indexes = files.PartitionIndexes();
+			reading.insert(partition_indexes->begin(), partition_indexes->end());
+		}
+		auto measurable = [&](const OpenFileInfo &file) {
+			return info.partition_keys.empty() || reading.count(info.GetPartitionIndexOfFile(file.path)) > 0;
+		};
 		optional_idx measured;
+		idx_t measured_size = 0;
 		idx_t bytes = 0;
 		idx_t sized = 0;
 		for (idx_t i = 0; i < listed.size(); i++) {
@@ -195,8 +207,9 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 			if (sized == 0 || size.GetIndex() < sample.min_file_size) {
 				sample.min_file_size = size.GetIndex();
 			}
-			if (!measured.IsValid() || size.GetIndex() > sample.max_file_size) {
-				sample.max_file_size = size.GetIndex();
+			sample.max_file_size = MaxValue(sample.max_file_size, size.GetIndex());
+			if (measurable(listed[i]) && (!measured.IsValid() || size.GetIndex() > measured_size)) {
+				measured_size = size.GetIndex();
 				measured = i;
 			}
 			bytes += size.GetIndex();
@@ -217,6 +230,14 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		}
 		if (listed.empty()) {
 			return sample;
+		}
+		if (!measured.IsValid()) {
+			// no sizes listed: the first file the scan reads
+			for (idx_t i = 0; i < listed.size() && !measured.IsValid(); i++) {
+				if (measurable(listed[i])) {
+					measured = i;
+				}
+			}
 		}
 		auto &file = listed[measured.IsValid() ? measured.GetIndex() : 0];
 		sample.file_bytes = ListedFileSize(file);

@@ -26,10 +26,30 @@ Attach options:
 ## Reading
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
-LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is
-1, delimiter from `field.delim` / `separatorChar`, `,` otherwise), the Hive and the OpenX JsonSerDe with `read_json`
-(one object per line, keys by name; SerDe properties are not applied) and AvroSerDe with `read_avro` (columns by
-name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
+LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
+`read_json` (one object per line, keys by name; SerDe properties are not applied) and AvroSerDe with `read_avro`
+(columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
+Text tables are read the way their SerDe reads them:
+
+- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
+  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
+  quoted.
+- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
+  doubled quotes Hive writes). An empty field is an empty string; there is no NULL.
+- Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
+  NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
+  `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
+- `skip.header.line.count` lines are skipped at the start of every file.
+- Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
+  delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
+  line break.
+- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
+  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
+  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
+  NULL string. Writes need a single-byte delimiter.
+- As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
+  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
+  their own. `hive_scan()` uses plain `read_csv` rules.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 
@@ -90,8 +110,9 @@ their codec themselves.
   table, Hive's `CLUSTERED BY (...) SORTED BY (...) INTO n BUCKETS`: bucket and sort columns are columns of the table
   that are not partition keys, and `BucketColumns` needs a positive `NumberOfBuckets`. The setting is off by default
   because DuckDB does not write to such a table (see below).
-- `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition
-  touched, partition columns are not stored in the files) and register new partition directories in Glue with
+- `INSERT INTO` and `CREATE TABLE ... AS` write files in the table's format into the table location (one file per partition touched,
+  partition columns are not stored in the files; text files use the table's delimiter and NULL
+  string, `\N` for LazySimpleSerDe unless `serialization.null.format` says otherwise, and at most one header line) and register new partition directories in Glue with
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
   into a partition whose location is not below the table location fails; the rows of other partitions can still be
@@ -163,7 +184,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
 - `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
-  `quote := '"'` and `escape := '\'` describe the files; csv columns are matched by position, json keys by name.
+  `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
+  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name.
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is
@@ -287,6 +309,17 @@ process first installs the loadable extensions from `build/<type>/repository`; o
 makes them ~1.5 GB each, so CI tests a `make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1` build (assertions and
 sanitizers, no debug info).
 
+A maintainer can run the whole suite of a pull request or a branch, on a release build, against a live catalog with
+the `Cloud Glue tests` workflow (`.github/workflows/CloudGlueTests.yml`,
+`gh workflow run CloudGlueTests.yml -f pr_number=<n>`, or `gh workflow run CloudGlueTests.yml --ref main` without a
+PR). It is never triggered by a PR, refuses to run for anyone below the `maintain` role, tests the PR's head commit
+(or the branch's) as it was when the run started, and reports the result as a `Cloud Glue tests` status on that
+commit. The catalog, region and AWS credentials come from the variables and secrets of the `cloud-glue` environment,
+listed at the top of the workflow. The tests write to the bucket `duckdb-glue-ci-<account id>-<region>`, which the
+workflow creates if needed, under `duckdb-aws-glue-cloud-tests/ci-<run id>-<attempt>/`, which it deletes when the job
+ends, whether the tests pass or not; a lifecycle rule on `duckdb-aws-glue-cloud-tests/` expires anything a failed run
+leaves behind after 2 days.
+
 Every test creates the tables it needs and writes under its own `{TEST_DIR}` prefix, so runs do not interfere with
 each other; `make glue-fixture-down` throws the containers and their data away.
 
@@ -298,35 +331,45 @@ SeaweedFS does not have (`make glue-fixture` first; the benchmark runner needs a
 AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner benchmark/heavily_partitioned_table.benchmark
 ```
 
-`benchmark/tpch/sf1/` runs the 22 TPC-H queries at SF1 against Hive tables in the Glue database `bench_tpch_sf1`
-(`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`) and checks the answers.
-The queries in `benchmark/tpch/queries/` are DuckDB's with filters on the bucket columns added next to the date
-filters. The first run generates the data with `dbgen` and writes it with CTAS, which takes a while; later runs reuse
-`duckdb_benchmark_data/glue_tpch_sf1.duckdb`, which `make glue-fixture` removes:
+`benchmark/tpch/<sf>/<format>/` runs the 22 TPC-H queries against Hive tables of that format in the Glue database
+`bench_tpch_<sf>_<format>` (`lineitem` and `orders` partitioned by 10-day buckets of `l_shipdate` and `o_orderdate`)
+and checks the answers: `sf1/parquet/` at SF1, `sf0.1/csv/`, `sf0.1/json/` and `sf0.1/avro/` at SF0.1 (the Glue
+database names spell the scale factor `sf1`, `sf0_1`, ...). The queries in `benchmark/tpch/queries/` are DuckDB's with
+filters on the bucket columns added next to the date filters. The first run generates the data with `dbgen` and
+writes it with CTAS, which takes a while; later runs reuse `duckdb_benchmark_data/glue_tpch_<sf>_<format>.duckdb`,
+which `make glue-fixture` removes:
 
 ```sh
-AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner 'benchmark/tpch/sf1/.*'
+AWS_EC2_METADATA_DISABLED=true ./build/relassert/benchmark/benchmark_runner 'benchmark/tpch/sf1/parquet/.*'
 ```
 
-`benchmark/tpcds/sf1/` does the same for the 99 TPC-DS queries at SF1, with the Glue database `bench_tpcds_sf1`: the
-fact tables are partitioned by their date key (`ss_sold_date_sk`, `sr_returned_date_sk`, `cs_sold_date_sk`,
-`cr_returned_date_sk`, `ws_sold_date_sk`, `wr_returned_date_sk`, `inv_date_sk`), the dimension tables are not. Its
-cache is `duckdb_benchmark_data/glue_tpcds_sf1.duckdb`:
+`benchmark/tpcds/<sf>/<format>/` does the same for the 99 TPC-DS queries, `sf1/parquet/` at SF1 and the other formats
+at SF0.01 (`sf0.01/<format>/`), with the Glue database `bench_tpcds_<sf>_<format>`: the fact tables are partitioned by
+10-day buckets of their date key (`ss_sold_date_bucket`, `sr_returned_date_bucket`, `cs_sold_date_bucket`,
+`cr_returned_date_bucket`, `ws_sold_date_bucket`, `wr_returned_date_bucket`, `inv_date_bucket`, each
+`(date_sk - 2440588) // 10`, the same buckets as the TPC-H tables), the dimension tables are not. The queries in
+`benchmark/tpcds/queries/` are DuckDB's with filters on the bucket columns added where a fact table's date key is
+joined to a filtered `date_dim`. Its cache is `duckdb_benchmark_data/glue_tpcds_<sf>_<format>.duckdb`:
 
 ```sh
-AWS_EC2_METADATA_DISABLED=true ./build/release/benchmark/benchmark_runner 'benchmark/tpcds/sf1/.*'
+AWS_EC2_METADATA_DISABLED=true ./build/release/benchmark/benchmark_runner 'benchmark/tpcds/sf1/parquet/.*'
 ```
 
-The TPC-DS load needs a build without assertions (`BUILD_BENCHMARK=1 make release`): its fact tables have rows with a
-NULL date key, and writing such a partition trips a `D_ASSERT` in DuckDB's partitioned copy (see the header of
-`benchmark/tpcds/sf1/tpcds_sf1.benchmark.in` for a repro without Glue).
+Both suites share a template per suite (`benchmark/tpch/tpch.benchmark.in`, `benchmark/tpcds/tpcds.benchmark.in`)
+that takes `FORMAT`, `SF` and `SF_NAME`. The TPC-DS load needs a build without assertions
+(`BUILD_BENCHMARK=1 make release`): its fact tables have rows with a NULL date key, and writing such a partition trips
+a `D_ASSERT` in DuckDB's partitioned copy (see the header of `benchmark/tpcds/tpcds.benchmark.in` for a repro without
+Glue).
 
-Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load (e.g. the scale
-factor) has no effect while the tables are in Glue: rebuild the fixture with
-`make glue-fixture-down && make glue-fixture` first.
+Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load has no effect while
+the tables are in Glue: rebuild the fixture with `make glue-fixture-down && make glue-fixture` first.
 
-`.github/workflows/Regression.yml` runs `benchmark/*.benchmark`, `benchmark/pushdown/`, `benchmark/optimizer/` and
-`benchmark/tpch/sf1/` for a PR and for its merge base and compares the timings. It does not run `benchmark/tpcds/`.
+`.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
+their timings (5 runs each) in a job per format: the TPC-H and TPC-DS benchmarks of that format, plus
+`benchmark/*.benchmark`, `benchmark/pushdown/` and `benchmark/optimizer/` in the parquet job. To keep the jobs short it
+skips the queries that take under 0.6s on parquet at SF1 and the ones that are mostly filtered scans of one table
+(TPC-H q06, TPC-DS q09, q28, q88, q90, q96), and per format the TPC-DS queries that time out or fail: q85 on parquet
+(bad join order), q95 except on csv (the CTE inliner can't copy the Glue scan), and q64 and q72 on avro.
 
 ## Building
 

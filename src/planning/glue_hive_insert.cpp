@@ -322,10 +322,11 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(copy_types, partition_columns, false);
 	auto function_data = copy_function->function.copy_to_bind(context, bind_input, names_to_write, types_to_write);
 
-	auto &physical_copy = planner.Make<PhysicalCopyToFile>(
-	    GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST), copy_function->function,
-	    std::move(function_data), op.estimated_cardinality);
-	auto &copy = physical_copy.Cast<PhysicalCopyToFile>();
+	auto return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST);
+	auto &copy = planner
+	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
+	                                     op.estimated_cardinality, create_schema, std::move(create_info), table_info)
+	                 .Cast<GlueHiveCopy>();
 	// as the COPY binder does: without it every chunk becomes a batch of its own (a 2048-row parquet row group)
 	if (copy.function.desired_batch_size) {
 		copy.batch_size = copy.function.desired_batch_size(context, *copy.bind_data);

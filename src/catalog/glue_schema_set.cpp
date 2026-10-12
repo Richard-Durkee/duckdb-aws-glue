@@ -5,6 +5,8 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction_manager.hpp"
+#include "duckdb/transaction/transaction.hpp"
 
 namespace duckdb {
 
@@ -38,6 +40,8 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	if (name.empty()) {
 		return nullptr;
 	}
+	// as in GlueTableSet::GetEntry, the reader's Glue transaction keeps a retired entry alive while it is used
+	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	auto entry = entries.find(name);
 	if (entry != entries.end()) {
@@ -54,6 +58,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 }
 
 void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
+	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);
 	LoadEntries(context);
 	for (auto &entry : entries) {
@@ -64,20 +69,23 @@ void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(Catalo
 optional_ptr<CatalogEntry> GlueSchemaSet::CreateEntry(unique_ptr<GlueSchemaEntry> entry) {
 	lock_guard<mutex> guard(entry_lock);
 	auto name = entry->name.GetIdentifierName();
-	entries.erase(name);
+	RetireEntry(name);
 	auto result = entries.emplace(name, std::move(entry));
 	return result.first->second.get();
 }
 
 void GlueSchemaSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
-	entries.erase(name);
+	RetireEntry(name);
 }
 
-void GlueSchemaSet::ClearEntries() {
-	lock_guard<mutex> guard(entry_lock);
-	entries.clear();
-	is_loaded = false;
+void GlueSchemaSet::RetireEntry(const string &name) {
+	auto entry = entries.find(name);
+	if (entry == entries.end()) {
+		return;
+	}
+	catalog.GetAttached().GetTransactionManager().Cast<GlueTransactionManager>().RetireEntry(std::move(entry->second));
+	entries.erase(entry);
 }
 
 } // namespace duckdb

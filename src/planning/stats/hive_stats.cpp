@@ -297,6 +297,9 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	// average of the partitions it saw
 	auto files = static_cast<double>(sample.files);
 	auto bytes = sample.bytes.IsValid() ? static_cast<double>(sample.bytes.GetIndex()) : 0.0;
+	// the rows the bytes of each partition read imply at a conservative width: the floor below
+	static constexpr idx_t ESTIMATED_BYTES_PER_ROW = 100;
+	idx_t bytes_rows = 0;
 	if (!info.partition_keys.empty() && !sample.partition_sizes.empty()) {
 		auto seen = static_cast<double>(sample.partition_sizes.size());
 		auto average_files = files / seen;
@@ -308,9 +311,11 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 			if (entry == sample.partition_sizes.end()) {
 				files += average_files;
 				bytes += average_bytes;
+				bytes_rows += static_cast<idx_t>(average_bytes) / ESTIMATED_BYTES_PER_ROW;
 			} else {
 				files += static_cast<double>(entry->second.files);
 				bytes += static_cast<double>(entry->second.bytes);
+				bytes_rows += entry->second.bytes / ESTIMATED_BYTES_PER_ROW;
 			}
 		}
 	} else {
@@ -331,6 +336,13 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 		       static_cast<double>(sample.file_rows.GetIndex());
 	} else {
 		rows = static_cast<double>(sample.file_rows.GetIndex()) * files;
+	}
+	// The listing may have seen a single near-empty partition (a one-row parquet file is mostly format overhead), and
+	// scaling it to the partitions read then prices a large table at ~one row per partition. The file-size weighting
+	// above cannot see that: with one file per partition min_file_size equals max_file_size. So floor each partition's
+	// rows at what its bytes imply.
+	if (partitions > 1 && sample.bytes.IsValid()) {
+		rows = MaxValue<double>(rows, static_cast<double>(bytes_rows));
 	}
 	return make_uniq<NodeStatistics>(MaxValue<idx_t>(static_cast<idx_t>(rows + 0.5), files > 0 ? 1 : 0));
 }

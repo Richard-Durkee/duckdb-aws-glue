@@ -1,0 +1,121 @@
+# name: test/sql/hive/bugs/s3_cardinality_partition_skew.test
+# description: S3 - a near-empty sampled partition must not collapse the estimate to ~one row per partition.
+# group: [bugs]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.card_skew;
+
+statement ok
+CREATE TABLE my_datalake.default.card_skew (id INTEGER, pad VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+# two partitions, each holding ONE wide row (~190KB of incompressible text). With one file per partition
+# the sampled directory has min_file_size == max_file_size, so the within-directory bytes weighting never
+# triggers, and rows x files x partitions would estimate the whole table at ~1 row per partition.
+statement ok
+INSERT INTO my_datalake.default.card_skew
+    SELECT range AS id, (SELECT string_agg(md5((r.range * 7919 + range)::VARCHAR), '') FROM range(6000)) AS pad,
+           chr(97 + range::INTEGER) AS dt FROM range(2) r;
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.card_skew')), (SELECT count(*) FROM my_datalake.default.card_skew);
+----
+2	2
+
+# the bytes floor keeps the estimate in the thousands (~100 bytes per row over ~190KB directories)
+# instead of ~2 rows
+query II
+EXPLAIN SELECT id FROM my_datalake.default.card_skew;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~[1-9][0-9]{0,2},?[0-9]{3} rows.*
+
+statement ok
+DROP TABLE my_datalake.default.card_skew;
+
+# ----------------------------------------------------------------------------------------------------
+# Negative control: the floor must NOT fire on an unpartitioned table. The same one-wide-row shape
+# (~190KB implying thousands of rows at the floor's width) must still estimate from the footer's rows.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.card_skew_unpart;
+
+statement ok
+CREATE TABLE my_datalake.default.card_skew_unpart (id INTEGER, pad VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.card_skew_unpart
+    SELECT range AS id, (SELECT string_agg(md5((r.range * 7919 + range)::VARCHAR), '') FROM range(6000)) AS pad
+    FROM range(1) r;
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.card_skew_unpart;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
+
+# ----------------------------------------------------------------------------------------------------
+# Negative control: the exact single-partition path is unchanged — with one partition the sampled
+# directory IS the table, so the footer's row count stands and the floor must not fire.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.card_skew_single;
+
+statement ok
+CREATE TABLE my_datalake.default.card_skew_single (id INTEGER, pad VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.card_skew_single
+    SELECT range AS id, (SELECT string_agg(md5((r.range * 7919 + range)::VARCHAR), '') FROM range(6000)) AS pad,
+           'a' AS dt FROM range(1) r;
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.card_skew_single;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~1 row.*
+
+# ----------------------------------------------------------------------------------------------------
+# The floor is a floor, not a replacement: when the sampled directory's rows already exceed what its
+# bytes imply at ~100 bytes per row (narrow rows), the row-based estimate must be left alone.
+# ----------------------------------------------------------------------------------------------------
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.card_dense;
+
+statement ok
+CREATE TABLE my_datalake.default.card_dense (id INTEGER, v VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.card_dense
+    SELECT i AS id, 'x' AS v, dt FROM generate_series(1, 5000) t(i), (VALUES ('a'), ('b')) p(dt);
+
+query II
+SELECT (SELECT count(*) FROM glue_partitions('my_datalake.default.card_dense')), (SELECT count(*) FROM my_datalake.default.card_dense);
+----
+2	10000
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.card_dense;
+----
+physical_plan	<REGEX>:.*Hive Scan.*~10,000 rows.*
+
+statement ok
+DROP TABLE my_datalake.default.card_skew_unpart;
+
+statement ok
+DROP TABLE my_datalake.default.card_skew_single;
+
+statement ok
+DROP TABLE my_datalake.default.card_dense;

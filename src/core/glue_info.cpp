@@ -338,7 +338,8 @@ GlueTableType GlueTableTypeFromString(const string &type) {
 }
 
 GlueTableFormat GlueTableInfo::GetFormat() const {
-	return GlueTableFormat::Of(*this);
+	auto &info = *this;
+	return GlueTableFormat::Detect(info);
 }
 
 string GlueTableInfo::GetMetadataLocation() const {

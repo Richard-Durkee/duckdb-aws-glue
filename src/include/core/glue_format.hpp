@@ -27,8 +27,9 @@ struct GlueTableFormat {
 	GlueFormatSource source = GlueFormatSource::NONE;
 
 public:
-	//! The parameters first, then the InputFormat, then any storage descriptor
-	static GlueTableFormat Of(const GlueTableInfo &info);
+	//! Detect the format from the table definition: the table parameters first, then the InputFormat class, then any
+	//! storage descriptor (a Hive table)
+	static GlueTableFormat Detect(const GlueTableInfo &info);
 	//! Whether 'key' is one of the table parameters the format is derived from
 	static bool IsParameter(const string &key);
 

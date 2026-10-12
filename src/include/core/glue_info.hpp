@@ -90,7 +90,7 @@ public:
 	bool IsView() const {
 		return table_type == GlueTableType::VIRTUAL_VIEW;
 	}
-	//! The table format and what it was derived from (GlueTableFormat::Of)
+	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)
 	string GetMetadataLocation() const;

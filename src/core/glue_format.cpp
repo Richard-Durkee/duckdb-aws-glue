@@ -59,7 +59,7 @@ static GlueFormat FromInputFormat(const string &input_format) {
 	return GlueFormat::UNKNOWN;
 }
 
-GlueTableFormat GlueTableFormat::Of(const GlueTableInfo &info) {
+GlueTableFormat GlueTableFormat::Detect(const GlueTableInfo &info) {
 	GlueTableFormat result;
 	result.format = FromParameters(info);
 	if (result.format != GlueFormat::UNKNOWN) {

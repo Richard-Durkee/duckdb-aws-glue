@@ -32,11 +32,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	vector<LogicalType> types;
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
-	//! CSV only: the dialect and whether every file starts with a header line
-	string delimiter = ",";
-	string quote = "\"";
-	string escape = "\"";
-	bool header = false;
+	HiveCSVOptions csv_options;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
@@ -146,6 +142,9 @@ private:
 //! produces exactly the columns of 'scan_info'. No file is listed or opened here.
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data);
+//! Give 'function' the Hive scan's plan serialization, which describes the scan in full so that deserializing a plan
+//! binds the same scan again
+void SetHiveScanSerialization(TableFunction &function);
 
 //! MultiFileReader for Hive tables registered in Glue. It reads the files Glue's partitions point to (whatever their
 //! directory names), binds the schema Glue defines rather than the schema of the first file (a column missing from a
@@ -174,6 +173,11 @@ public:
 	                  const MultiFileReaderBindData &options, const vector<MultiFileColumnDefinition> &global_columns,
 	                  const vector<ColumnIndex> &global_column_ids, ClientContext &context,
 	                  optional_ptr<MultiFileReaderGlobalState> global_state) override;
+	ReaderInitializeType InitializeReader(MultiFileReaderData &reader_data, const MultiFileBindData &bind_data,
+	                                      const vector<MultiFileColumnDefinition> &global_columns,
+	                                      const vector<ColumnIndex> &global_column_ids,
+	                                      optional_ptr<TableFilterSet> table_filters, ClientContext &context,
+	                                      MultiFileGlobalState &gstate) override;
 
 private:
 	shared_ptr<HiveScanInfo> scan_info;

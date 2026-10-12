@@ -37,9 +37,28 @@
 			]
 		},
 		{
-			"reason": "needs the bucketed fixture tables that scripts/docker-compose.yml creates in the local Glue",
+			"reason": "needs the fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
-				"test/sql/hive/dml/insert/insert_into_bucketed_table.test"
+				"test/sql/hive/dml/insert/insert_into_bucketed_table.test",
+				"test/sql/hive/dml/formats/csv/test_csv_serde_properties.test"
+			]
+		},
+		{
+			"reason": "needs the OpenX JSON fixture table that scripts/docker-compose.yml creates in the local Glue",
+			"paths": [
+				"test/sql/hive/dml/insert/insert_into_openx_json_table.test"
+			]
+		},
+		{
+			"reason": "counts moto's single GetPartitions request per partition listing: AWS Glue lists in segments (glue_get_partitions_segments) and ends every listing with an extra, empty page",
+			"paths": [
+				"test/sql/hive/bugs/s3_plan_time_cost_invariants.test"
+			]
+		},
+		{
+			"reason": "AWS Glue stores column names in lower case ('Mixed Case' reads back as 'mixed case'); moto keeps them as given",
+			"paths": [
+				"test/sql/hive/ddl/alter_column/glue_replace_columns.test"
 			]
 		}
 	]

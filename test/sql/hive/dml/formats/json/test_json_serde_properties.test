@@ -1,0 +1,110 @@
+# name: test/sql/hive/dml/formats/json/test_json_serde_properties.test
+# description: the OpenX JsonSerDe's ignore.malformed.json reads a line that is not valid JSON as a row of NULLs
+# group: [json]
+
+require httpfs
+
+require json
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fixture tables (scripts/docker-compose.yml) share their location between runs: every run rewrites the file
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('{"id": 1, "name": "a"}'),
+    ('not json'),
+    ('{"id": 3, "name": "c"}')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_openx_json_ignore_malformed/data.json' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+#---------------------------------------------------------------------------
+# the SerDe property ignore.malformed.json = 'TRUE' (the value is not case-sensitive)
+#---------------------------------------------------------------------------
+query II
+SELECT id, name FROM my_datalake.default.fixture_openx_json_ignore_malformed ORDER BY id NULLS FIRST;
+----
+NULL	NULL
+1	a
+3	c
+
+#---------------------------------------------------------------------------
+# a table parameter overrides the SerDe property; 'false' fails the query on the malformed line
+#---------------------------------------------------------------------------
+statement ok
+ALTER TABLE my_datalake.default.fixture_openx_json_ignore_malformed SET ('ignore.malformed.json' = 'false');
+
+statement error
+SELECT id, name FROM my_datalake.default.fixture_openx_json_ignore_malformed;
+----
+<REGEX>:.*Malformed JSON.*
+
+statement ok
+ALTER TABLE my_datalake.default.fixture_openx_json_ignore_malformed RESET ('ignore.malformed.json');
+
+query II
+SELECT id, name FROM my_datalake.default.fixture_openx_json_ignore_malformed ORDER BY id NULLS FIRST;
+----
+NULL	NULL
+1	a
+3	c
+
+#---------------------------------------------------------------------------
+# without the property a malformed line fails the query; a table parameter alone turns it on
+#---------------------------------------------------------------------------
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('{"id": 1, "name": "a"}'),
+    ('not json'),
+    ('{"id": 3, "name": "c"}')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_openx_json/data.json' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT id, name FROM my_datalake.default.fixture_openx_json;
+----
+<REGEX>:.*Malformed JSON.*
+
+statement ok
+ALTER TABLE my_datalake.default.fixture_openx_json SET ('ignore.malformed.json' = 'TRUE');
+
+query II
+SELECT id, name FROM my_datalake.default.fixture_openx_json ORDER BY id NULLS FIRST;
+----
+NULL	NULL
+1	a
+3	c
+
+statement ok
+ALTER TABLE my_datalake.default.fixture_openx_json RESET ('ignore.malformed.json');
+
+#---------------------------------------------------------------------------
+# the Hive JsonSerDe (CREATE TABLE ... WITH (format = 'json')) has no ignore.malformed.json: it is not applied
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.json_hive_malformed;
+
+statement ok
+CREATE TABLE my_datalake.default.json_hive_malformed (id INTEGER, name VARCHAR)
+WITH (format = 'json', location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/json_hive_malformed', 'ignore.malformed.json' = 'true');
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('{"id": 1, "name": "a"}'),
+    ('not json'),
+    ('{"id": 3, "name": "c"}')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/json_hive_malformed/data.json' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT id, name FROM my_datalake.default.json_hive_malformed;
+----
+<REGEX>:.*Malformed JSON.*
+
+statement ok
+DROP TABLE my_datalake.default.json_hive_malformed;

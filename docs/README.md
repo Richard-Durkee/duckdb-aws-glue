@@ -1,9 +1,11 @@
 # DuckDB Glue extension
 
-Experimental extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
+**Experimental** extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
 SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
 formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
 written.
+
+Use DDL/DML statements in this extension in production at your own risk. There is no guarantee that all incompatibilities between DuckDB and Trino/Spark engines writing to hive tables in glue have been discovered.
 
 ```sql
 CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');
@@ -27,7 +29,8 @@ Attach options:
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
-`read_json` (one object per line, keys by name; SerDe properties are not applied) and AvroSerDe with `read_avro`
+`read_json` (one object per line, keys by name; of the SerDe properties only the OpenX JsonSerDe's
+`ignore.malformed.json` is applied, see below) and AvroSerDe with `read_avro`
 (columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
 Text tables are read the way their SerDe reads them:
 
@@ -40,6 +43,8 @@ Text tables are read the way their SerDe reads them:
   NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
   `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
+- OpenX JsonSerDe: with `ignore.malformed.json` set to `true` the files are read with
+  `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
   line break.
@@ -60,7 +65,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
-  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a query reads at least
+  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). A filter the partition values decide is
+  true of every row the scan then reads, and is dropped from the plan, as for `read_parquet` with hive
+  partitioning. When a query reads at least
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
   partitions, and partitions at custom locations, are listed one directory each, 16 at the same time.
@@ -68,8 +75,11 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the
   parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
-  that one measurement by the partitions it reads, and a scan that lists the same directory reuses the listing.
-  Avro tables are not measured, so planning them lists nothing.
+  that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
+  count with their own size, the others with the average of those. A scan that lists the same directory reuses
+  the listing. Avro tables are not measured, so planning them lists nothing.
+- The Glue table definition and the partition list are fetched once per query and table, however often the
+  query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
@@ -133,6 +143,12 @@ their codec themselves.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
   codec is an error.
+- `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
+  avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
+  column with `glue_replace_columns` to do that deliberately). Partition keys, bucket and sort columns can not be
+  renamed.
+- `COMMENT ON COLUMN` sets the Glue column comment (`IS NULL` removes it); the comments of Glue columns show in
+  `duckdb_columns()`. Comments on partition keys and on views are not supported yet.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`
@@ -185,7 +201,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
 - `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
   `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
-  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name.
+  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name. For json,
+  `ignore_errors := true` reads a line that is not valid JSON as a row of NULLs.
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is
@@ -361,15 +378,24 @@ that takes `FORMAT`, `SF` and `SF_NAME`. The TPC-DS load needs a build without a
 a `D_ASSERT` in DuckDB's partitioned copy (see the header of `benchmark/tpcds/tpcds.benchmark.in` for a repro without
 Glue).
 
+`benchmark/{tpch,tpcds}/sf10/parquet/` run the same queries at SF10 (the TPC-DS load writes ~4 GB to S3), and
+`benchmark/{tpch,tpcds}/sf0.01/parquet/` at SF0.01, which has as many partitions and files as SF1 but almost no rows,
+so its timings are mostly the Glue calls, the S3 listings and the file opens. Neither runs in CI. (TPC-H q17 fails at
+SF0.01: DuckDB's answer file for it is empty, the query returns one NULL.)
+
 Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load has no effect while
 the tables are in Glue: rebuild the fixture with `make glue-fixture-down && make glue-fixture` first.
+
+`benchmark_runner` runs the benchmarks below its own root (the repository), not the working directory. DuckDB's own
+TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
+`--root-dir duckdb` (`'benchmark/tpcds/sf1/.*' --sf 10` for TPC-DS at SF10).
 
 `.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
 their timings (5 runs each) in a job per format: the TPC-H and TPC-DS benchmarks of that format, plus
 `benchmark/*.benchmark`, `benchmark/pushdown/` and `benchmark/optimizer/` in the parquet job. To keep the jobs short it
-skips the queries that take under 0.6s on parquet at SF1 and the ones that are mostly filtered scans of one table
-(TPC-H q06, TPC-DS q09, q28, q88, q90, q96), and per format the TPC-DS queries that time out or fail: q85 on parquet
-(bad join order), q95 except on csv (the CTE inliner can't copy the Glue scan), and q64 and q72 on avro.
+skips the queries that take under 0.6s on parquet at SF1 (TPC-H q06 and TPC-DS q96, mostly filtered scans of one table,
+among them), and per format the TPC-DS queries that time out or come close: q85 on parquet (the base build's join
+order takes ~75s at 2 threads) and q64 and q72 on avro (avro tables are not sampled for their row count).
 
 ## Building
 

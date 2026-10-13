@@ -17,6 +17,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -62,15 +63,25 @@ GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 // Scan
 //===--------------------------------------------------------------------===//
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
-	// Ask Glue what kind of table this is right before scanning: only Hive (Glue native) tables can be read
-	auto latest_info = RefreshTableInfo(context);
-	switch (latest_info.GetFormat()) {
+	// Ask Glue what kind of table this is right before scanning (once per query): only Hive (Glue native) tables can
+	// be read
+	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
+	    HiveQueryCache::TableKey(catalog.GetName().GetIdentifierName(), table_info.database_name, table_info.name));
+	shared_ptr<const GlueTableInfo> latest_info;
+	{
+		annotated_lock_guard<annotated_mutex> guard(entry->lock);
+		if (!entry->table_info) {
+			entry->table_info = make_shared_ptr<const GlueTableInfo>(RefreshTableInfo(context));
+		}
+		latest_info = entry->table_info;
+	}
+	switch (latest_info->GetFormat()) {
 	case GlueTableFormat::HIVE:
-		return GetHiveScanFunction(context, bind_data, latest_info);
+		return GetHiveScanFunction(context, bind_data, *latest_info);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
 		                              "glue_get_table_response() to inspect its definition",
-		                              latest_info.database_name, latest_info.name, latest_info.GetFormatName());
+		                              latest_info->database_name, latest_info->name, latest_info->GetFormatName());
 	}
 }
 
@@ -93,6 +104,9 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	}
 	if (scan_info->file_format == HiveFileFormat::CSV) {
 		scan_info->csv_options = latest_info.GetCSVOptions();
+	}
+	if (scan_info->file_format == HiveFileFormat::JSON) {
+		scan_info->json_options = latest_info.GetJSONOptions();
 	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());

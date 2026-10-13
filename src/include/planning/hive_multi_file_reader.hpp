@@ -31,6 +31,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
 	HiveCSVOptions csv_options;
+	HiveJSONOptions json_options;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
@@ -43,7 +44,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
-	//! The partition the file at 'path' belongs to
+	//! The partition (index into 'partitions') the file at 'path' belongs to
+	idx_t GetPartitionIndexOfFile(const string &path) const;
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
 	//! A description of the table for error messages
 	string Describe() const;
@@ -84,10 +86,10 @@ public:
 	unique_ptr<MultiFileList> DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const override;
 	//! Without listing: the number of partitions still to read as a lower bound (NOT_ALL_FILES_KNOWN)
 	MultiFileCount GetFileCount(idx_t min_exact_count = 0) const override;
-	//! The data files of one directory the scan reads, for measuring the table: the first partition's, or the location
-	//! of an unpartitioned table. The listing is kept until the query ends, and any scan listing the same directory in
-	//! the query takes it from there. When the scan lists the table root, the files of the first partition read in the
-	//! root's first page instead, and the scan continues that listing.
+	//! The data files listed to measure the table: the first partition's, or the location of an unpartitioned table.
+	//! The listing is kept until the query ends, and any scan listing the same directory in the query takes it from
+	//! there. When the scan lists the table root, the files of every partition the root's first page holds completely
+	//! instead (fetching more only until it holds one the scan reads), and the scan continues that listing.
 	vector<OpenFileInfo> ListSampleDirectory() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
@@ -107,8 +109,9 @@ private:
 	void ListRoot(const vector<idx_t> &partitions) const;
 	//! Lists the directories of 'partition_indexes' in parallel
 	void ListPartitions(const vector<idx_t> &partition_indexes) const;
-	//! The files of the first of 'partitions' in the root listing, fetching no more of it than needed
-	vector<OpenFileInfo> SampleRootPartition(const vector<idx_t> &partitions) const;
+	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
+	//! they hold one of 'partitions'
+	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than

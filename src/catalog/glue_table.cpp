@@ -8,6 +8,7 @@
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
@@ -107,6 +108,10 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	}
 	if (scan_info->file_format == HiveFileFormat::JSON) {
 		scan_info->json_options = latest_info.GetJSONOptions();
+		for (auto &property : scan_info->json_options.unsupported_properties) {
+			DUCKDB_LOG_WARNING(context, "Glue table '%s.%s': SerDe property '%s' is not applied when reading",
+			                   latest_info.database_name, latest_info.name, property);
+		}
 	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());

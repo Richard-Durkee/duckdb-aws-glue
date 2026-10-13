@@ -4,6 +4,8 @@
 
 # TPC-H at scale factor ${SF} generated locally with dbgen and written to Hive tables in the local Glue (moto) + S3
 # (MinIO) with CTAS:
+# The csv tables are '|'-delimited, like dbgen's own files: their text columns hold commas, which a csv table without
+# a quote character (LazySimpleSerDe) can not store. The delimiter is ignored by the other formats.
 # lineitem and orders are partitioned by 10-day buckets of l_shipdate and o_orderdate (l_shipbucket, o_orderbucket),
 # the other tables unpartitioned. A partition per day makes moto's GetPartitions dominate the timings. The queries in
 # benchmark/tpch/queries are DuckDB's with bucket filters added next to the date filters. The local tables are dropped
@@ -40,14 +42,14 @@ ATTACH '123456789012' AS my_datalake (
     DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
 );
 CREATE SCHEMA IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT};
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.lineitem PARTITIONED BY (l_shipbucket) WITH (format = '${FORMAT}') AS SELECT *, date_diff('day', DATE '1970-01-01', l_shipdate) // 10 AS l_shipbucket FROM lineitem;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.orders PARTITIONED BY (o_orderbucket) WITH (format = '${FORMAT}') AS SELECT *, date_diff('day', DATE '1970-01-01', o_orderdate) // 10 AS o_orderbucket FROM orders;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.customer WITH (format = '${FORMAT}') AS SELECT * FROM customer;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.part WITH (format = '${FORMAT}') AS SELECT * FROM part;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.partsupp WITH (format = '${FORMAT}') AS SELECT * FROM partsupp;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.supplier WITH (format = '${FORMAT}') AS SELECT * FROM supplier;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.nation WITH (format = '${FORMAT}') AS SELECT * FROM nation;
-CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.region WITH (format = '${FORMAT}') AS SELECT * FROM region;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.lineitem PARTITIONED BY (l_shipbucket) WITH (format = '${FORMAT}', delimiter = '|') AS SELECT *, date_diff('day', DATE '1970-01-01', l_shipdate) // 10 AS l_shipbucket FROM lineitem;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.orders PARTITIONED BY (o_orderbucket) WITH (format = '${FORMAT}', delimiter = '|') AS SELECT *, date_diff('day', DATE '1970-01-01', o_orderdate) // 10 AS o_orderbucket FROM orders;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.customer WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM customer;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.part WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM part;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.partsupp WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM partsupp;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.supplier WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM supplier;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.nation WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM nation;
+CREATE TABLE IF NOT EXISTS my_datalake.bench_tpch_${SF_NAME}_${FORMAT}.region WITH (format = '${FORMAT}', delimiter = '|') AS SELECT * FROM region;
 DROP TABLE lineitem;
 DROP TABLE orders;
 DROP TABLE customer;

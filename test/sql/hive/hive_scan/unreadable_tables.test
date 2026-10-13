@@ -1,0 +1,49 @@
+# name: test/sql/hive/hive_scan/unreadable_tables.test
+# description: Binding a Glue table the extension can not read fails with an error pointing to glue_get_table_response
+# group: [hive_scan]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# fixture_delta is a Delta table (scripts/docker-compose.yml)
+statement error
+SELECT * FROM my_datalake.default.fixture_delta;
+----
+<REGEX>:.*Glue table 'default.fixture_delta' has table format DELTA, which can not be read yet; use glue_get_table_response\(\).*
+
+statement error
+DESCRIBE my_datalake.default.fixture_delta;
+----
+<REGEX>:.*has table format DELTA.*glue_get_table_response\(\).*
+
+# fixture_orc is a Hive table stored as ORC (scripts/docker-compose.yml)
+statement error
+SELECT * FROM my_datalake.default.fixture_orc;
+----
+<REGEX>:.*uses SerDe 'org.apache.hadoop.hive.ql.io.orc.OrcSerde'.*use glue_get_table_response\(\) to inspect the table definition.*
+
+statement error
+DESCRIBE my_datalake.default.fixture_orc;
+----
+<REGEX>:.*uses SerDe 'org.apache.hadoop.hive.ql.io.orc.OrcSerde'.*glue_get_table_response\(\).*
+
+# the definitions can still be inspected
+query I
+SELECT count(*) > 0 FROM glue_get_table_response('my_datalake.default.fixture_delta');
+----
+true
+
+query I
+SELECT count(*) > 0 FROM glue_get_table_response('my_datalake.default.fixture_orc');
+----
+true

@@ -6,10 +6,10 @@
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
-namespace duckdb {
+#include "core/readers/hive_csv_options.hpp"
+#include "core/readers/hive_json_options.hpp"
 
-class Serializer;
-class Deserializer;
+namespace duckdb {
 
 //! The (open) table format a Glue table is stored in, derived from the table parameters
 enum class GlueTableFormat : uint8_t { ICEBERG, DELTA, HUDI, HIVE, UNKNOWN };
@@ -52,32 +52,6 @@ HiveFileFormat HiveFileFormatFromString(const string &format);
 //! read the data files and which engines write them
 enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
 HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde);
-
-//! How the files of a csv table are read
-struct HiveCSVOptions {
-	string delimiter = ",";
-	string quote = "\"";
-	string escape = "\"";
-	//! The header lines every file starts with
-	idx_t skip_lines = 0;
-	string null_string;
-	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
-	bool serde_fields = false;
-
-public:
-	void Serialize(Serializer &serializer) const;
-	static HiveCSVOptions Deserialize(Deserializer &deserializer);
-};
-
-//! How the files of a json table are read
-struct HiveJSONOptions {
-	//! A line that fails to parse is a row of NULLs (OpenX JsonSerDe ignore.malformed.json)
-	bool ignore_errors = false;
-
-public:
-	void Serialize(Serializer &serializer) const;
-	static HiveJSONOptions Deserialize(Deserializer &deserializer);
-};
 
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
 //! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.

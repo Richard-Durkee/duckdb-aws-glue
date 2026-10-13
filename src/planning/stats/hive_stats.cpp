@@ -1,4 +1,4 @@
-#include "planning/hive_stats.hpp"
+#include "planning/stats/hive_stats.hpp"
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -8,13 +8,14 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/logging/logger.hpp"
-#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "core/glue_types.hpp"
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -32,13 +33,18 @@ static optional_idx ListedFileSize(const OpenFileInfo &file) {
 }
 
 //===--------------------------------------------------------------------===//
-// Per-query cache
+// Table sample
 //===--------------------------------------------------------------------===//
-//! The measurement of one directory of a table
+struct HivePartitionSize {
+	idx_t files = 0;
+	idx_t bytes = 0;
+};
+
+//! The measurement of the files listed for a table: one directory, or the partitions of a root listing's first page
 struct HiveTableSample {
 	//! The directory was listed; false when the format is not measured or the listing failed
 	bool listed = false;
-	//! The data files in the directory, their total size, and the smallest and largest of them
+	//! The data files listed, their total size, and the smallest and largest of them
 	idx_t files = 0;
 	optional_idx bytes;
 	idx_t min_file_size = 0;
@@ -46,96 +52,9 @@ struct HiveTableSample {
 	//! The rows and size of the file measured, the largest
 	optional_idx file_rows;
 	optional_idx file_bytes;
+	//! The files and bytes of each partition listed (of a partitioned table): the totals above are over these
+	unordered_map<idx_t, HivePartitionSize> partition_sizes;
 };
-
-//! The sample of a table, measured once per query for every scan of the table
-struct HiveTableSampleEntry {
-	annotated_mutex lock;
-	//! Null until the first scan of the table measures it
-	unique_ptr<HiveTableSample> sample DUCKDB_GUARDED_BY(lock);
-};
-
-//! The partitions of a table, fetched once per query for every scan of the table
-struct HiveTablePartitionsEntry {
-	annotated_mutex lock;
-	//! Null until the first scan of the table asks for them
-	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
-};
-
-static constexpr const char *HIVE_QUERY_CACHE = "glue_hive_query_cache";
-
-//! What the scans of the running query share per table and directory, dropped when the query ends
-class HiveQueryCache : public ClientContextState {
-public:
-	void QueryEnd(ClientContext &context) override {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		samples.clear();
-		partitions.clear();
-		directory_listings.clear();
-	}
-	shared_ptr<HiveTableSampleEntry> GetSample(const string &table) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &sample = samples[table];
-		if (!sample) {
-			sample = make_shared_ptr<HiveTableSampleEntry>();
-		}
-		return sample;
-	}
-	shared_ptr<HiveTablePartitionsEntry> GetPartitions(const string &table) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &entry = partitions[table];
-		if (!entry) {
-			entry = make_shared_ptr<HiveTablePartitionsEntry>();
-		}
-		return entry;
-	}
-	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory) {
-		annotated_lock_guard<annotated_mutex> guard(lock);
-		auto &listing = directory_listings[directory];
-		if (!listing) {
-			auto &fs = FileSystem::GetFileSystem(context);
-			listing = shared_ptr<MultiFileList>(fs.GlobFileList(directory + "/**", FileGlobOptions::ALLOW_EMPTY));
-		}
-		return listing;
-	}
-
-private:
-	annotated_mutex lock;
-	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
-	unordered_map<string, shared_ptr<HiveTablePartitionsEntry>> partitions DUCKDB_GUARDED_BY(lock);
-	//! The recursive listing of a directory, fetched page by page as it is read
-	unordered_map<string, shared_ptr<MultiFileList>> directory_listings DUCKDB_GUARDED_BY(lock);
-};
-
-static shared_ptr<HiveQueryCache> GetQueryCache(ClientContext &context) {
-	return context.registered_state->GetOrCreate<HiveQueryCache>(HIVE_QUERY_CACHE);
-}
-
-static string TableKey(const HiveScanInfo &info) {
-	return info.catalog_name + "." + info.Describe();
-}
-
-static string DirectoryKey(const string &location) {
-	auto directory = location;
-	StringUtil::RTrim(directory, "/");
-	return directory;
-}
-
-shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory) {
-	return GetQueryCache(context)->GetDirectoryListing(context, DirectoryKey(directory));
-}
-
-shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
-	auto entry = GetQueryCache(context)->GetPartitions(TableKey(info));
-	// per table, so the Glue calls for different tables do not wait on each other
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	if (!entry->partitions) {
-		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
-		entry->partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
-		    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
-	}
-	return entry->partitions;
-}
 
 //===--------------------------------------------------------------------===//
 // Cardinality sample
@@ -264,8 +183,19 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 		auto listed = files.ListSampleDirectory();
 		sample.listed = true;
 		sample.files = listed.size();
-		// the largest file carries the least per-file format overhead, so it is the least misleading one to measure
+		// The file measured is the largest of the partitions the scan reads: the largest carries the least per-file
+		// format overhead, so it is the least misleading one, and a file of a partition the scan does not read is
+		// not opened. The others listed only count with their sizes.
+		unordered_set<idx_t> reading;
+		if (!info.partition_keys.empty()) {
+			auto partition_indexes = files.PartitionIndexes();
+			reading.insert(partition_indexes->begin(), partition_indexes->end());
+		}
+		auto measurable = [&](const OpenFileInfo &file) {
+			return info.partition_keys.empty() || reading.count(info.GetPartitionIndexOfFile(file.path)) > 0;
+		};
 		optional_idx measured;
+		idx_t measured_size = 0;
 		idx_t bytes = 0;
 		idx_t sized = 0;
 		for (idx_t i = 0; i < listed.size(); i++) {
@@ -276,19 +206,37 @@ static HiveTableSample MeasureTable(ClientContext &context, const MultiFileBindD
 			if (sized == 0 || size.GetIndex() < sample.min_file_size) {
 				sample.min_file_size = size.GetIndex();
 			}
-			if (!measured.IsValid() || size.GetIndex() > sample.max_file_size) {
-				sample.max_file_size = size.GetIndex();
+			sample.max_file_size = MaxValue(sample.max_file_size, size.GetIndex());
+			if (measurable(listed[i]) && (!measured.IsValid() || size.GetIndex() > measured_size)) {
+				measured_size = size.GetIndex();
 				measured = i;
 			}
 			bytes += size.GetIndex();
 			sized++;
 		}
+		// a file the listing gave no size for counts as an average one
+		auto average_file_size = sized > 0 ? bytes / sized : 0;
 		if (sized > 0) {
-			// a file the listing gave no size for counts as an average one
-			sample.bytes = bytes + (bytes / sized) * (listed.size() - sized);
+			sample.bytes = bytes + average_file_size * (listed.size() - sized);
+		}
+		if (!info.partition_keys.empty()) {
+			for (auto &file : listed) {
+				auto &partition = sample.partition_sizes[info.GetPartitionIndexOfFile(file.path)];
+				partition.files++;
+				auto size = ListedFileSize(file);
+				partition.bytes += size.IsValid() ? size.GetIndex() : average_file_size;
+			}
 		}
 		if (listed.empty()) {
 			return sample;
+		}
+		if (!measured.IsValid()) {
+			// no sizes listed: the first file the scan reads
+			for (idx_t i = 0; i < listed.size() && !measured.IsValid(); i++) {
+				if (measurable(listed[i])) {
+					measured = i;
+				}
+			}
 		}
 		auto &file = listed[measured.IsValid() ? measured.GetIndex() : 0];
 		sample.file_bytes = ListedFileSize(file);
@@ -312,9 +260,21 @@ static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, c
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
-//! Cardinality of a Hive scan: one directory of the table, measured once per query, scaled by the partitions this
-//! scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the same,
-//! and csv and json are estimated at one row.
+//! The sample of the table 'hive_list' reads, measured by the first scan of the table in this query to ask
+static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, const MultiFileBindData &bind_data,
+                                                     const HiveMultiFileList &hive_list) {
+	auto &info = hive_list.ScanInfo();
+	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->sample) {
+		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
+	}
+	return entry->sample;
+}
+
+//! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
+//! this scan reads. Replaces a constant: without it a 40-row dimension table and a 200,000-row fact table cost the
+//! same, and csv and json are estimated at one row.
 unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const FunctionData *bind_data_p) {
 	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
 	auto &hive_list = bind_data.file_list->Cast<HiveMultiFileList>();
@@ -324,16 +284,8 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
 	}
-	auto listing = GetQueryCache(context)->GetSample(TableKey(info));
-	HiveTableSample sample;
-	{
-		annotated_lock_guard<annotated_mutex> guard(listing->lock);
-		if (!listing->sample) {
-			listing->sample = make_uniq<HiveTableSample>(MeasureTable(context, bind_data, hive_list));
-		}
-		// a copy: the sample is a few idx_t, and the estimate below then reads it without the lock
-		sample = *listing->sample;
-	}
+	auto sample_ptr = SampleTable(context, bind_data, hive_list);
+	auto &sample = *sample_ptr;
 	if (!sample.file_rows.IsValid()) {
 		if (sample.listed && sample.files == 0 && info.partition_keys.empty()) {
 			// the only directory of the table holds no data file
@@ -341,21 +293,46 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 		}
 		return UnsampledCardinality(context, bind_data);
 	}
-	// An estimate, never a max: max_cardinality is a bound the optimizer may rely on, and one directory says nothing
-	// about the size of the rest.
+	// The files and bytes the scan reads: those of its partitions the listing saw, and for each of the rest the
+	// average of the partitions it saw
+	auto files = static_cast<double>(sample.files);
+	auto bytes = sample.bytes.IsValid() ? static_cast<double>(sample.bytes.GetIndex()) : 0.0;
+	if (!info.partition_keys.empty() && !sample.partition_sizes.empty()) {
+		auto seen = static_cast<double>(sample.partition_sizes.size());
+		auto average_files = files / seen;
+		auto average_bytes = bytes / seen;
+		files = 0;
+		bytes = 0;
+		for (auto partition_index : *hive_list.PartitionIndexes()) {
+			auto entry = sample.partition_sizes.find(partition_index);
+			if (entry == sample.partition_sizes.end()) {
+				files += average_files;
+				bytes += average_bytes;
+			} else {
+				files += static_cast<double>(entry->second.files);
+				bytes += static_cast<double>(entry->second.bytes);
+			}
+		}
+	} else {
+		files *= static_cast<double>(partitions);
+		bytes *= static_cast<double>(partitions);
+	}
+	// An estimate, never a max: max_cardinality is a bound the optimizer may rely on, and the files listed say
+	// nothing about the size of the rest.
 	//
 	// Files of about one size hold about one number of rows, so the measured file stands in for all of them and the
 	// answer is exact when they are equal -- which is the normal shape, one similar file per INSERT. Once they differ
 	// by more than a factor of two the count says nothing (10 rows beside 90,000 is two files either way) and only
 	// bytes carry the difference.
+	double rows;
 	if (sample.bytes.IsValid() && sample.file_bytes.IsValid() && sample.file_bytes.GetIndex() > 0 &&
 	    sample.max_file_size > sample.min_file_size * 2) {
-		auto total_bytes = sample.bytes.GetIndex() * partitions;
-		auto rows = static_cast<double>(total_bytes) / static_cast<double>(sample.file_bytes.GetIndex()) *
-		            static_cast<double>(sample.file_rows.GetIndex());
-		return make_uniq<NodeStatistics>(MaxValue<idx_t>(static_cast<idx_t>(rows), 1));
+		rows = bytes / static_cast<double>(sample.file_bytes.GetIndex()) *
+		       static_cast<double>(sample.file_rows.GetIndex());
+	} else {
+		rows = static_cast<double>(sample.file_rows.GetIndex()) * files;
 	}
-	return make_uniq<NodeStatistics>(sample.file_rows.GetIndex() * sample.files * partitions);
+	return make_uniq<NodeStatistics>(MaxValue<idx_t>(static_cast<idx_t>(rows + 0.5), files > 0 ? 1 : 0));
 }
 
 //===--------------------------------------------------------------------===//

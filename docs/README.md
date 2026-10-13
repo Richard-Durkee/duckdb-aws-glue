@@ -27,7 +27,8 @@ Attach options:
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
-`read_json` (one object per line, keys by name; SerDe properties are not applied) and AvroSerDe with `read_avro`
+`read_json` (one object per line, keys by name; of the SerDe properties only the OpenX JsonSerDe's
+`ignore.malformed.json` is applied, see below) and AvroSerDe with `read_avro`
 (columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
 Text tables are read the way their SerDe reads them:
 
@@ -40,6 +41,8 @@ Text tables are read the way their SerDe reads them:
   NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
   `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
+- OpenX JsonSerDe: with `ignore.malformed.json` set to `true` the files are read with
+  `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
   line break.
@@ -185,7 +188,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
 - `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
   `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
-  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name.
+  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name. For json,
+  `ignore_errors := true` reads a line that is not valid JSON as a row of NULLs.
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is

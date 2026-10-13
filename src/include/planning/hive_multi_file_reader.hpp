@@ -33,6 +33,7 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
 	HiveCSVOptions csv_options;
+	HiveJSONOptions json_options;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,

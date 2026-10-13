@@ -535,6 +535,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(110, "columns", info.names);
 	serializer.WriteProperty(111, "column_types", info.types);
 	serializer.WriteProperty(112, "csv_options", info.csv_options);
+	serializer.WriteProperty(113, "json_options", info.json_options);
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
@@ -553,6 +554,7 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	info->names = deserializer.ReadProperty<vector<Identifier>>(110, "columns");
 	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
 	info->csv_options = deserializer.ReadProperty<HiveCSVOptions>(112, "csv_options");
+	info->json_options = deserializer.ReadProperty<HiveJSONOptions>(113, "json_options");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
@@ -623,6 +625,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		function_name = "read_json";
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["format"] = Value("newline_delimited");
+		if (scan_info->json_options.ignore_errors) {
+			param_map["ignore_errors"] = Value::BOOLEAN(true);
+		}
 		break;
 	case HiveFileFormat::AVRO:
 		// the files carry their schema, columns are matched by name like parquet

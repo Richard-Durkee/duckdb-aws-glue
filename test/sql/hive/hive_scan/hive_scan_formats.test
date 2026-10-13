@@ -109,6 +109,25 @@ SELECT id, note FROM hive_scan('{TEST_DIR}/fmt_json', format := 'json',
 ----
 3	NULL
 
+# a line that is not valid JSON fails the scan, or is a row of NULLs with ignore_errors
+statement ok
+COPY (SELECT * FROM (VALUES ('{"id": 1, "name": "a"}'), ('not json'), ('{"id": 3, "name": "c"}')) t(line))
+TO '{TEST_DIR}/fmt_json_malformed' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '', PER_THREAD_OUTPUT true);
+
+statement error
+SELECT id, name FROM hive_scan('{TEST_DIR}/fmt_json_malformed', format := 'json', schema := {id: 'INTEGER', name: 'VARCHAR'});
+----
+<REGEX>:.*Malformed JSON.*
+
+query II
+SELECT id, name FROM hive_scan('{TEST_DIR}/fmt_json_malformed', format := 'json', schema := {id: 'INTEGER', name: 'VARCHAR'},
+    ignore_errors := true)
+ORDER BY id NULLS FIRST;
+----
+NULL	NULL
+1	a
+3	c
+
 #---------------------------------------------------------------------------
 # filters on data columns: every format scans with its own reader, so a filter it does not take is applied after it
 #---------------------------------------------------------------------------

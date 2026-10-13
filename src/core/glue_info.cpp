@@ -226,6 +226,13 @@ idx_t GlueTableInfo::GetHeaderLineCount() const {
 	return GetCountProperty("skip.header.line.count");
 }
 
+bool GlueTableInfo::IgnoresMalformedJson() const {
+	// only the OpenX JsonSerDe has the property; only "true", in any case, turns it on
+	string value;
+	return GetSerDe() == HiveSerDe::OPENX_JSON && TryGetProperty("ignore.malformed.json", value) &&
+	       StringUtil::CIEquals(value, "true");
+}
+
 void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	D_ASSERT(IsTextFileFormat(format));
 	auto refuse = [&](const string &what) {
@@ -340,6 +347,12 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	return options;
 }
 
+HiveJSONOptions GlueTableInfo::GetJSONOptions() const {
+	HiveJSONOptions options;
+	options.ignore_errors = IgnoresMalformedJson();
+	return options;
+}
+
 GlueTableFormat GlueTableInfo::GetFormat() const {
 	// Open table formats register themselves through the 'table_type' parameter
 	auto table_type = StringUtil::Upper(GetParameter("table_type"));
@@ -420,6 +433,16 @@ HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
 	result.skip_lines = deserializer.ReadProperty<idx_t>(103, "skip_lines");
 	result.null_string = deserializer.ReadProperty<string>(104, "null_string");
 	result.serde_fields = deserializer.ReadProperty<bool>(105, "serde_fields");
+	return result;
+}
+
+void HiveJSONOptions::Serialize(Serializer &serializer) const {
+	serializer.WriteProperty(100, "ignore_errors", ignore_errors);
+}
+
+HiveJSONOptions HiveJSONOptions::Deserialize(Deserializer &deserializer) {
+	HiveJSONOptions result;
+	result.ignore_errors = deserializer.ReadProperty<bool>(100, "ignore_errors");
 	return result;
 }
 

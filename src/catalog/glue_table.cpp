@@ -94,6 +94,9 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	if (scan_info->file_format == HiveFileFormat::CSV) {
 		scan_info->csv_options = latest_info.GetCSVOptions();
 	}
+	if (scan_info->file_format == HiveFileFormat::JSON) {
+		scan_info->json_options = latest_info.GetJSONOptions();
+	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());
 		scan_info->types.push_back(column.Type());

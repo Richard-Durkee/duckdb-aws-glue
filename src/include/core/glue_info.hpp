@@ -69,6 +69,16 @@ public:
 	static HiveCSVOptions Deserialize(Deserializer &deserializer);
 };
 
+//! How the files of a json table are read
+struct HiveJSONOptions {
+	//! A line that fails to parse is a row of NULLs (OpenX JsonSerDe ignore.malformed.json)
+	bool ignore_errors = false;
+
+public:
+	void Serialize(Serializer &serializer) const;
+	static HiveJSONOptions Deserialize(Deserializer &deserializer);
+};
+
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
 //! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.
 enum class GlueTableType : uint8_t { EXTERNAL_TABLE, VIRTUAL_VIEW, OTHER };
@@ -144,6 +154,8 @@ public:
 	string GetNullFormat() const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
+	//! OpenX JsonSerDe's ignore.malformed.json, false for other SerDes
+	bool IgnoresMalformedJson() const;
 	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote
@@ -152,6 +164,8 @@ public:
 	string GetEscapeCharacter() const;
 	//! How the files of a csv table are read
 	HiveCSVOptions GetCSVOptions() const;
+	//! How the files of a json table are read
+	HiveJSONOptions GetJSONOptions() const;
 
 private:
 	//! A non-negative integer property, 0 when not set

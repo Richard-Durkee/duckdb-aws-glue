@@ -224,13 +224,6 @@ idx_t GlueTableInfo::GetHeaderLineCount() const {
 	return GetCountProperty("skip.header.line.count");
 }
 
-bool GlueTableInfo::IgnoresMalformedJson() const {
-	// only the OpenX JsonSerDe has the property; only "true", in any case, turns it on
-	string value;
-	return GetSerDe() == HiveSerDe::OPENX_JSON && TryGetProperty("ignore.malformed.json", value) &&
-	       StringUtil::CIEquals(value, "true");
-}
-
 void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	D_ASSERT(IsTextFileFormat(format));
 	auto refuse = [&](const string &what) {
@@ -346,9 +339,7 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 }
 
 HiveJSONOptions GlueTableInfo::GetJSONOptions() const {
-	HiveJSONOptions options;
-	options.ignore_errors = IgnoresMalformedJson();
-	return options;
+	return HiveJSONOptions::FromTable(*this);
 }
 
 GlueTableFormat GlueTableInfo::GetFormat() const {

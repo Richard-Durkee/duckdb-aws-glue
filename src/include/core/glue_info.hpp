@@ -128,8 +128,6 @@ public:
 	string GetNullFormat() const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
-	//! OpenX JsonSerDe's ignore.malformed.json, false for other SerDes
-	bool IgnoresMalformedJson() const;
 	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote

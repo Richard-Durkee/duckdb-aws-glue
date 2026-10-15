@@ -41,7 +41,7 @@ SELECT len(columns) FROM glue_replace_columns('my_datalake.default.replace_cols'
     attrs: 'MAP(VARCHAR, INTEGER)',
     nested: 'STRUCT(a INTEGER, b STRUCT(c VARCHAR)[])',
     price: 'DECIMAL(10, 2)',
-    "Mixed Case": 'DATE'
+    "mixed case": 'DATE'
 }, comments := {id: 'the id', nested: 'it''s nested, (really)'});
 ----
 7
@@ -55,7 +55,7 @@ tags	array<string>	NULL
 attrs	map<string,int>	NULL
 nested	struct<a:int,b:array<struct<c:string>>>	it's nested, (really)
 price	decimal(10,2)	NULL
-Mixed Case	date	NULL
+mixed case	date	NULL
 
 query II
 SELECT partition_keys[1].name, len(partition_keys) FROM glue_get_table_response('my_datalake.default.replace_cols');
@@ -73,7 +73,7 @@ tags	VARCHAR[]
 attrs	MAP(VARCHAR, INTEGER)
 nested	STRUCT(a INTEGER, b STRUCT(c VARCHAR)[])
 price	DECIMAL(10,2)
-Mixed Case	DATE
+mixed case	DATE
 dt	VARCHAR
 
 # parquet columns are matched by name: 'id' is widened, the dropped 'extra' is gone, the new columns are NULL

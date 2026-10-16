@@ -83,6 +83,15 @@ void HiveScanInfo::SetPartitions(vector<GluePartitionInfo> partitions_p) {
 	partitions = make_shared_ptr<const vector<GluePartitionInfo>>(std::move(partitions_p));
 }
 
+shared_ptr<const HivePartitionLocations> HiveScanInfo::PartitionLocations(ClientContext &context) const {
+	auto all = Partitions(context);
+	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
+	if (!partition_locations) {
+		partition_locations = make_shared_ptr<const HivePartitionLocations>(*all);
+	}
+	return partition_locations;
+}
+
 idx_t HiveScanInfo::GetPartitionIndexOfFile(const string &path) const {
 	lock_guard<mutex> guard(file_partitions_lock);
 	auto entry = file_partitions.find(path);
@@ -202,43 +211,6 @@ void HiveMultiFileList::PlanListings() const {
 	}
 }
 
-void HiveMultiFileList::BuildPartitionLocations() const {
-	if (partition_locations_built) {
-		return;
-	}
-	partition_locations_built = true;
-	auto partitions = scan_info->Partitions(client_context);
-	for (idx_t i = 0; i < partitions->size(); i++) {
-		auto location = (*partitions)[i].location;
-		StringUtil::RTrim(location, "/");
-		if (location.empty()) {
-			continue;
-		}
-		// two partitions on the same location: the first wins, as in AddFile
-		partition_by_location.emplace(std::move(location), i);
-	}
-}
-
-optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t min_directory_size) const {
-	auto separator = file_path.find_last_of('/');
-	if (separator == string::npos) {
-		return optional_idx();
-	}
-	auto directory = file_path.substr(0, separator);
-	while (directory.size() >= min_directory_size) {
-		auto entry = partition_by_location.find(directory);
-		if (entry != partition_by_location.end()) {
-			return optional_idx(entry->second);
-		}
-		auto parent = directory.find_last_of('/');
-		if (parent == string::npos) {
-			break;
-		}
-		directory = directory.substr(0, parent);
-	}
-	return optional_idx();
-}
-
 void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 	auto partitions = scan_info->Partitions(client_context);
 	auto &partition = (*partitions)[partition_index];
@@ -252,11 +224,11 @@ void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 	StringUtil::RTrim(location, "/");
 	vector<OpenFileInfo> partition_files;
 	ListDataFiles(client_context, location, partition_files);
-	BuildPartitionLocations();
+	auto locations = scan_info->PartitionLocations(client_context);
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : partition_files) {
 		// skip files of another partition registered at a location nested inside this one
-		auto owner = OwningPartition(file.path, location.size());
+		auto owner = locations->Owner(file.path, location.size());
 		if (owner.IsValid() && owner.GetIndex() != partition_index) {
 			continue;
 		}
@@ -295,14 +267,14 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 		}
 		reading.insert(partition_index);
 	}
-	BuildPartitionLocations();
+	auto locations = scan_info->PartitionLocations(client_context);
 	auto root_prefix = root + "/";
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
 		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
 			continue;
 		}
-		auto partition_index = OwningPartition(file.path, root.size() + 1);
+		auto partition_index = locations->Owner(file.path, root.size() + 1);
 		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
 			continue;
 		}
@@ -391,10 +363,10 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	vector<OpenFileInfo> listed;
 	ListDataFiles(client_context, location, listed);
 	// as ListPartition keeps them: not the files of a partition registered at a location nested inside this one
-	BuildPartitionLocations();
+	auto locations = scan_info->PartitionLocations(client_context);
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
-		auto owner = OwningPartition(file.path, location.size());
+		auto owner = locations->Owner(file.path, location.size());
 		if (owner.IsValid() && owner.GetIndex() != partition_index) {
 			continue;
 		}
@@ -410,7 +382,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 	auto root_prefix = root + "/";
 	auto listing = HiveQueryCache::Get(client_context)->GetDirectoryListing(client_context, root);
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
-	BuildPartitionLocations();
+	auto locations = scan_info->PartitionLocations(client_context);
 	optional_idx sampled;
 	string sampled_prefix;
 	bool in_sampled = false;
@@ -444,7 +416,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
 		}
-		auto owner = OwningPartition(file.path, root_prefix.size());
+		auto owner = locations->Owner(file.path, root_prefix.size());
 		if (!owner.IsValid()) {
 			continue;
 		}

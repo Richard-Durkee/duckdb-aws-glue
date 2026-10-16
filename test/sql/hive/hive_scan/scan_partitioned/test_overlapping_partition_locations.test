@@ -94,3 +94,44 @@ RESET hive_partition_listing_threshold;
 
 statement ok
 DROP TABLE my_datalake.default.overlap_orders;
+
+# two partitions sharing one location: its files belong to whichever Glue lists first, never to both
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.shared_location_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.shared_location_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL glue_add_partition('my_datalake.default.shared_location_orders', {dt: 'a'});
+
+statement ok
+CALL glue_add_partition('my_datalake.default.shared_location_orders', {dt: 'b'},
+    location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/shared_location_orders/dt=a');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/shared_location_orders/dt=a/f.parquet';
+
+foreach threshold 1 10
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query I
+SELECT id FROM my_datalake.default.shared_location_orders;
+----
+1
+
+query I
+SELECT (SELECT count(*) FROM my_datalake.default.shared_location_orders WHERE dt = 'a')
+     + (SELECT count(*) FROM my_datalake.default.shared_location_orders WHERE dt = 'b');
+----
+1
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.shared_location_orders;

@@ -9,6 +9,7 @@
 #include "duckdb/function/table_function.hpp"
 
 #include "core/glue_info.hpp"
+#include "planning/hive_partition_locations.hpp"
 
 namespace duckdb {
 
@@ -54,10 +55,13 @@ struct HiveScanInfo : public TableFunctionInfo {
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+	//! Which of Partitions() owns a data file, built on first use and shared with every file list of the scan
+	shared_ptr<const HivePartitionLocations> PartitionLocations(ClientContext &context) const;
 
 private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
+	mutable shared_ptr<const HivePartitionLocations> partition_locations DUCKDB_GUARDED_BY(partitions_lock);
 };
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
@@ -110,11 +114,6 @@ private:
 	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
 	//! they hold one of 'partitions'
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
-	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
-	void BuildPartitionLocations() const;
-	//! The partition of the deepest registered location containing the file, searching no shorter than
-	//! 'min_directory_size'
-	optional_idx OwningPartition(const string &file_path, idx_t min_directory_size) const;
 	//! Add a listed file of the partition unless this list already has it (two partitions sharing a location: the
 	//! file belongs to the first). Called with HiveScanInfo::file_partitions_lock held.
 	void AddFile(OpenFileInfo file, idx_t partition_index) const;
@@ -133,9 +132,6 @@ private:
 	mutable idx_t next_job = 0;
 	//! The paths already in 'expanded_files'
 	mutable unordered_set<string> listed_files;
-	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::Partitions()
-	mutable unordered_map<string, idx_t> partition_by_location;
-	mutable bool partition_locations_built = false;
 };
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of

@@ -24,6 +24,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
 #include "execution/hive_copy.hpp"
 
@@ -544,6 +545,10 @@ using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
+	if (!state.written_files.empty()) {
+		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
+		GlueTransactionCache::Invalidate(context, catalog);
+	}
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		return SinkFinalizeType::READY;
 	}

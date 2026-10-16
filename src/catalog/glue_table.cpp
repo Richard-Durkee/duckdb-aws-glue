@@ -17,6 +17,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -53,11 +54,19 @@ vector<column_t> GlueTable::GetRowIdColumns() const {
 
 GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
-	GlueTableInfo result;
-	if (!GlueAPI::GetTable(context, glue_catalog, table_info.database_name, table_info.name, result)) {
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		GlueTableInfo info;
+		if (!GlueAPI::GetTable(context, glue_catalog, table_info.database_name, table_info.name, info)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(info));
+	};
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto result = cache ? cache->GetTable(table_info.database_name, table_info.name, load) : load();
+	if (!result) {
 		throw CatalogException("Glue table '%s.%s' no longer exists", table_info.database_name, table_info.name);
 	}
-	return result;
+	return *result;
 }
 
 //===--------------------------------------------------------------------===//

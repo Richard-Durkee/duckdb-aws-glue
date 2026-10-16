@@ -66,6 +66,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "not write one: INSERT into it and CREATE TABLE ... AS with these options are refused. "
 	                          "Default false.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	config.AddExtensionOption("glue_metadata_cache_scope",
+	                          "How long resolved Glue metadata (tables, partitions) is reused: 'transaction' (default) "
+	                          "re-resolves per transaction, so writes from other sessions become visible between "
+	                          "statements; 'connection' serves both binds of a prepared statement and later statements "
+	                          "from one cache until a write through this connection invalidates it. A change takes "
+	                          "effect on the next transaction.",
+	                          LogicalType::VARCHAR, Value("transaction"));
 
 	config.AddExtensionOption("hive_partition_listing_threshold",
 	                          "When a scan reads at least this many partitions below the table location, the location "

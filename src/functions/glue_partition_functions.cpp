@@ -11,6 +11,7 @@
 #include "api/glue_api.hpp"
 #include "core/glue_types.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -233,7 +234,12 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 	}
 	names.emplace_back("location");
 	return_types.emplace_back(LogicalType::VARCHAR);
-	result->partitions = GlueAPI::GetPartitions(context, *result->target.catalog, table.database_name, table.name);
+	auto load_partitions = [&]() {
+		return make_shared_ptr<const vector<GluePartitionInfo>>(
+		    GlueAPI::GetPartitions(context, *result->target.catalog, table.database_name, table.name));
+	};
+	auto &cache = *GlueTransaction::Get(context, *result->target.catalog).cache;
+	result->partitions = *cache.GetPartitions(table.database_name, table.name, load_partitions);
 	return std::move(result);
 }
 

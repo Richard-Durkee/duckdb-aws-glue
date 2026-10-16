@@ -10,6 +10,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -52,7 +53,14 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 		return;
 	}
 	auto tables = GlueAPI::GetTables(context, catalog, schema.database_info.name);
+	auto cache = GlueTransactionCache::Of(context, catalog);
 	for (auto &table : tables) {
+		if (cache) {
+			// Without this the per reference RefreshTableInfo re-fetches every table this one request
+			// already returned, which makes the bulk round trip pure added cost
+			shared_ptr<const GlueTableInfo> info = make_shared_ptr<const GlueTableInfo>(table);
+			cache->GetTable(schema.database_info.name, table.name, [&info]() { return info; });
+		}
 		if (entries.find(table.name) != entries.end()) {
 			// already loaded through a direct lookup
 			continue;
@@ -84,12 +92,19 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	if (entry != entries.end()) {
 		return entry->second.get();
 	}
-	// not cached, ask Glue for this table directly
-	GlueTableInfo table;
-	if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		GlueTableInfo table;
+		if (!GlueAPI::GetTable(context, catalog, schema.database_info.name, name, table)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(table));
+	};
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto table = cache ? cache->GetTable(schema.database_info.name, name, load) : load();
+	if (!table) {
 		return nullptr;
 	}
-	auto result = entries.emplace(table.name, CreateEntry(table));
+	auto result = entries.emplace(table->name, CreateEntry(*table));
 	return result.first->second.get();
 }
 

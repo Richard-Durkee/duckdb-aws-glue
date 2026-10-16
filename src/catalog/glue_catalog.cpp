@@ -21,6 +21,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -132,6 +133,10 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 		throw CatalogException("Glue database \"%s\" was created but could not be fetched afterwards", schema_name);
 	}
 	return schemas.CreateEntry(schemas.CreateSchemaEntry(created));
+}
+
+void GlueCatalog::OnDetach(ClientContext &context) {
+	GlueTransactionCache::OnDetach(context, *this);
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {

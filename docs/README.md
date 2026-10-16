@@ -186,6 +186,15 @@ of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue
 ...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
 `COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
 
+Within a DuckDB transaction
+(`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
+inside those partitions are listed at each scan. So a partition added outside the transaction becomes visible only after the transaction ends, while
+a file added to an existing partition is seen at once.
+
+With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the connection's later transactions. It is
+per connection — two connections never share one — so another connection's write stays unseen until something clears
+this connection's cache: a write through it, a rollback, or DETACH.
+
 ## Views
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...`, `CREATE SECURE VIEW` and

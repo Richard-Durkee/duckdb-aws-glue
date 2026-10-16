@@ -26,8 +26,9 @@ void CheckWritable(const GlueCatalog &catalog, const string &operation);
 template <class OUTCOME>
 [[noreturn]] void ThrowGlueError(const OUTCOME &outcome, const string &operation) {
 	auto &error = outcome.GetError();
-	throw IOException("Glue %s failed: %s (%s)", operation, ToStdString(error.GetMessage()),
-	                  ToStdString(error.GetExceptionName()));
+	auto message = Exception::ConstructMessage("Glue %s failed: %s (%s)", operation, ToStdString(error.GetMessage()),
+	                                           ToStdString(error.GetExceptionName()));
+	throw GlueException(message, error.GetErrorType() == Aws::Glue::GlueErrors::ACCESS_DENIED);
 }
 
 template <class OUTCOME>

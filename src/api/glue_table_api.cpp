@@ -41,7 +41,7 @@ vector<GlueTableInfo> GlueAPI::GetTables(ClientContext &context, GlueCatalog &ca
 				return {};
 			}
 			// a database whose tables we may not list must not fail listing the ones we may
-			if (IsAccessDenied(outcome)) {
+			if (IsAccessDenied(outcome) && !single_page) {
 				DUCKDB_LOG_WARNING(context, "Not listing the tables of Glue database '%s': %s", database_name,
 				                   ToStdString(outcome.GetError().GetMessage()));
 				return {};

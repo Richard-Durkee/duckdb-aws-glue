@@ -14,6 +14,8 @@
 #   docker compose -f scripts/docker-compose.yml up -d
 #   AWS_EC2_METADATA_DISABLED=true ./build/relassert/test/unittest --test-config test/configs/local_glue.json 'test/sql/*'
 # Ports 5555 and 9100 are used so that they do not clash with macOS (5000) and other S3 instances (9000).
+# 'fault-proxy' (port 5556, GLUE_FAULT_ENDPOINT) forwards to moto, except GetTables on a database named fault_*, which
+# fails with the Glue error scripts/glue_fault_proxy.py assigns to that prefix.
 name: duckdb-glue
 services:
   moto:
@@ -23,6 +25,16 @@ services:
       - "5555:5000"
     environment:
       - MOTO_PORT=5000
+  fault-proxy:
+    image: motoserver/moto:5.2.3
+    container_name: glue-fault-proxy
+    depends_on:
+      - moto
+    ports:
+      - "5556:5556"
+    volumes:
+      - ./glue_fault_proxy.py:/glue_fault_proxy.py:ro
+    entrypoint: ["python3", "/glue_fault_proxy.py", "--port", "5556", "--upstream", "http://moto:5000"]
   s3:
     image: chrislusf/seaweedfs:4.47
     container_name: glue-s3

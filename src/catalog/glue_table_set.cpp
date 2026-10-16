@@ -101,9 +101,12 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 	vector<GlueTableInfo> tables;
 	try {
 		tables = GlueAPI::GetTables(context, catalog, schema.database_info.name, true, &has_more);
-	} catch (std::exception &ex) {
+	} catch (const GlueException &ex) {
 		// A failed bulk fetch must not fail a lookup that never needed GetTables: log it and let the caller
 		// fall through to the direct GetTable
+		if (ex.access_denied) {
+			batch_forbidden = true;
+		}
 		ErrorData error(ex);
 		DUCKDB_LOG_WARNING(context, "Not batching the table lookups of Glue database '%s', GetTables failed: %s",
 		                   schema.database_info.name, error.RawMessage());
@@ -139,7 +142,8 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	// The attach's first round-trip miss stays direct: a lone lookup must not enumerate a large database.
 	// From the second round-trip-causing miss on (round trips count across cache instances), one GetTables
 	// page warms the cache, at most once per instance - under the default scope that is once per transaction.
-	if (cache && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 && BatchTableLookups(context)) {
+	if (cache && !batch_forbidden && cache->Id() != bulk_loaded_cache_id && direct_lookups > 0 &&
+	    BatchTableLookups(context)) {
 		BulkLoadTableInfo(context, *cache);
 	}
 	auto load = [&]() -> shared_ptr<const GlueTableInfo> {

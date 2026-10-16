@@ -265,6 +265,24 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
                                                            const EntryLookupInfo &schema_lookup,
                                                            OnEntryNotFound if_not_found) {
 	auto &schema_name = schema_lookup.GetEntryName();
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
+	vector<string> path;
+	for (auto &component : schema_lookup.GetQualifiedName().Path()) {
+		if (!component.empty()) {
+			path.push_back(component.GetIdentifierName());
+		}
+	}
+	if (path.size() > 1 && StringUtil::CIEquals(path[0], GetName().GetIdentifierName())) {
+		path.erase(path.begin());
+	}
+	if (path.size() > 1) {
+		if (if_not_found == OnEntryNotFound::RETURN_NULL) {
+			return nullptr;
+		}
+		throw CatalogException(schema_lookup.GetErrorContext(),
+		                       "Glue database \"%s\" does not exist: Glue databases are not nested",
+		                       schema_lookup.GetQualifiedName().ToString());
+	}
 	auto &context = transaction.GetContext();
 	auto entry = schemas.GetEntry(context, schema_name);
 	if (!entry) {

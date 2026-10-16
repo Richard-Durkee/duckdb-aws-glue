@@ -1,4 +1,5 @@
 #include "catalog/glue_view.hpp"
+#include "catalog/glue_view_names.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/sql_identifier.hpp"
@@ -23,14 +24,17 @@ const SelectStatement &GlueView::GetQuery() {
 	}
 	lock_guard<mutex> guard(parse_lock);
 	if (!parsed) {
+		unique_ptr<SelectStatement> statement;
 		try {
 			auto parser = Parser::GetBuiltinParser();
-			parsed = CreateViewInfo::ParseSelect(parser, select_sql);
+			statement = CreateViewInfo::ParseSelect(parser, select_sql);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.database_name,
 			                      table_info.name, error.RawMessage());
 		}
+		GlueViewNames::PinToCatalog(*statement->node, catalog.GetName());
+		parsed = std::move(statement);
 	}
 	return *parsed;
 }
@@ -48,7 +52,9 @@ string GlueView::RenderViewSql(const CreateViewInfo &info) {
 }
 
 unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntry &schema, const GlueTableInfo &table) {
-	auto sql = table.view_original_text.empty() ? table.view_expanded_text : table.view_original_text;
+	// shown: ViewOriginalText; executed: ViewExpandedText, by DuckDB views only (others are refused below)
+	auto sql = table.view_expanded_text.empty() ? table.view_original_text : table.view_expanded_text;
+	auto display_sql = table.view_original_text.empty() ? table.view_expanded_text : table.view_original_text;
 
 	// Why the view can not be used, if it can not: decided here so that listing and DROP work on any view and only
 	// SELECT / DESCRIBE report it
@@ -78,7 +84,7 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 		info.security_type = ViewSecurityType::SECURE_VIEW;
 	}
 	info.sql = string("CREATE ") + (info.security_type == ViewSecurityType::SECURE_VIEW ? "SECURE " : "") + "VIEW " +
-	           SQLIdentifier::ToString(table.name) + " AS " + sql + ";";
+	           SQLIdentifier::ToString(table.name) + " AS " + display_sql + ";";
 	if (!table.description.empty()) {
 		info.comment = Value(table.description);
 	}

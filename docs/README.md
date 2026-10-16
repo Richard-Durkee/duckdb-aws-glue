@@ -209,6 +209,12 @@ this connection's cache: a write through it, a rollback, or DETACH.
   `CREATE VIEW ... WITH (DEFER_BINDING)` create a Glue view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB.
   `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database. The view's
   columns store their DuckDB types (e.g. `HUGEINT`, `INTEGER`), not Glue types.
+- The view is stored twice: `ViewOriginalText` holds the SELECT as DuckDB prints it (shown by `duckdb_views()`), and
+  `ViewExpandedText`, which DuckDB executes, names every table `<database>.<table>` of the view's own Glue catalog. So
+  a view reads the same whatever name its catalog is attached under.
+- A view can only read tables of its own Glue catalog: table functions, other catalogs (including another alias of
+  the same Glue catalog), and unqualified names that DuckDB finds outside the view's catalog (a temporary table, a
+  table of the current catalog) are refused.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.

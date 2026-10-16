@@ -216,12 +216,11 @@ static void SetViewParameters(Aws::Map<Aws::String, Aws::String> &parameters, co
 	}
 }
 
-//! Glue's (Hive's) two view fields: the SQL as written and the SQL with names resolved. Both are free text and readers
-//! differ in which one they parse, so both carry the same DuckDB SQL - there is no separate expansion
+//! Glue's (Hive's) two view fields: the SQL as written (shown) and the SQL with every table as db.t (executed)
 static void SetViewDefinition(Aws::Glue::Model::TableInput &table_input, const GlueViewInfo &view) {
 	table_input.SetTableType("VIRTUAL_VIEW");
 	table_input.SetViewOriginalText(view.sql);
-	table_input.SetViewExpandedText(view.sql);
+	table_input.SetViewExpandedText(view.expanded_sql);
 	Aws::Glue::Model::StorageDescriptor storage_descriptor;
 	if (!view.columns.empty()) {
 		storage_descriptor.SetColumns(ToAwsColumns(view.columns));

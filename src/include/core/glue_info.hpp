@@ -143,8 +143,10 @@ struct GlueViewInfo {
 	//! The Glue database (a DuckDB schema) the view lives in
 	string database_name;
 	string name;
-	//! The SELECT as DuckDB prints it; unqualified names in it belong to database_name
+	//! ViewOriginalText: the SELECT as written
 	string sql;
+	//! ViewExpandedText: the same SELECT with every table as <db>.<table> (executed)
+	string expanded_sql;
 	//! The bound output columns; empty for a view created with DEFER_BINDING
 	vector<GlueColumn> columns;
 	bool secure = false;

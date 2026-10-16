@@ -1,5 +1,6 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_view.hpp"
+#include "catalog/glue_view_names.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
@@ -513,15 +514,37 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	GlueViewInfo view;
 	view.database_name = database_info.name;
 	view.name = view_name;
+	// ViewOriginalText: original user SQL
+	// ViewExpandedText: every table as db.t
 	view.sql = GlueView::RenderViewSql(info);
-	try {
-		// what is stored must read back: never write a view DuckDB itself could not parse
-		auto parser = Parser::GetBuiltinParser();
-		CreateViewInfo::ParseSelect(parser, view.sql);
-	} catch (std::exception &ex) {
-		ErrorData error(ex);
-		throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
-		                        error.RawMessage(), view.sql);
+	auto defer_binding = info.binding_mode == CreateViewBindingMode::SKIP_BINDING;
+	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
+	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node, defer_binding);
+	view.expanded_sql = expanded->ToString();
+	if (!defer_binding) {
+		// names were resolved by lookups, not the binder: check they bind to the same column types (not names:
+		// an unaliased expression is named after its text, which the rewrite changes)
+		auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
+		GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
+		vector<LogicalType> types;
+		vector<Identifier> names;
+		Binder::BindView(context, *check, catalog.GetName(), name, nullptr, info.aliases, types, names);
+		if (types != info.types) {
+			throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the "
+			                      "view query:\n%s",
+			                      view_name, view.expanded_sql);
+		}
+	}
+	for (auto &text : {view.sql, view.expanded_sql}) {
+		try {
+			// what is stored must read back: never write a view DuckDB itself could not parse
+			auto parser = Parser::GetBuiltinParser();
+			CreateViewInfo::ParseSelect(parser, text);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
+			                        error.RawMessage(), text);
+		}
 	}
 	view.secure = info.security_type == ViewSecurityType::SECURE_VIEW;
 	// the stored columns carry the column alias list of CREATE VIEW: an alias replaces the query's own name

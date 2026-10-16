@@ -5,6 +5,7 @@
 #include "duckdb/main/client_context.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 
 namespace duckdb {
@@ -63,8 +64,12 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->partitions) {
 		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
-		entry->partitions = make_shared_ptr<const vector<GluePartitionInfo>>(
-		    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
+		auto load = [&]() {
+			return make_shared_ptr<const vector<GluePartitionInfo>>(
+			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
+		};
+		auto cache = GlueTransactionCache::Of(context, catalog);
+		entry->partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load) : load();
 	}
 	return entry->partitions;
 }

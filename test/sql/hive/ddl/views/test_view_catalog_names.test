@@ -1,5 +1,5 @@
 # name: test/sql/hive/ddl/views/test_view_catalog_names.test
-# description: a Glue view stores every table as db.t, which DuckDB binds in the view's own catalog, so it reads the same whatever name the catalog is attached under
+# description: a Glue view stores the tables of its own catalog as db.t and those of other Glue catalogs by catalog id, so it reads the same whatever name the catalog is attached under
 # group: [views]
 
 require httpfs
@@ -59,6 +59,9 @@ statement ok
 DROP VIEW IF EXISTS writer_cat.default.an_view_second_alias;
 
 statement ok
+DROP VIEW IF EXISTS writer_cat.default.an_view_bad;
+
+statement ok
 DROP TABLE IF EXISTS writer_cat.default.an_orders;
 
 statement ok
@@ -101,14 +104,28 @@ SELECT id FROM "default".an_orders
 statement ok
 DROP VIEW an_view_session;
 
-# another catalog, even another alias of the same Glue catalog, is refused
+# another alias of the same Glue catalog (same catalog id) is the view's own catalog too
 statement ok
 attach '{GLUE_CATALOG_ID}' as second_alias (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
 
-statement error
+statement ok
 CREATE VIEW an_view_second_alias AS SELECT id FROM second_alias.default.an_orders;
+
+query II
+SELECT response.ViewOriginalText, response.ViewExpandedText FROM glue_get_table_response('writer_cat.default.an_view_second_alias');
 ----
-a Glue view can only reference tables of its own Glue catalog
+SELECT id FROM second_alias."default".an_orders	SELECT id FROM "default".an_orders
+
+statement error
+CREATE VIEW an_view_bad AS SELECT second_alias.default.an_orders.id FROM second_alias.default.an_orders;
+----
+whose "second_alias" is also the name of a catalog the view reads
+
+# the view's own catalog name too, where core leaves it (a row reference)
+statement error
+CREATE VIEW an_view_bad AS SELECT writer_cat.an_orders AS r FROM writer_cat.default.an_orders;
+----
+whose "writer_cat" is also the name of a catalog the view reads
 
 # a CTE that shadows a table name stays a CTE reference
 statement ok
@@ -167,7 +184,7 @@ CREATE TEMP TABLE an_temp AS SELECT 7 AS id;
 statement error
 CREATE VIEW an_view_session AS SELECT id FROM temp.an_temp;
 ----
-in catalog "temp": a Glue view can only reference tables of its own Glue catalog
+in catalog "temp" of type duckdb: a Glue view can only reference tables in Glue catalogs
 
 statement ok
 DROP TABLE temp.an_orders;
@@ -199,7 +216,7 @@ CREATE TABLE IF NOT EXISTS west_cat.an_west_db.an_west_t (id INTEGER);
 statement error
 CREATE VIEW an_view_west AS SELECT id FROM west_cat.an_west_db.an_west_t;
 ----
-a Glue view can only reference tables of its own Glue catalog
+a Glue view can only reference tables of Glue catalogs in its own region
 
 # a bare name found in another Glue catalog through the search path is refused
 statement ok
@@ -359,7 +376,7 @@ CREATE TABLE memory.main.an_local AS SELECT 1 AS id;
 statement error
 CREATE VIEW any_name.default.an_view_local AS SELECT id FROM memory.main.an_local;
 ----
-a Glue view can only reference tables of its own Glue catalog
+a Glue view can only reference tables in Glue catalogs
 
 # a catalog attached as ':' reads the views and writes its own tables as db.t
 statement ok
@@ -387,17 +404,27 @@ SELECT id FROM no_id.default.an_view_no_id;
 ----
 1
 
-# another ATTACH path is another catalog, even if Glue reports the same id for it
+# a catalog is the view's own when Glue reports the same id for it, whatever the ATTACH path. The local Glue (moto)
+# answers for the account of the credentials whatever CatalogId is sent, so a catalog attached as '111111111111'
+# with the same credentials is the view's own catalog here. (In AWS an account-id path and Glue's report agree;
+# for "<catalog>/<nested>" Glue reports "<account>:<catalog>/<nested>".) Tables of another account:
+# test_view_other_account.test; of an S3 Tables catalog: test_view_nested_catalog.test (live only).
 statement ok
 attach '111111111111' as other_spelling (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
 
-statement error
+statement ok
 CREATE VIEW no_id.default.an_view_other_path AS SELECT id FROM other_spelling.default.an_orders;
+
+query I
+SELECT response.ViewExpandedText FROM glue_get_table_response('no_id.default.an_view_other_path');
 ----
-a Glue view can only reference tables of its own Glue catalog
+SELECT id FROM "default".an_orders
 
 statement ok
 DETACH other_spelling;
+
+statement ok
+DROP VIEW no_id.default.an_view_other_path;
 
 statement ok
 DROP VIEW no_id.default.an_view_no_id;
@@ -449,7 +476,7 @@ CREATE TABLE "default".main.an_orders AS SELECT 99 AS id;
 statement error
 CREATE VIEW any_name.default.an_view_session AS SELECT id FROM "default".an_orders;
 ----
-in catalog "default": a Glue view can only reference tables of its own Glue catalog
+in catalog "default" of type duckdb: a Glue view can only reference tables in Glue catalogs
 
 query I
 SELECT id FROM any_name.default.an_view ORDER BY id;
@@ -517,6 +544,9 @@ DROP VIEW any_name.default.an_view_cte;
 
 statement ok
 DROP VIEW any_name.default.an_view_scalar;
+
+statement ok
+DROP VIEW any_name.default.an_view_second_alias;
 
 statement ok
 DROP TABLE any_name.default.an_orders;

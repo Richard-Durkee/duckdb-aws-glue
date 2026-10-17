@@ -7,12 +7,22 @@ namespace duckdb {
 class ClientContext;
 class GlueCatalog;
 
-//! ViewExpandedText names every table <db>.<table>; read in the view's own catalog
+//! ViewExpandedText names tables of the view's own catalog <db>.<table>, of other catalogs
+//! "<catalog id>".<db>.<table>; readers map ids to their own aliases
 struct GlueViewNames {
-	//! CREATE VIEW: qualify bare table names with their database. Throws for table functions and for tables outside
-	//! the view's Glue catalog. DEFER_BINDING: a missing table goes to the view's database
+	//! CREATE VIEW: qualify bare table names with their database; a table of another Glue catalog, named with its
+	//! catalog, goes to that catalog's id. Throws for catalog-qualified columns, table functions, a bare name
+	//! outside the view's catalog, non-Glue catalogs, another region or endpoint, or no reported id.
+	//! DEFER_BINDING: a missing bare name goes to the view's database
 	static void QualifyForStorage(ClientContext &context, GlueCatalog &view_catalog, const Identifier &view_schema,
 	                              QueryNode &query, bool defer_binding);
+	//! the catalog ids the stored body names tables by
+	static identifier_set_t ReferencedCatalogIds(QueryNode &query);
+	//! id -> alias of an attached Glue catalog in the view's region and endpoint, for the given ids
+	static identifier_tree_t<Identifier> AttachedAliases(GlueCatalog &view_catalog, const identifier_set_t &ids);
+	//! reading: ids -> aliases; throws, naming the ATTACH, for an id not attached
+	static void ResolveForReading(GlueCatalog &view_catalog, const string &view_name,
+	                              const identifier_tree_t<Identifier> &aliases, QueryNode &query);
 	//! reading: db.t -> catalog.db.t, as DuckDB binds x.t to a catalog x when one is attached under that name
 	static void PinToCatalog(QueryNode &query, const Identifier &catalog_name);
 };

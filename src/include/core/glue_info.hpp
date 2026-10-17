@@ -29,6 +29,10 @@ public:
 
 //! A Glue "Database", exposed as a DuckDB schema
 struct GlueDatabaseInfo {
+	//! the catalog the database resides in
+	string catalog_id;
+	//! a Glue resource link (TargetDatabase set): a database of another catalog
+	bool is_resource_link = false;
 	string name;
 	string description;
 	//! Optional S3 location tables of this database default to
@@ -145,7 +149,7 @@ struct GlueViewInfo {
 	string name;
 	//! ViewOriginalText: the SELECT as written
 	string sql;
-	//! ViewExpandedText: the same SELECT with every table as <db>.<table> (executed)
+	//! ViewExpandedText: tables as <db>.<table>, of other Glue catalogs by catalog id (executed)
 	string expanded_sql;
 	//! The bound output columns; empty for a view created with DEFER_BINDING
 	vector<GlueColumn> columns;

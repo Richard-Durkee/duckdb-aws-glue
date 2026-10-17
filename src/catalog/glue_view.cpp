@@ -1,4 +1,5 @@
 #include "catalog/glue_view.hpp"
+#include "catalog/glue_catalog.hpp"
 #include "catalog/glue_view_names.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
@@ -33,10 +34,35 @@ const SelectStatement &GlueView::GetQuery() {
 			throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.database_name,
 			                      table_info.name, error.RawMessage());
 		}
-		GlueViewNames::PinToCatalog(*statement->node, catalog.GetName());
+		// set together: a failure here must not leave a parse without its ids
+		referenced_ids = GlueViewNames::ReferencedCatalogIds(*statement->node);
+		if (referenced_ids.empty()) {
+			GlueViewNames::PinToCatalog(*statement->node, catalog.GetName());
+		}
 		parsed = std::move(statement);
 	}
-	return *parsed;
+	if (referenced_ids.empty()) {
+		// only the view's own catalog, which DuckDB binds the view in
+		return *parsed;
+	}
+	// map stored catalog ids to the aliases attached now
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, referenced_ids);
+	string signature;
+	for (auto &entry : aliases) {
+		signature += entry.first.GetIdentifierName() + "=" + entry.second.GetIdentifierName() + ";";
+	}
+	auto existing = resolved.find(signature);
+	if (existing != resolved.end()) {
+		return *existing->second;
+	}
+	auto copy = unique_ptr_cast<SQLStatement, SelectStatement>(parsed->Copy());
+	GlueViewNames::ResolveForReading(glue_catalog, table_info.database_name + "." + table_info.name, aliases,
+	                                 *copy->node);
+	GlueViewNames::PinToCatalog(*copy->node, catalog.GetName());
+	auto &result = *copy;
+	resolved.emplace(std::move(signature), std::move(copy));
+	return result;
 }
 
 string GlueView::ToSQL() const {

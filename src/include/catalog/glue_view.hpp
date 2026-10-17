@@ -1,6 +1,8 @@
 #pragma once
 
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
+#include "duckdb/common/identifier.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/parser/statement/select_statement.hpp"
 
@@ -47,7 +49,12 @@ private:
 	//! Empty when the view can be queried, else why not (decided when the entry is built, before any parse)
 	string unsupported_reason;
 	mutex parse_lock;
+	//! The stored SQL, parsed once
 	unique_ptr<SelectStatement> parsed;
+	//! The catalog ids the stored SQL names tables by (none if it names only the view's own catalog)
+	identifier_set_t referenced_ids;
+	//! one copy per alias mapping, ids replaced by aliases; kept because a binder may hold one
+	map<string, unique_ptr<SelectStatement>> resolved;
 };
 
 } // namespace duckdb

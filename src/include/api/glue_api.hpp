@@ -30,8 +30,8 @@ public:
 //! Thin wrapper around the AWS SDK Glue client
 class GlueAPI {
 public:
-	//! Verify that the catalog can be reached with the configured credentials
-	static void VerifyConnection(ClientContext &context, GlueCatalog &catalog);
+	//! CatalogId from the GetDatabases response
+	static string GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog);
 
 	//! List all databases of the catalog
 	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog);

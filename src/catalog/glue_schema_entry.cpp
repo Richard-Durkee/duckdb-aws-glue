@@ -514,8 +514,8 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	GlueViewInfo view;
 	view.database_name = database_info.name;
 	view.name = view_name;
-	// ViewOriginalText: original user SQL
-	// ViewExpandedText: every table as db.t
+	// a DuckDB view's ViewOriginalText: the user's SQL; ViewExpandedText: tables of this catalog as db.t, of other
+	// catalogs by their Glue catalog id
 	view.sql = GlueView::RenderViewSql(info);
 	auto defer_binding = info.binding_mode == CreateViewBindingMode::SKIP_BINDING;
 	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
@@ -525,6 +525,8 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		// names were resolved by lookups, not the binder: check they bind to the same column types (not names:
 		// an unaliased expression is named after its text, which the rewrite changes)
 		auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
+		auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
+		GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
 		GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
 		vector<LogicalType> types;
 		vector<Identifier> names;

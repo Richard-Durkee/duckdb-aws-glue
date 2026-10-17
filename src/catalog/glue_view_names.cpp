@@ -3,8 +3,14 @@
 #include "catalog/glue_catalog.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/enum_util.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/common/string_util.hpp"
+#include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/database_manager.hpp"
+#include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/expression/star_expression.hpp"
 #include "duckdb/parser/expression/subquery_expression.hpp"
 #include "duckdb/parser/parsed_expression_iterator.hpp"
 #include "duckdb/parser/query_node/recursive_cte_node.hpp"
@@ -24,11 +30,14 @@ namespace {
 
 //! called per base table, with the CTE names in scope
 using BaseTableCallback = std::function<void(BaseTableRef &ref, const case_insensitive_set_t &visible_ctes)>;
+//! called per column reference and star
+using ExpressionCallback = std::function<void(ParsedExpression &expr)>;
 
 //! Walks a view body with SQL CTE scoping; refuses what a Glue view can not store
 class ViewBodyWalker {
 public:
-	explicit ViewBodyWalker(BaseTableCallback callback_p) : callback(std::move(callback_p)) {
+	explicit ViewBodyWalker(BaseTableCallback callback_p, ExpressionCallback expression_callback_p = nullptr)
+	    : callback(std::move(callback_p)), expression_callback(std::move(expression_callback_p)) {
 	}
 
 	void Walk(QueryNode &node) {
@@ -129,6 +138,10 @@ private:
 		if (!expr) {
 			return;
 		}
+		if (expression_callback && (expr->GetExpressionClass() == ExpressionClass::COLUMN_REF ||
+		                            expr->GetExpressionClass() == ExpressionClass::STAR)) {
+			expression_callback(*expr);
+		}
 		if (expr->GetExpressionClass() == ExpressionClass::SUBQUERY) {
 			auto &subquery = expr->Cast<SubqueryExpression>().SubqueryMutable();
 			if (subquery && subquery->node) {
@@ -140,11 +153,56 @@ private:
 	}
 
 	BaseTableCallback callback;
+	ExpressionCallback expression_callback;
 };
+
+//! Column references are not rewritten: one qualified with a catalog the stored view does not name could mean that
+//! catalog's table, or a table, alias or column of the same name, which binds differently once the catalog is renamed
+void RefuseCatalogQualifiedColumns(QueryNode &query, const identifier_set_t &catalogs) {
+	auto refuse = [](const string &reference, const Identifier &catalog) {
+		throw BinderException("Glue view references \"%s\", whose \"%s\" is also the name of a catalog the view reads: "
+		                      "use a table alias with another name",
+		                      reference, catalog.GetIdentifierName());
+	};
+	ViewBodyWalker walker([](BaseTableRef &, const case_insensitive_set_t &) {},
+	                      [&](ParsedExpression &expr) {
+		                      if (expr.GetExpressionClass() == ExpressionClass::STAR) {
+			                      auto &star = expr.Cast<StarExpression>();
+			                      for (auto &name : star.ExcludeList()) {
+				                      if (catalogs.count(name.catalog)) {
+					                      refuse(name.ToString(), name.catalog);
+				                      }
+			                      }
+			                      for (auto &entry : star.RenameList()) {
+				                      if (catalogs.count(entry.first.catalog)) {
+					                      refuse(entry.first.ToString(), entry.first.catalog);
+				                      }
+			                      }
+			                      return;
+		                      }
+		                      auto &names = expr.Cast<ColumnRefExpression>().ColumnNames();
+		                      if (names.size() > 1 && catalogs.count(names[0])) {
+			                      refuse(expr.ToString(), names[0]);
+		                      }
+	                      });
+	walker.Walk(query);
+}
 
 optional_ptr<CatalogEntry> LookupTable(ClientContext &context, QualifiedName name) {
 	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, std::move(name));
 	return Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
+}
+
+//! a catalog id names a catalog only within one region and endpoint
+bool SameGlueService(const GlueCatalog &a, const GlueCatalog &b) {
+	return StringUtil::CIEquals(a.options.region, b.options.region) &&
+	       StringUtil::CIEquals(a.options.endpoint, b.options.endpoint);
+}
+
+string ServiceName(const GlueCatalog &catalog) {
+	return catalog.options.endpoint.empty()
+	           ? StringUtil::Format("region %s", catalog.options.region)
+	           : StringUtil::Format("region %s at endpoint %s", catalog.options.region, catalog.options.endpoint);
 }
 
 } // namespace
@@ -152,6 +210,8 @@ optional_ptr<CatalogEntry> LookupTable(ClientContext &context, QualifiedName nam
 void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_catalog, const Identifier &view_schema,
                                       QueryNode &query, bool defer_binding) {
 	auto view_catalog_name = view_catalog.GetName();
+	// catalogs named in the body, which the stored view does not keep
+	identifier_set_t catalogs {view_catalog_name};
 	ViewBodyWalker walker([&](BaseTableRef &ref, const case_insensitive_set_t &visible_ctes) {
 		auto name = ref.GetQualifiedName();
 		auto catalog_name = name.Catalog();
@@ -159,12 +219,48 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 			// x.t names catalog x when one is attached under that name, as DuckDB binds it
 			auto schema_name = name.Schema();
 			Binder::BindSchemaOrCatalog(context, catalog_name, schema_name);
+			if (!catalog_name.empty()) {
+				name = QualifiedName(catalog_name, Identifier(), name.Name());
+			}
 		}
 		if (!catalog_name.empty()) {
-			// core has stripped the view's own catalog name, so this is another catalog
-			throw BinderException("Glue view references \"%s\" in catalog \"%s\": a Glue view can only reference "
-			                      "tables of its own Glue catalog",
-			                      name.ToString(), catalog_name.GetIdentifierName());
+			// core has stripped the view's own catalog name, so this is another catalog: stored by its Glue catalog id
+			auto entry = LookupTable(context, name);
+			if (!entry) {
+				throw BinderException("Glue view references table \"%s\", which was not found", name.ToString());
+			}
+			auto &catalog = entry->ParentCatalog();
+			if (catalog.GetCatalogType() != "glue") {
+				throw BinderException("Glue view references \"%s\" in catalog \"%s\" of type %s: a Glue view can only "
+				                      "reference tables in Glue catalogs",
+				                      name.ToString(), catalog.GetName().GetIdentifierName(), catalog.GetCatalogType());
+			}
+			auto &glue_catalog = catalog.Cast<GlueCatalog>();
+			if (!SameGlueService(glue_catalog, view_catalog)) {
+				throw BinderException(
+				    "Glue view in %s references \"%s\" in Glue catalog \"%s\" of %s: a Glue view can only "
+				    "reference tables of Glue catalogs in its own region",
+				    ServiceName(view_catalog), name.ToString(), catalog.GetName().GetIdentifierName(),
+				    ServiceName(glue_catalog));
+			}
+			// asks Glue if the ATTACH probe did not; else the account id it was attached by
+			auto catalog_id_of = [&](GlueCatalog &catalog) {
+				auto id = catalog.FetchCatalogId(context);
+				return id.empty() ? catalog.KnownCatalogId() : id;
+			};
+			auto catalog_id = catalog_id_of(glue_catalog);
+			if (catalog_id.empty()) {
+				throw BinderException("Glue view references \"%s\" in Glue catalog \"%s\", whose catalog id Glue does "
+				                      "not report (it has no database of its own); attach it by its account id",
+				                      name.ToString(), catalog.GetName().GetIdentifierName());
+			}
+			if (StringUtil::CIEquals(catalog_id, catalog_id_of(view_catalog))) {
+				// another alias of the view's own catalog
+				catalog_id.clear();
+			}
+			catalogs.insert(catalog_name);
+			ref.SetQualifiedName(Identifier(catalog_id), entry->ParentSchema().name, entry->name);
+			return;
 		}
 		if (!name.Schema().empty() || visible_ctes.count(name.Name().GetIdentifierName())) {
 			// db.t of the view's own catalog (PinToCatalog keeps it there when read), or a CTE in scope
@@ -194,6 +290,67 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 			                      name.ToString(), entry->ParentCatalog().GetName().GetIdentifierName());
 		}
 		ref.SetQualifiedName(Identifier(), entry->ParentSchema().name, entry->name);
+	});
+	walker.Walk(query);
+	RefuseCatalogQualifiedColumns(query, catalogs);
+}
+
+identifier_set_t GlueViewNames::ReferencedCatalogIds(QueryNode &query) {
+	identifier_set_t ids;
+	ViewBodyWalker walker([&](BaseTableRef &ref, const case_insensitive_set_t &) {
+		auto &name = ref.GetQualifiedName();
+		if (!name.Catalog().empty()) {
+			ids.insert(name.Catalog());
+		}
+	});
+	walker.Walk(query);
+	return ids;
+}
+
+identifier_tree_t<Identifier> GlueViewNames::AttachedAliases(GlueCatalog &view_catalog, const identifier_set_t &ids) {
+	// id -> alias, same region and endpoint only; the first alias alphabetically
+	identifier_tree_t<Identifier> aliases;
+	for (auto &db : DatabaseManager::Get(view_catalog.GetAttached()).GetDatabases()) {
+		if (db->IsSystem() || db->IsTemporary()) {
+			continue;
+		}
+		auto &catalog = db->GetCatalog();
+		if (catalog.GetCatalogType() != "glue") {
+			continue;
+		}
+		auto &glue_catalog = catalog.Cast<GlueCatalog>();
+		auto id = Identifier(glue_catalog.KnownCatalogId());
+		if (!ids.count(id) || !SameGlueService(glue_catalog, view_catalog)) {
+			continue;
+		}
+		auto alias = catalog.GetName();
+		auto existing = aliases.find(id);
+		if (existing == aliases.end() || alias < existing->second) {
+			aliases[id] = alias;
+		}
+	}
+	return aliases;
+}
+
+void GlueViewNames::ResolveForReading(GlueCatalog &view_catalog, const string &view_name,
+                                      const identifier_tree_t<Identifier> &aliases, QueryNode &query) {
+	ViewBodyWalker walker([&](BaseTableRef &ref, const case_insensitive_set_t &) {
+		auto &name = ref.GetQualifiedName();
+		if (name.Catalog().empty()) {
+			return;
+		}
+		auto &id = name.Catalog();
+		auto alias = aliases.find(id);
+		if (alias == aliases.end()) {
+			auto &endpoint = view_catalog.options.endpoint;
+			throw BinderException("Glue view \"%s\" reads %s from Glue catalog %s, which is not attached in %s "
+			                      "(or is attached with VERIFY_CONNECTION false and its id was not fetched yet); "
+			                      "ATTACH '%s' (TYPE GLUE, REGION '%s'%s) to read it",
+			                      view_name, name.ToString(), id.GetIdentifierName(), ServiceName(view_catalog),
+			                      id.GetIdentifierName(), view_catalog.options.region,
+			                      endpoint.empty() ? "" : ", ENDPOINT '" + endpoint + "'");
+		}
+		ref.SetQualifiedName(alias->second, name.Schema(), name.Name());
 	});
 	walker.Walk(query);
 }

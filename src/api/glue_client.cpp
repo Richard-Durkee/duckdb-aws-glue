@@ -110,17 +110,32 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 //===--------------------------------------------------------------------===//
 // Read API
 //===--------------------------------------------------------------------===//
-void GlueAPI::VerifyConnection(ClientContext &context, GlueCatalog &catalog) {
+string GlueAPI::GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	Aws::Glue::Model::GetDatabasesRequest request;
-	SetCatalogId(request, catalog);
-	request.SetMaxResults(1);
-	auto outcome = client->GetDatabases(request);
-	if (!outcome.IsSuccess()) {
-		ThrowGlueError(outcome, StringUtil::Format("GetDatabases (catalog '%s', region '%s')", catalog.options.path,
-		                                           catalog.options.region));
-	}
+	// the catalog id of the first database that is not a resource link (a link's target is another catalog)
+	Aws::String next_token;
+	do {
+		Aws::Glue::Model::GetDatabasesRequest request;
+		SetCatalogId(request, catalog);
+		request.SetMaxResults(20);
+		if (!next_token.empty()) {
+			request.SetNextToken(next_token);
+		}
+		auto outcome = client->GetDatabases(request);
+		if (!outcome.IsSuccess()) {
+			ThrowGlueError(outcome, StringUtil::Format("GetDatabases (catalog '%s', region '%s')", catalog.options.path,
+			                                           catalog.options.region));
+		}
+		for (auto &database : outcome.GetResult().GetDatabaseList()) {
+			auto info = ToDatabaseInfo(database);
+			if (!info.is_resource_link && !info.catalog_id.empty()) {
+				return info.catalog_id;
+			}
+		}
+		next_token = outcome.GetResult().GetNextToken();
+	} while (!next_token.empty());
+	return string();
 }
 
 } // namespace duckdb

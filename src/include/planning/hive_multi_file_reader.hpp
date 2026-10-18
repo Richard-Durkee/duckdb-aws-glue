@@ -83,10 +83,17 @@ struct HiveScanInfo : public TableFunctionInfo {
 	shared_ptr<const vector<GluePartitionInfo>> Partitions(ClientContext &context) const;
 	bool PartitionsLoaded() const;
 	void SetPartitions(vector<GluePartitionInfo> partitions_p);
+	//! The Expression of the GetPartitions request Partitions() makes, so that Glue returns only the partitions it
+	//! matches. Nothing once the partitions are loaded
+	void SetPartitionExpression(string expression) const;
 
 private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
+	mutable string partition_expression DUCKDB_GUARDED_BY(partitions_lock);
+
+	shared_ptr<const vector<GluePartitionInfo>> FetchPartitions(ClientContext &context) const
+	    DUCKDB_REQUIRES(partitions_lock);
 };
 
 //! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with

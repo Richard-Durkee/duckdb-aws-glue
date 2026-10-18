@@ -3,6 +3,8 @@
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 
+#include "core/glue_info.hpp"
+
 namespace duckdb {
 
 //! Resolve the table argument of a glue_* function to a fully qualified name in a Glue catalog; a partially qualified
@@ -13,6 +15,10 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 //! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
 //! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
+
+//! Turn a partition spec {key: value, ...} into the partition values (as strings) in partition key order. The spec
+//! must name every partition key and nothing else.
+vector<string> ParseGluePartitionSpec(const string &function_name, const GlueTableInfo &table, const Value &spec);
 //! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (schema) of an
 //! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and
 //! parameters as columns and the complete Glue Database object as VARIANT.

@@ -12,6 +12,7 @@
 #include "duckdb/function/table_function.hpp"
 
 #include "core/glue_info.hpp"
+#include "core/partition_projection.hpp"
 
 namespace duckdb {
 
@@ -41,6 +42,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	string file_secret;
 	//! Numbers the scans of a query (HiveQueryCache::NextScanId), so the GlueScan log can tell them apart
 	idx_t scan_id = 0;
+	//! Set when the table projects its partitions from its properties instead of listing them in Glue
+	shared_ptr<const PartitionProjection> projection;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;

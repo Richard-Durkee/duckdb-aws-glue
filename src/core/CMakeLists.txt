@@ -9,7 +9,8 @@ add_library_unity(
   glue_types.cpp
   helpers.cpp
   hive_location.cpp
-  hive_timestamp_formats.cpp)
+  hive_timestamp_formats.cpp
+  partition_projection.cpp)
 set(GLUE_EXTENSION_FILES
     ${GLUE_EXTENSION_FILES} $<TARGET_OBJECTS:glue_core>
     PARENT_SCOPE)

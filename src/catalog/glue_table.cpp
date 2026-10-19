@@ -7,6 +7,7 @@
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 
+#include "core/partition_projection.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -218,17 +219,6 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 	auto format = table_info.GetFormat();
 	switch (format.format) {
 	case GlueFormat::HIVE:
-		if (table_info.IsPartitionProjected()) {
-			// Athena derives the partitions from the projection.* parameters and ignores the registered ones, which
-			// such a table usually has none of: reading the registered partitions would silently return no or wrong
-			// rows
-			throw NotImplementedException("Glue table '%s.%s' uses Athena partition projection (projection.enabled), "
-			                              "which is not supported yet: Athena derives its partitions from the "
-			                              "projection.* parameters and ignores the ones registered in Glue, so a scan "
-			                              "of the registered ones would read no rows or the wrong ones. Set "
-			                              "projection.enabled to false and register the partitions to read it",
-			                              table_info.schema_name, table_info.name);
-		}
 		return GetHiveScanFunction(context, bind_data);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
@@ -272,6 +262,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	for (auto &key : table_info.partition_keys) {
 		scan_info->partition_keys.push_back(key.name);
 	}
+	scan_info->projection = PartitionProjection::FromTable(table_info);
 	// the partitions are fetched from Glue on first use (HiveScanInfo::Partitions), not at bind
 	return BindHiveScan(context, std::move(scan_info), bind_data);
 }

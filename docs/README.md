@@ -122,10 +122,6 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   reads one of them and the location holds data files: Hive engines read such a file once for each partition, which
   DuckDB does not. `s3a://` and `s3n://` locations name the same bucket and key as `s3://`, and a location is read as
   registered, including a `//` in its path. A table without data files (just created) scans as empty.
-- A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
-  rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
-  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
-  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
@@ -146,6 +142,24 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   (compaction, an overwrite, dropping and recreating the table at the same location) are worse than unseen: scans
   under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear.
   It suits hosts that run one query per connection.
+- A table with the table property `projection.enabled` set to `true` projects its partitions from its properties
+  instead of listing them in Glue; partitions registered in Glue are not read. Every partition key needs
+  `projection.<key>.type`:
+  - `enum`: the comma-separated `projection.<key>.values`.
+  - `integer`: the inclusive `projection.<key>.range` (`min,max`), every `projection.<key>.interval`-th value (1 by
+    default), zero-padded to `projection.<key>.digits`.
+  - `date`: the inclusive `projection.<key>.range`, two dates in `projection.<key>.format` (a Java `DateTimeFormatter`
+    pattern of the letters `y`, `u`, `M`, `L`, `d`, `D`, `H`, `h`, `m`, `s`, `SSS`, `SSSSSS` and `a`, and quoted
+    text) or relative ones (`NOW`, `NOW-3YEARS`, `NOW + 1 MONTH`, in UTC from the start of the transaction), stepped
+    by `projection.<key>.interval` (1 by default) `projection.<key>.interval.unit` (`YEARS` to `MILLIS`; `DAYS` or
+    `MONTHS` by default when the format has no finer field). The key holds the formatted value, or for a `date` or
+    `timestamp` key the date or timestamp.
+  - `injected`: the values the query filters the key to with `=` or `IN`; a query without such a filter fails.
+
+  The partitions are at `<location>/<key>=<value>/...`, or at `storage.location.template` with `${<key>}` replaced by
+  each value. Filters on one partition key narrow its values before the keys are combined; a scan that would read
+  more than 1,000,000 partitions fails. Writes to such a table (`INSERT`, `COPY FROM`, `CREATE TABLE ... AS`) are
+  refused, since Athena ignores the partitions a write registers; set `projection.enabled` to `false` to write it.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the

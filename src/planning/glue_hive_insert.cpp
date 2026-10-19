@@ -1,3 +1,4 @@
+#include "core/partition_projection.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
@@ -247,6 +248,11 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	// For INSERT, the table's SerDe determines the format.
 	// For CTAS the table is freshly created and has no SerDe yet, so use the option from the CREATE TABLE statement.
 	auto file_format = creating_table ? table_info.file_format : table_info.GetFileFormat();
+	if (PartitionProjection::IsEnabled(table_info)) {
+		throw NotImplementedException("Can not write to Hive table '%s.%s': it projects its partitions "
+		                              "(projection.enabled), and writes register partitions in Glue",
+		                              table_info.database_name, table_info.name);
+	}
 	if (IsTextFileFormat(file_format)) {
 		table_info.CheckTextSerdeSupported(file_format);
 	}

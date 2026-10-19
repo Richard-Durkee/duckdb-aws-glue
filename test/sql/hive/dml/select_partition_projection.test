@@ -1,0 +1,356 @@
+# name: test/sql/hive/dml/select_partition_projection.test
+# description: tables that project their partitions from their properties (projection.enabled) instead of registering them in Glue
+# group: [dml]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table pp_enum_int pp_date_template pp_date_key pp_hours pp_now pp_injected pp_bad pp_disabled pp_wide
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+#---------------------------------------------------------------------------
+# enum and integer keys, at <location>/<key>=<value>; combinations without files read as empty
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_enum_int (id INTEGER, region VARCHAR, n VARCHAR) PARTITIONED BY (region, n) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'TRUE',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,eu',
+    'projection.n.type' = 'Integer',
+    'projection.n.range' = '1, 3',
+    'projection.n.digits' = '2');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_enum_int/region=us/n=01/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_enum_int/region=eu/n=02/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_enum_int/region=eu/n=03/a.parquet' (FORMAT parquet);
+
+# outside the projected values: not read
+statement ok
+COPY (SELECT 4 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_enum_int/region=ap/n=01/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 5 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_enum_int/region=us/n=1/a.parquet' (FORMAT parquet);
+
+query III
+SELECT id, region, n FROM my_datalake.default.pp_enum_int ORDER BY id;
+----
+1	us	01
+2	eu	02
+3	eu	03
+
+query III
+SELECT id, region, n FROM my_datalake.default.pp_enum_int WHERE region = 'eu' AND n >= '03';
+----
+3	eu	03
+
+# the filters narrow each key's values before they are combined: one partition of six is read
+query II
+EXPLAIN SELECT id FROM my_datalake.default.pp_enum_int WHERE region = 'eu' AND n = '02';
+----
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/6.*
+
+# a filter on both keys at once prunes the combinations
+query I
+SELECT id FROM my_datalake.default.pp_enum_int WHERE region || n = 'us01';
+----
+1
+
+# partitions registered in Glue are not read
+statement ok
+CALL glue_add_partition('my_datalake.default.pp_enum_int', {region: 'ap', n: '01'});
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_enum_int;
+----
+3
+
+# writes would register partitions in Glue, which the table does not read
+statement error
+INSERT INTO my_datalake.default.pp_enum_int VALUES (6, 'us', '01');
+----
+it projects its partitions (projection.enabled)
+
+#---------------------------------------------------------------------------
+# a date key in its own format, at a storage.location.template
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_date_template (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'true',
+    'projection.dt.type' = 'date',
+    'projection.dt.format' = 'yyyy/MM/dd',
+    'projection.dt.range' = '2024/01/30,2024/02/02',
+    'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_date_template/data/${dt}/');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_date_template/data/2024/01/31/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_date_template/data/2024/02/01/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_date_template/data/2024/02/05/a.parquet' (FORMAT parquet);
+
+query II
+SELECT id, dt FROM my_datalake.default.pp_date_template ORDER BY id;
+----
+1	2024/01/31
+2	2024/02/01
+
+query II
+SELECT id, dt FROM my_datalake.default.pp_date_template WHERE dt > '2024/01/31';
+----
+2	2024/02/01
+
+#---------------------------------------------------------------------------
+# a DATE key holds the date, its location the formatted value
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_date_key (id INTEGER, d DATE) PARTITIONED BY (d) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'true',
+    'projection.d.type' = 'date',
+    'projection.d.format' = 'yyyyMMdd',
+    'projection.d.range' = '20240101,20240103');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_date_key/d=20240102/a.parquet' (FORMAT parquet);
+
+query II
+SELECT id, d FROM my_datalake.default.pp_date_key WHERE d = DATE '2024-01-02';
+----
+1	2024-01-02
+
+query II
+EXPLAIN SELECT id FROM my_datalake.default.pp_date_key WHERE d >= DATE '2024-01-02';
+----
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/3.*
+
+#---------------------------------------------------------------------------
+# a time format needs interval.unit; the interval skips values
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_hours (id INTEGER, h VARCHAR) PARTITIONED BY (h) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'true',
+    'projection.h.type' = 'date',
+    'projection.h.format' = 'yyyy-MM-dd''T''HH',
+    'projection.h.range' = '2024-01-01T22,2024-01-02T03',
+    'projection.h.interval' = '2',
+    'projection.h.interval.unit' = 'hours');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_hours/h=2024-01-02T00/a.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_hours/h=2024-01-02T01/a.parquet' (FORMAT parquet);
+
+query II
+SELECT id, h FROM my_datalake.default.pp_hours;
+----
+1	2024-01-02T00
+
+# 22, 00 and 02, one of them filtered out
+query II
+EXPLAIN SELECT id FROM my_datalake.default.pp_hours WHERE h <> '2024-01-01T22';
+----
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 2/3.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_hours SET ('projection.h.interval.unit' = '');
+
+statement error
+SELECT * FROM my_datalake.default.pp_hours;
+----
+needs 'projection.h.interval.unit'
+
+#---------------------------------------------------------------------------
+# a range relative to the current time
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_now (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'true',
+    'projection.dt.type' = 'date',
+    'projection.dt.format' = 'yyyy-MM-dd',
+    'projection.dt.range' = 'NOW - 2 DAYS,NOW');
+
+# today and the two days before; not three days ago
+statement ok
+COPY (SELECT i AS id, strftime(get_current_timestamp()::TIMESTAMP::DATE - i::INTEGER, '%Y-%m-%d') AS dt FROM range(4) t(i))
+TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_now' (FORMAT parquet, PARTITION_BY (dt), OVERWRITE_OR_IGNORE);
+
+query I
+SELECT id FROM my_datalake.default.pp_now ORDER BY id;
+----
+0
+1
+2
+
+#---------------------------------------------------------------------------
+# an injected key takes its values from the query's filter
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_injected (id INTEGER, src VARCHAR) PARTITIONED BY (src) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'true',
+    'projection.src.type' = 'injected');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_injected/src=a/x.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_injected/src=b/x.parquet' (FORMAT parquet);
+
+query II
+SELECT id, src FROM my_datalake.default.pp_injected WHERE src = 'b';
+----
+2	b
+
+query II
+SELECT id, src FROM my_datalake.default.pp_injected WHERE src IN ('a', 'b', 'c') ORDER BY id;
+----
+1	a
+2	b
+
+statement error
+SELECT * FROM my_datalake.default.pp_injected;
+----
+projects partition column 'src' with the type injected: a query of the table must filter 'src' with = or IN
+
+statement error
+SELECT * FROM my_datalake.default.pp_injected WHERE src LIKE 'a%';
+----
+must filter 'src' with = or IN
+
+#---------------------------------------------------------------------------
+# only the filtered values of each key are combined, so a filter keeps a wide projection readable
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_wide (id INTEGER, k VARCHAR, n VARCHAR) PARTITIONED BY (k, n) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'enum',
+    'projection.k.values' = 'a,b,c,d,e,f,g,h,i,j',
+    'projection.n.type' = 'integer',
+    'projection.n.range' = '0,199999');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_wide/k=c/n=12345/a.parquet' (FORMAT parquet);
+
+query I
+SELECT id FROM my_datalake.default.pp_wide WHERE n = '12345';
+----
+1
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_wide;
+----
+projects more than 1000000 partitions for the query
+
+#---------------------------------------------------------------------------
+# configurations that are refused
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_bad (id INTEGER, a VARCHAR, b VARCHAR) PARTITIONED BY (a, b) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'true',
+    'projection.a.type' = 'enum',
+    'projection.a.values' = 'x');
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+has no 'projection.b.type' for its partition column 'b'
+
+foreach property 'projection.b.type'='hash' 'projection.b.range'='1-3' 'projection.b.interval'='0' 'projection.b.digits'='two'
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.type' = 'integer', 'projection.b.range' = '1,3', 'projection.b.interval' = '1', 'projection.b.digits' = '1');
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ({property});
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+Hive table 'default.pp_bad' has an invalid
+
+endloop
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.type' = 'date', 'projection.b.format' = 'yyyy-MM-dd', 'projection.b.range' = 'yesterday,NOW');
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+has the date 'yesterday' in 'projection.b.range', which does not match its format
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.range' = 'NOW-3FORTNIGHTS,NOW');
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+has an invalid relative date 'NOW-3FORTNIGHTS'
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.format' = 'yyyy-MM-dd zzz', 'projection.b.range' = 'NOW,NOW');
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+which uses the pattern letter 'z'
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.format' = 'yyyy-MM-dd', 'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_bad/${a}/');
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+has a 'storage.location.template' without the placeholder ${b} for its partition column 'b'
+
+#---------------------------------------------------------------------------
+# projection.enabled other than true: the partitions registered in Glue
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_disabled (id INTEGER, region VARCHAR) PARTITIONED BY (region) WITH (
+    format = 'parquet',
+    'projection.enabled' = 'false',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us');
+
+statement ok
+INSERT INTO my_datalake.default.pp_disabled VALUES (1, 'eu');
+
+query II
+SELECT id, region FROM my_datalake.default.pp_disabled;
+----
+1	eu
+
+foreach table pp_enum_int pp_date_template pp_date_key pp_hours pp_now pp_injected pp_bad pp_disabled pp_wide
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

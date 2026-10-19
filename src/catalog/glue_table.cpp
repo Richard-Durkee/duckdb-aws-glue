@@ -5,6 +5,7 @@
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "duckdb/storage/table_storage_info.hpp"
 
+#include "core/partition_projection.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -130,6 +131,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	for (auto &key : table_info.partition_keys) {
 		scan_info->partition_keys.push_back(key.name);
 	}
+	scan_info->projection = PartitionProjection::FromTable(latest_info);
 	// the partitions are fetched from Glue on first use (HiveScanInfo::Partitions), not at bind
 	return BindHiveScan(context, std::move(scan_info), bind_data);
 }

@@ -80,6 +80,23 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
   partitions, and partitions at custom locations, are listed one directory each.
+- A table with the table property `projection.enabled` set to `true` projects its partitions from its properties
+  instead of listing them in Glue; partitions registered in Glue are not read. Every partition key needs
+  `projection.<key>.type`:
+  - `enum`: the comma-separated `projection.<key>.values`.
+  - `integer`: the inclusive `projection.<key>.range` (`min,max`), every `projection.<key>.interval`-th value (1 by
+    default), zero-padded to `projection.<key>.digits`.
+  - `date`: the inclusive `projection.<key>.range`, two dates in `projection.<key>.format` (a Java `DateTimeFormatter`
+    pattern of the letters `y`, `u`, `M`, `L`, `d`, `D`, `H`, `h`, `m`, `s`, `SSS`, `SSSSSS` and `a`, and quoted
+    text) or relative ones (`NOW`, `NOW-3YEARS`, `NOW + 1 MONTH`, in UTC from the start of the transaction), stepped
+    by `projection.<key>.interval` (1 by default) `projection.<key>.interval.unit` (`YEARS` to `MILLIS`; `DAYS` or
+    `MONTHS` by default when the format has no finer field). The key holds the formatted value, or for a `date` or
+    `timestamp` key the date or timestamp.
+  - `injected`: the values the query filters the key to with `=` or `IN`; a query without such a filter fails.
+
+  The partitions are at `<location>/<key>=<value>/...`, or at `storage.location.template` with `${<key>}` replaced by
+  each value. Filters on one partition key narrow its values before the keys are combined; a scan that would read
+  more than 1,000,000 partitions fails. Writes to such a table are refused.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the

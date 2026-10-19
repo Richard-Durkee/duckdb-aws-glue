@@ -9,6 +9,7 @@
 #include "duckdb/function/table_function.hpp"
 
 #include "core/glue_info.hpp"
+#include "core/partition_projection.hpp"
 
 namespace duckdb {
 
@@ -34,6 +35,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	HiveJSONOptions json_options;
 	//! The partition keys, in order
 	vector<string> partition_keys;
+	//! Set when the table projects its partitions from its properties instead of listing them in Glue
+	shared_ptr<const PartitionProjection> projection;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;

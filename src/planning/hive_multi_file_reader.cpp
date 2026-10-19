@@ -4,6 +4,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/limits.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
@@ -20,6 +21,8 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -65,6 +68,13 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 		if (partition_keys.empty() || catalog_name.empty()) {
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
+		} else if (projection) {
+			// no filter narrowed the projection down (ComplexFilterPushdown): every projected partition
+			vector<vector<ProjectedValue>> values;
+			for (idx_t key_index = 0; key_index < projection->Keys().size(); key_index++) {
+				values.push_back(projection->Values(context, key_index));
+			}
+			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(projection->Combine(values));
 		} else {
 			partitions = GetTablePartitions(context, *this);
 		}
@@ -832,6 +842,143 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
 	return kept;
 }
 
+//! The partition key a filter reads, when it reads exactly one and no other column of the scan
+static optional_idx SinglePartitionKeyOfFilter(const Expression &filter, TableIndex table_index,
+                                               const vector<PartitionKeyProjection> &projections) {
+	optional_idx key;
+	bool other = false;
+	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(filter, [&](const BoundColumnRefExpression &colref) {
+		if (colref.Binding().table_index != table_index) {
+			other = true;
+			return;
+		}
+		auto column_index = colref.Binding().column_index.GetIndex();
+		for (auto &projection : projections) {
+			if (projection.projected_column_index == column_index) {
+				if (key.IsValid() && key.GetIndex() != projection.partition_key_index) {
+					other = true;
+				}
+				key = projection.partition_key_index;
+				return;
+			}
+		}
+		other = true;
+	});
+	return other ? optional_idx() : key;
+}
+
+//! The values 'filter' allows a string column, when it is '<column> = <constant>' or '<column> IN (<constants>)'
+static bool TryGetEqualityValues(const Expression &filter, vector<string> &values) {
+	auto constant_string = [&](const Expression &expr) {
+		if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
+			return false;
+		}
+		auto &value = expr.Cast<BoundConstantExpression>().GetValue();
+		if (!value.IsNull()) {
+			values.push_back(value.ToString());
+		}
+		return true;
+	};
+	auto is_column = [](const Expression &expr) {
+		return expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
+	};
+	if (filter.GetExpressionType() == ExpressionType::COMPARE_EQUAL &&
+	    BoundComparisonExpression::IsComparison(filter)) {
+		auto &comparison = filter.Cast<BoundFunctionExpression>();
+		auto &left = BoundComparisonExpression::Left(comparison);
+		auto &right = BoundComparisonExpression::Right(comparison);
+		if (is_column(left)) {
+			return constant_string(right);
+		}
+		if (is_column(right)) {
+			return constant_string(left);
+		}
+		return false;
+	}
+	if (filter.GetExpressionType() == ExpressionType::COMPARE_IN) {
+		auto &children = filter.Cast<BoundOperatorExpression>().GetChildren();
+		if (children.empty() || !is_column(*children[0])) {
+			return false;
+		}
+		for (idx_t i = 1; i < children.size(); i++) {
+			if (!constant_string(*children[i])) {
+				values.clear();
+				return false;
+			}
+		}
+		return true;
+	}
+	return false;
+}
+
+//! The partitions of a projected table this scan can read: the projected values of each partition key, narrowed by the
+//! filters on that key alone before they are combined, so a filtered scan never builds the partitions it rules out.
+//! An injected key takes its values from the filters. 'projected' is the number of partitions without the filters.
+static vector<GluePartitionInfo> ProjectPartitions(ClientContext &context, const HiveScanInfo &info,
+                                                   TableIndex table_index,
+                                                   const vector<PartitionKeyProjection> &projections,
+                                                   const vector<unique_ptr<Expression>> &filters, idx_t &projected,
+                                                   unordered_set<idx_t> &pruning_filters) {
+	auto &projection = *info.projection;
+	auto key_count = projection.Keys().size();
+	vector<vector<idx_t>> key_filters(key_count);
+	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+		auto key = SinglePartitionKeyOfFilter(*filters[filter_index], table_index, projections);
+		if (key.IsValid()) {
+			key_filters[key.GetIndex()].push_back(filter_index);
+		}
+	}
+	vector<vector<ProjectedValue>> values;
+	projected = 1;
+	for (idx_t key_index = 0; key_index < key_count; key_index++) {
+		vector<ProjectedValue> candidates;
+		if (projection.Keys()[key_index].type == ProjectionType::INJECTED) {
+			bool found = false;
+			for (auto filter_index : key_filters[key_index]) {
+				vector<string> allowed;
+				if (TryGetEqualityValues(*filters[filter_index], allowed)) {
+					for (auto &value : allowed) {
+						candidates.push_back({value, value});
+					}
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				projection.ThrowMissingInjectedFilter(key_index);
+			}
+		} else {
+			candidates = projection.Values(context, key_index);
+		}
+		projected = candidates.empty() || projected <= NumericLimits<idx_t>::Maximum() / candidates.size()
+		                ? projected * candidates.size()
+		                : NumericLimits<idx_t>::Maximum();
+		vector<ProjectedValue> kept;
+		GluePartitionInfo partition;
+		partition.values.resize(key_count);
+		for (auto &candidate : candidates) {
+			partition.values[key_index] = candidate.value;
+			bool keep = true;
+			for (auto filter_index : key_filters[key_index]) {
+				auto filter_copy = filters[filter_index]->Copy();
+				ReplacePartitionColumnRefs(context, filter_copy, table_index, projections, info, partition);
+				Value result;
+				if (filter_copy->IsFoldable() && ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result) &&
+				    (result.IsNull() || !result.GetValue<bool>())) {
+					keep = false;
+					pruning_filters.insert(filter_index);
+					break;
+				}
+			}
+			if (keep) {
+				kept.push_back(std::move(candidate));
+			}
+		}
+		values.push_back(std::move(kept));
+	}
+	return projection.Combine(values);
+}
+
 //! Which projected columns ('column_ids' into 'column_names') are partition keys
 static vector<PartitionKeyProjection> PartitionKeyProjections(const HiveScanInfo &info,
                                                               const vector<column_t> &column_ids,
@@ -879,10 +1026,17 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// hive partitioning does: kept, the optimizer would cost it a second time (a range filter keeps a fifth of the
 	// rows the pruning already narrowed down).
 	// first use of the partitions: loaded here, with the filters known
+	unordered_set<idx_t> pruning_filters;
+	optional_idx projected;
+	if (info.projection && !info.PartitionsLoaded()) {
+		idx_t count;
+		scan_info->SetPartitions(
+		    ProjectPartitions(context, info, pushdown_info.table_index, projections, filters, count, pruning_filters));
+		projected = count;
+	}
 	auto &hive_list = files.Cast<HiveMultiFileList>();
 	auto candidates = hive_list.PartitionIndexes();
 	auto partitions = info.Partitions(context);
-	unordered_set<idx_t> pruning_filters;
 	unordered_set<idx_t> decided_filters;
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters, decided_filters);
@@ -895,9 +1049,9 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	}
 	filters = std::move(remaining_filters);
 	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet
-	pushdown_info.extra_info.total_files = candidates->size();
+	pushdown_info.extra_info.total_files = projected.IsValid() ? projected.GetIndex() : candidates->size();
 	pushdown_info.extra_info.filtered_files = kept.size();
-	if (kept.size() == candidates->size()) {
+	if (kept.size() == candidates->size() && !projected.IsValid()) {
 		return nullptr;
 	}
 	return make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));

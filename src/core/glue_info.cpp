@@ -320,6 +320,12 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	// OpenCSVSerde has no NULL: "\n" matches no unquoted field
 	options.null_string = GetSerDe() == HiveSerDe::OPEN_CSV ? "\n" : GetNullFormat();
 	options.serde_fields = true;
+	// OpenCSVSerde fails the query on a value that does not parse unless use.null.for.invalid.data is true
+	if (GetSerDe() == HiveSerDe::OPEN_CSV) {
+		string value;
+		options.null_for_invalid_data =
+		    TryGetProperty("use.null.for.invalid.data", value) && StringUtil::CIEquals(value, "true");
+	}
 	return options;
 }
 

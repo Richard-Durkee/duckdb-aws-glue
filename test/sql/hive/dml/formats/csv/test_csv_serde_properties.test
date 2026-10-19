@@ -105,7 +105,7 @@ SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_null
 2	\N	false	3.5
 
 #---------------------------------------------------------------------------
-# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse is NULL
+# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse fails the query
 #---------------------------------------------------------------------------
 statement ok
 COPY (SELECT * FROM (VALUES
@@ -124,11 +124,42 @@ COPY (SELECT * FROM (VALUES
     ('1,a,oops')
 ) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
-# as in Hive, where every OpenCSVSerde column is a string, a value that does not parse as its column type is NULL
-query I
+# a value that does not parse as its column type fails the query, and so does an empty field
+statement error
 SELECT amount FROM my_datalake.default.fixture_text_opencsv;
 ----
-NULL
+<REGEX>:.*Conversion Error.*oops.*
+
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,a,')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT amount FROM my_datalake.default.fixture_text_opencsv;
+----
+<REGEX>:.*Conversion Error.*
+
+# columns that are not read are not converted
+query II
+SELECT id, name FROM my_datalake.default.fixture_text_opencsv;
+----
+1	a
+
+# with the table property use.null.for.invalid.data (in any case) such a value is NULL
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,a,oops'),
+    ('2,b,'),
+    ('3,c,3.5')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv_null_invalid/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query II
+SELECT id, amount FROM my_datalake.default.fixture_text_opencsv_null_invalid ORDER BY id;
+----
+1	NULL
+2	NULL
+3	3.5
 
 # as OpenCSVSerde does: missing trailing fields are NULL and fields beyond the last column are ignored
 statement ok

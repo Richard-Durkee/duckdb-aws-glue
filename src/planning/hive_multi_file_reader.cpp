@@ -632,6 +632,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
+		if (scan_info->csv_options.encoding != "utf-8") {
+			param_map["encoding"] = Value(scan_info->csv_options.encoding);
+		}
 		if (scan_info->csv_options.serde_fields) {
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);

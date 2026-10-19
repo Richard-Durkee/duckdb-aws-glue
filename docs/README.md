@@ -58,9 +58,13 @@ Text tables are read the way their SerDe reads them:
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
   line break.
 - Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
-  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
-  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
-  NULL string. Writes need a single-byte delimiter.
+  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`,
+  `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the NULL string. Writes need
+  a single-byte delimiter.
+- LazySimpleSerDe `serialization.encoding` may be UTF-8, ISO-8859-1 or UTF-16LE (Java charset names, in any case);
+  other encodings are refused, including `UTF-16`, whose byte order Java takes from the byte order mark. Files in
+  ISO-8859-1 or UTF-16LE are read only; DuckDB fails on bytes 0x80 to 0x9F in ISO-8859-1 and on characters outside
+  the Basic Multilingual Plane in UTF-16LE.
 - As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
   and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
   their own. `hive_scan()` uses plain `read_csv` rules.

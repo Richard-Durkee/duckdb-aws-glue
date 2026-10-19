@@ -18,6 +18,8 @@ struct HiveCSVOptions {
 	string null_string;
 	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
 	bool serde_fields = false;
+	//! As read_csv names it
+	string encoding = "utf-8";
 
 public:
 	void Serialize(Serializer &serializer) const;

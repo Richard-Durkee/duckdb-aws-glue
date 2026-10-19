@@ -240,10 +240,7 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	if (TryGetProperty("escape.delim", value)) {
 		refuse("has 'escape.delim' set");
 	}
-	if (TryGetProperty("serialization.encoding", value) && !StringUtil::CIEquals(value, "UTF-8") &&
-	    !StringUtil::CIEquals(value, "UTF8")) {
-		refuse(StringUtil::Format("has the 'serialization.encoding' '%s' (DuckDB reads UTF-8)", value));
-	}
+	GetTextEncoding();
 	if (TryGetProperty("serialization.last.column.takes.rest", value) && StringUtil::CIEquals(value, "true")) {
 		refuse("has 'serialization.last.column.takes.rest' set");
 	}
@@ -251,6 +248,28 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 		refuse(StringUtil::Format("has the field delimiter '%s' in its NULL string '%s'", GetFieldDelimiter(),
 		                          GetNullFormat()));
 	}
+}
+
+string GlueTableInfo::GetTextEncoding() const {
+	string value;
+	if (GetSerDe() != HiveSerDe::LAZY_SIMPLE || !TryGetProperty("serialization.encoding", value)) {
+		return "utf-8";
+	}
+	// Java charset names; DuckDB's utf-16 is little-endian only, Java's UTF-16 follows the byte order mark
+	auto charset = StringUtil::Upper(value);
+	if (charset == "UTF-8" || charset == "UTF8") {
+		return "utf-8";
+	}
+	if (charset == "ISO-8859-1" || charset == "ISO8859-1" || charset == "ISO8859_1" || charset == "ISO_8859_1" ||
+	    charset == "LATIN1") {
+		return "latin-1";
+	}
+	if (charset == "UTF-16LE" || charset == "UTF_16LE") {
+		return "utf-16";
+	}
+	throw NotImplementedException("Hive table '%s.%s' has the 'serialization.encoding' '%s', which DuckDB can not read "
+	                              "or write; it reads UTF-8, ISO-8859-1 and UTF-16LE",
+	                              database_name, name, value);
 }
 
 FileCompressionType GlueTableInfo::GetTextCompression() const {
@@ -320,6 +339,7 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	// OpenCSVSerde has no NULL: "\n" matches no unquoted field
 	options.null_string = GetSerDe() == HiveSerDe::OPEN_CSV ? "\n" : GetNullFormat();
 	options.serde_fields = true;
+	options.encoding = GetTextEncoding();
 	return options;
 }
 

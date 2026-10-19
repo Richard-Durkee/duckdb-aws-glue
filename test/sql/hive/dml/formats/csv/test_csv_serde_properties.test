@@ -105,6 +105,54 @@ SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_null
 2	\N	false	3.5
 
 #---------------------------------------------------------------------------
+# serialization.encoding: ISO-8859-1 and UTF-16LE files are decoded; scripts/docker-compose.yml writes their bytes
+#---------------------------------------------------------------------------
+query II
+SELECT id, name FROM my_datalake.default.fixture_text_latin1 ORDER BY id;
+----
+1	café
+2	naïve
+
+query II
+SELECT id, name FROM my_datalake.default.fixture_text_utf16le ORDER BY id;
+----
+1	é
+2	ü
+
+# DuckDB writes only UTF-8
+statement error
+INSERT INTO my_datalake.default.fixture_text_latin1 VALUES (3, 'x', 1.5);
+----
+its files are latin-1 encoded, DuckDB writes only UTF-8 csv files
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_csv_encoding;
+
+# Java charset names are matched ignoring case
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_encoding (id INTEGER, name VARCHAR) WITH (format = 'csv', 'serialization.encoding' = 'latin1');
+
+query I
+SELECT count(*) FROM my_datalake.default.formats_csv_encoding;
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_encoding;
+
+# Java's UTF-16 follows the byte order mark, DuckDB's utf-16 is little-endian only
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_encoding (id INTEGER, name VARCHAR) WITH (format = 'csv', 'serialization.encoding' = 'UTF-16');
+
+statement error
+SELECT * FROM my_datalake.default.formats_csv_encoding;
+----
+has the 'serialization.encoding' 'UTF-16', which DuckDB can not read or write; it reads UTF-8, ISO-8859-1 and UTF-16LE
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_encoding;
+
+#---------------------------------------------------------------------------
 # OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse is NULL
 #---------------------------------------------------------------------------
 statement ok

@@ -250,6 +250,11 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	if (IsTextFileFormat(file_format)) {
 		table_info.CheckTextSerdeSupported(file_format);
 	}
+	if (file_format == HiveFileFormat::CSV && table_info.GetTextEncoding() != "utf-8") {
+		throw NotImplementedException("Can not write to Hive table '%s.%s': its files are %s encoded, DuckDB writes "
+		                              "only UTF-8 csv files",
+		                              table_info.database_name, table_info.name, table_info.GetTextEncoding());
+	}
 	auto format_name = HiveFileFormatToString(file_format);
 	// the operator feeding the copy and the columns it produces
 	optional_ptr<PhysicalOperator> source = &plan;

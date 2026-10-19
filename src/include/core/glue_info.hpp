@@ -120,6 +120,9 @@ public:
 	string GetNullFormat() const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
+	//! LazySimpleSerDe's serialization.encoding as DuckDB's csv reader names it, 'utf-8' by default; throws for an
+	//! encoding DuckDB does not decode the way Java does
+	string GetTextEncoding() const;
 	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote

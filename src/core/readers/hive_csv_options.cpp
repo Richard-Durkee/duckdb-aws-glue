@@ -12,6 +12,7 @@ void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(103, "skip_lines", skip_lines);
 	serializer.WriteProperty(104, "null_string", null_string);
 	serializer.WriteProperty(105, "serde_fields", serde_fields);
+	serializer.WritePropertyWithDefault<string>(107, "encoding", encoding, "utf-8");
 }
 
 HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
@@ -22,6 +23,7 @@ HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
 	result.skip_lines = deserializer.ReadProperty<idx_t>(103, "skip_lines");
 	result.null_string = deserializer.ReadProperty<string>(104, "null_string");
 	result.serde_fields = deserializer.ReadProperty<bool>(105, "serde_fields");
+	result.encoding = deserializer.ReadPropertyWithExplicitDefault<string>(107, "encoding", "utf-8");
 	return result;
 }
 

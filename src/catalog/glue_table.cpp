@@ -45,6 +45,7 @@ virtual_column_map_t GlueTable::GetVirtualColumns() const {
 	virtual_column_map_t result;
 	result.insert(
 	    make_pair(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR)));
+	HiveMultiFileReader::AddMetadataColumns(result);
 	return result;
 }
 

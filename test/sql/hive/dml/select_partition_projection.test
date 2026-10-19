@@ -323,7 +323,23 @@ SELECT * FROM my_datalake.default.pp_bad;
 which uses the pattern letter 'z'
 
 statement ok
-ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.format' = 'yyyy-MM-dd', 'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_bad/${a}/');
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.format' = 'yyyy-DD');
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+which uses 'DD' (only D and DDD are supported)
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.type' = 'integer', 'projection.b.range' = '-4611686018427387904,4611686018427387904', 'projection.b.interval' = '1', 'projection.b.digits' = '1');
+
+statement error
+SELECT * FROM my_datalake.default.pp_bad;
+----
+projects more than 1000000 values for partition column 'b'
+
+statement ok
+ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.type' = 'date', 'projection.b.format' = 'yyyy-MM-dd', 'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_bad/${a}/');
 
 statement error
 SELECT * FROM my_datalake.default.pp_bad;

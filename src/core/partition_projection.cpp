@@ -10,6 +10,9 @@
 #include "duckdb/function/scalar/strftime_format.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
 
+#include <cerrno>
+#include <cstdlib>
+
 namespace duckdb {
 
 enum class DatePrecision : uint8_t { YEAR, MONTH, DAY, TIME };
@@ -98,6 +101,10 @@ static string JavaPatternToStrftime(const string &table_name, const string &key,
 			break;
 		case 'D':
 			finer(DatePrecision::DAY);
+			// DD pads to two digits, which strftime can not write
+			if (count != 1 && count != 3) {
+				throw unsupported(StringUtil::Format("'%s' (only D and DDD are supported)", string(count, c)));
+			}
 			result += count == 1 ? "%-j" : "%j";
 			break;
 		case 'H':
@@ -157,25 +164,11 @@ static bool TryParseDateUnit(const string &input, int64_t amount, interval_t &re
 	return true;
 }
 
-static bool TryParsePositiveInteger(const string &input, int64_t &result) {
-	auto text = Trim(input);
-	if (text.empty() || text.size() > 18) {
-		return false;
-	}
-	for (auto c : text) {
-		if (!StringUtil::CharacterIsDigit(c)) {
-			return false;
-		}
-	}
-	result = std::stoll(text);
-	return result > 0;
-}
-
+//! An integer of optional sign and digits that fits int64_t
 static bool TryParseInteger(const string &input, int64_t &result) {
 	auto text = Trim(input);
-	bool negative = !text.empty() && (text[0] == '-' || text[0] == '+');
-	auto digits = negative ? text.substr(1) : text;
-	if (digits.empty() || digits.size() > 18) {
+	auto digits = !text.empty() && (text[0] == '-' || text[0] == '+') ? text.substr(1) : text;
+	if (digits.empty()) {
 		return false;
 	}
 	for (auto c : digits) {
@@ -183,8 +176,14 @@ static bool TryParseInteger(const string &input, int64_t &result) {
 			return false;
 		}
 	}
-	result = std::stoll(text);
-	return true;
+	errno = 0;
+	result = std::strtoll(text.c_str(), nullptr, 10);
+	return errno != ERANGE;
+}
+
+static bool TryParsePositiveInteger(const string &input, int64_t &result) {
+	auto text = Trim(input);
+	return !text.empty() && text[0] != '-' && text[0] != '+' && TryParseInteger(text, result) && result > 0;
 }
 
 //! NOW, NOW+3DAYS, NOW - 1 YEAR, ...: the offset from the current time, false when 'input' is not relative
@@ -373,7 +372,8 @@ vector<ProjectedValue> PartitionProjection::Values(ClientContext &context, idx_t
 		if (key.min > key.max) {
 			break;
 		}
-		auto count = static_cast<uint64_t>(key.max - key.min) / static_cast<uint64_t>(key.step) + 1;
+		auto count =
+		    (static_cast<uint64_t>(key.max) - static_cast<uint64_t>(key.min)) / static_cast<uint64_t>(key.step) + 1;
 		if (count > MAX_PARTITIONS) {
 			throw too_many();
 		}

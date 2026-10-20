@@ -85,6 +85,14 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
+	config.AddExtensionOption(
+	    "glue_debug_fail_partition_registration",
+	    "For tests: '<Glue error code>:<n>' makes the n-th partition a write registers in Glue, "
+	    "and every later one, fail with that error code; a transient error (ThrottlingException, "
+	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
+	    "nothing.",
+	    LogicalType::VARCHAR, Value(""));
+
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();

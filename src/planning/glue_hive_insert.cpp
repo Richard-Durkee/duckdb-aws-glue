@@ -1,5 +1,7 @@
 #include "planning/glue_hive_insert.hpp"
 
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -583,8 +585,49 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	for (auto &entry : partitions) {
 		to_register.push_back(entry.second);
 	}
-	GlueAPI::BatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
-	return SinkFinalizeType::READY;
+	auto registration =
+	    GlueAPI::TryBatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
+	if (registration.error.empty()) {
+		return SinkFinalizeType::READY;
+	}
+	// Undo the INSERT, so that running it again does not add its rows twice: unregister the partitions it created
+	// (those that already existed stay) and delete every file it wrote
+	vector<string> left_behind;
+	vector<vector<string>> created_values;
+	for (auto index : registration.created) {
+		created_values.push_back(to_register[index].values);
+	}
+	try {
+		GlueAPI::BatchDeletePartitions(context, catalog, table_info.database_name, table_info.name, created_values);
+	} catch (std::exception &ex) {
+		left_behind.push_back(StringUtil::Format("the %llu partitions it registered (%s)", created_values.size(),
+		                                         ErrorData(ex).RawMessage()));
+	}
+	auto &fs = FileSystem::GetFileSystem(context);
+	idx_t files_left = 0;
+	string file_error;
+	for (auto &file : state.written_files) {
+		try {
+			fs.RemoveFile(file);
+		} catch (std::exception &ex) {
+			if (files_left++ == 0) {
+				file_error = StringUtil::Format("%s: %s", file, ErrorData(ex).RawMessage());
+			}
+		}
+	}
+	if (files_left > 0) {
+		left_behind.push_back(StringUtil::Format("%llu of the %llu files it wrote (%s)", files_left,
+		                                         state.written_files.size(), file_error));
+	}
+	if (left_behind.empty()) {
+		throw IOException("INSERT into Hive table '%s.%s' was rolled back: %s. The files it wrote were deleted and "
+		                  "the partitions it registered removed, so it can be run again",
+		                  table_info.database_name, table_info.name, registration.error);
+	}
+	throw IOException("INSERT into Hive table '%s.%s' failed: %s. Rolling it back left behind %s; remove them before "
+	                  "running it again",
+	                  table_info.database_name, table_info.name, registration.error,
+	                  StringUtil::Join(left_behind, " and "));
 }
 
 SourceResultType GlueHiveInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,

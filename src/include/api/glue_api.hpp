@@ -27,6 +27,14 @@ public:
 	bool access_denied;
 };
 
+//! What TryBatchCreatePartitions registered
+struct GluePartitionRegistration {
+	//! The partitions this call created, as indexes into its input; those that already existed are not among them
+	vector<idx_t> created;
+	//! Why registration stopped, empty when every partition was registered or already existed
+	string error;
+};
+
 //! Thin wrapper around the AWS SDK Glue client
 class GlueAPI {
 public:
@@ -98,9 +106,19 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
-	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
+	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped; throws
+	//! for the first partition Glue refuses, after retrying the errors that may pass.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<GluePartitionInput> &partitions);
+	//! BatchCreatePartitions without throwing for a refused partition: registration stops at the first one, and the
+	//! result says which partitions this call created, so that a caller can unregister them again
+	static GluePartitionRegistration TryBatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
+	                                                          const string &database_name, const string &table_name,
+	                                                          const vector<GluePartitionInput> &partitions);
+	//! Unregister partitions by their values (BatchDeletePartition; the data files are left in place). Partitions that
+	//! do not exist are skipped; throws for the first one Glue refuses.
+	static void BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                  const string &table_name, const vector<vector<string>> &partition_values);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);

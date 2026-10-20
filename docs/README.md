@@ -71,6 +71,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
   layout. Files and directories named `_*` or `.*` are skipped. When one partition's location lies inside another's,
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
+- A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
+  rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
+  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
+  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads

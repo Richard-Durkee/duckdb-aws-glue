@@ -58,6 +58,15 @@ bool GlueTableInfo::IsBucketed() const {
 	return !bucket_columns.empty();
 }
 
+bool GlueTableInfo::IsPartitionProjected() const {
+	if (partition_keys.empty()) {
+		return false;
+	}
+	auto enabled = GetParameter("projection.enabled");
+	StringUtil::Trim(enabled);
+	return StringUtil::CIEquals(enabled, "true");
+}
+
 string GlueColumn::DescribeSortOrder() const {
 	switch (sort_order) {
 	case GlueSortOrder::ASCENDING:

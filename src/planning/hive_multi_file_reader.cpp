@@ -16,6 +16,9 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/function_binder.hpp"
+
+#include "functions/glue_functions.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -655,6 +658,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	switch (scan_info->file_format) {
 	case HiveFileFormat::PARQUET:
 		function_name = "read_parquet";
+		// the Glue type decides how an unannotated BYTE_ARRAY column reads (ReadBlobAsText), not the session
+		// setting: with it on, a column Glue declares binary would be read as text and fail
+		param_map["binary_as_string"] = Value::BOOLEAN(false);
 		break;
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table
@@ -1118,6 +1124,30 @@ static void MakeTryCast(ClientContext &context, unique_ptr<Expression> &expr) {
 	expr = BoundCastExpression::AddCastToType(context, std::move(child), target_type, true);
 }
 
+//! A parquet BYTE_ARRAY column without a STRING annotation (Impala, older Hive and parquet-mr writers) reads as a
+//! BLOB, while Glue declares the column 'string'. The reader's cast of that BLOB to VARCHAR would escape every
+//! non-ASCII byte (\xC3\xBC for ü); the bytes are the text, so read them as UTF-8 instead, as Hive and Trino do, and
+//! fail naming the table and column when they are not UTF-8. Only a column's own cast is replaced: the same bytes
+//! inside a LIST, STRUCT or MAP are converted by the reader's nested cast and keep the escaped form.
+static void ReadBlobAsText(ClientContext &context, unique_ptr<Expression> &expr, const string &table,
+                           const string &column) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	// the whole type, not the id: a cast to an alias of VARCHAR such as JSON must keep its own conversion
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (cast.GetReturnType() != LogicalType::VARCHAR ||
+	    BoundCastExpression::Child(cast).GetReturnType() != LogicalType::BLOB) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(table)));
+	children.push_back(make_uniq<BoundConstantExpression>(Value(column)));
+	FunctionBinder function_binder(context);
+	expr = function_binder.BindScalarFunction(GetGlueBytesAsTextFunction(), std::move(children));
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1126,6 +1156,23 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
                                                            ClientContext &context, MultiFileGlobalState &gstate) {
 	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
 	                                                table_filters, context, gstate);
+	if (ScanInfo().file_format == HiveFileFormat::PARQUET) {
+		auto table = ScanInfo().Describe();
+		auto &reader = *reader_data.reader;
+		for (idx_t i = 0; i < reader_data.expressions.size(); i++) {
+			if (global_column_ids[i].IsVirtualColumn()) {
+				continue;
+			}
+			auto &column = global_columns[global_column_ids[i].GetPrimaryIndex()];
+			ReadBlobAsText(context, reader_data.expressions[i], table, column.name.GetIdentifierName());
+		}
+		// a filter pushed into the reader evaluates the column's conversion there, on a copy of the expression
+		for (auto &entry : reader.expression_map) {
+			auto &column = reader.columns[reader.column_ids[MultiFileLocalIndex(entry.first)].GetId()];
+			ReadBlobAsText(context, entry.second.expression, table, column.name.GetIdentifierName());
+		}
+		return result;
+	}
 	if (!ScanInfo().csv_options.serde_fields) {
 		return result;
 	}

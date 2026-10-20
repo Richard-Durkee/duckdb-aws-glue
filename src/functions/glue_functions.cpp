@@ -4,6 +4,8 @@
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/common/vector_operations/ternary_executor.hpp"
+#include "utf8proc_wrapper.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 
@@ -205,6 +207,32 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 		                      qualified.Catalog().GetIdentifierName(), catalog->GetCatalogType());
 	}
 	return qualified;
+}
+
+//===--------------------------------------------------------------------===//
+// glue_bytes_as_text
+//===--------------------------------------------------------------------===//
+static void GlueBytesAsText(DataChunk &args, ExpressionState &state, Vector &result) {
+	// a no-op conversion once the bytes are known to be UTF-8: the text references the input's storage
+	TernaryExecutor::Execute<string_t, string_t, string_t, string_t>(
+	    args.data[0], args.data[1], args.data[2], result, [&](string_t bytes, string_t table, string_t column) {
+		    if (Utf8Proc::Analyze(bytes.GetData(), bytes.GetSize()) == UnicodeType::INVALID) {
+			    throw InvalidInputException("Glue table '%s': column \"%s\" is declared string, but its parquet file "
+			                                "holds bytes that are not UTF-8; declare the column binary to read them "
+			                                "as is",
+			                                table.GetString(), column.GetString());
+		    }
+		    return bytes;
+	    });
+	StringVector::AddHeapReference(result, args.data[0]);
+}
+
+ScalarFunction GetGlueBytesAsTextFunction() {
+	ScalarFunction function("glue_bytes_as_text", {LogicalType::BLOB, LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                        LogicalType::VARCHAR, GlueBytesAsText);
+	// throws for bytes that are not UTF-8
+	function.SetFallible();
+	return function;
 }
 
 TableFunction GetGlueGetDatabaseResponseFunction() {

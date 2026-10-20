@@ -36,6 +36,10 @@ The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `rea
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
 `read_json` (one object per line, keys by name; SerDe properties see below) and AvroSerDe with `read_avro`
 (columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
+A parquet `BYTE_ARRAY` column without a `STRING` annotation (as Impala and older Hive writers produce) is read as
+UTF-8 text when Glue declares the column `string` (bytes that are not UTF-8 are an error naming the column), and as
+bytes when it declares it `binary`, whatever the session's `binary_as_string`. Such bytes inside an `array`, `struct`
+or `map` column keep the escaped form the reader gives a BLOB.
 Text tables are read the way their SerDe reads them:
 
 - LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127

@@ -83,6 +83,11 @@ public:
 	//! Fetch a single partition by its values, returns false if it does not exist
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
+	//! GetPartition with the partition's storage descriptor and parameters. 'raw_json' (optional) receives the Glue
+	//! Partition object of the response as JSON.
+	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                         const string &table_name, const vector<string> &values, GluePartitionDetails &result,
+	                         string *raw_json = nullptr);
 	//! Register one partition of a Hive table. Returns false if it already exists and 'if_not_exists' is set, throws
 	//! a CatalogException if it already exists otherwise.
 	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,

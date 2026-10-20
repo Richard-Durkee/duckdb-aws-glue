@@ -242,6 +242,7 @@ query.
 | function | Hive statement |
 |----------|------------------|
 | `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` |
+| `glue_get_partition_response('cat.db.t', {dt: '2016-05-14', country: 'IN'})` | `DESCRIBE FORMATTED ... PARTITION (...)`: the partition's location, SerDe, columns and parameters, and its complete Glue definition in `response` |
 | `CALL glue_add_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, location := 's3://...', if_not_exists := false)` | `ALTER TABLE ADD [IF NOT EXISTS] PARTITION (...) [LOCATION ...]`; without `location` the partition lives at `<table location>/dt=2016-05-14/country=IN` |
 | `CALL glue_drop_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, if_exists := false)` | `ALTER TABLE DROP [IF EXISTS] PARTITION (...)`; the data files stay in S3 |
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
@@ -295,6 +296,15 @@ parameters as columns, plus the complete Glue `Table` object as a VARIANT in `re
 (`'default.some_table'`, or `'some_table'` after `USE my_datalake.default`) is resolved like in a query, through the
 table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
 name.
+
+`glue_get_partition_response('<table>', {dt: '2024-01-01', ...})` does the same for one partition of a Hive table:
+its values, location, SerDe, columns and parameters as columns, plus the complete Glue `Partition` object in
+`response`. The partition is given like for the other partition functions, as a struct naming every partition key.
+
+```sql
+SELECT location, response.StorageDescriptor.InputFormat
+FROM glue_get_partition_response('my_datalake.default.some_table', {dt: '2024-01-01'});
+```
 
 `glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
 description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified

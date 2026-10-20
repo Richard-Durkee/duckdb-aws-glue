@@ -62,6 +62,18 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                            const string &table_name, const vector<string> &values, GluePartitionInfo &result) {
+	GluePartitionDetails details;
+	if (!GetPartition(context, catalog, database_name, table_name, values, details)) {
+		return false;
+	}
+	result.values = std::move(details.values);
+	result.location = std::move(details.location);
+	return true;
+}
+
+bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                           const string &table_name, const vector<string> &values, GluePartitionDetails &result,
+                           string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetPartitionRequest request;
@@ -82,7 +94,15 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	for (auto &value : partition.GetValues()) {
 		result.values.push_back(ToStdString(value));
 	}
-	result.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+	auto &storage_descriptor = partition.GetStorageDescriptor();
+	result.location = ToStdString(storage_descriptor.GetLocation());
+	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
+	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
+	result.columns = ToColumns(storage_descriptor.GetColumns());
+	result.parameters = ToStdMap(partition.GetParameters());
+	if (raw_json) {
+		*raw_json = ToStdString(partition.Jsonize().View().WriteReadable());
+	}
 	return true;
 }
 

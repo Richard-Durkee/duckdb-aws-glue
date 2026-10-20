@@ -6,6 +6,7 @@
 #include "duckdb/common/optional.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
 
 #include "api/glue_api.hpp"
@@ -884,7 +885,79 @@ void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataCh
 	}
 }
 
+//===--------------------------------------------------------------------===//
+// glue_get_partition_response
+//===--------------------------------------------------------------------===//
+struct GlueGetPartitionResponseBindData : public TableFunctionData {
+	GluePartitionTarget target;
+	GluePartitionDetails partition;
+	string raw_json;
+};
+
+unique_ptr<FunctionData> GlueGetPartitionResponseBind(ClientContext &context, TableFunctionBindInput &input,
+                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<GlueGetPartitionResponseBindData>();
+	result->target = ResolveGlueTable(context, "glue_get_partition_response", input.inputs[0]);
+	auto values = ParsePartitionSpec("glue_get_partition_response", result->target, input.inputs[1]);
+	auto &table = result->target.table;
+	if (!GlueAPI::GetPartition(context, *result->target.catalog, table.database_name, table.name, values,
+	                           result->partition, &result->raw_json)) {
+		throw CatalogException("Partition [%s] does not exist in Glue table '%s'", StringUtil::Join(values, ", "),
+		                       result->target.TableName());
+	}
+	auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
+	names = {"database_name", "table_name", "partition_values", "location", "serde_library",
+	         "columns",       "parameters", "serde_parameters", "response"};
+	return_types = {LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                LogicalType::LIST(LogicalType::VARCHAR),
+	                LogicalType::VARCHAR,
+	                LogicalType::VARCHAR,
+	                GlueColumnsType(),
+	                map_type,
+	                map_type,
+	                LogicalType::VARIANT()};
+	return std::move(result);
+}
+
+void GlueGetPartitionResponseScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GluePartitionChangeState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	auto &bind_data = data.bind_data->Cast<GlueGetPartitionResponseBindData>();
+	auto &table = bind_data.target.table;
+	auto &partition = bind_data.partition;
+	vector<Value> values;
+	for (auto &value : partition.values) {
+		values.emplace_back(value);
+	}
+
+	output.data[0].Append(Value(table.database_name));
+	output.data[1].Append(Value(table.name));
+	output.data[2].Append(Value::LIST(LogicalType::VARCHAR, std::move(values)));
+	output.data[3].Append(Value(partition.location));
+	output.data[4].Append(Value(partition.serde_library));
+	output.data[5].Append(GlueColumnsToValue(partition.columns));
+	output.data[6].Append(GlueParametersToValue(partition.parameters));
+	output.data[7].Append(GlueParametersToValue(partition.serde_parameters));
+
+	// The complete Glue Partition object: JSON as serialized by the AWS SDK, cast to VARIANT
+	Vector json(LogicalType::JSON(), 1);
+	json.SetValue(0, Value(bind_data.raw_json));
+	VectorOperations::Cast(context, json, output.data[8], 1);
+
+	output.CheckCardinality(1);
+}
+
 } // namespace
+
+TableFunction GetGlueGetPartitionResponseFunction() {
+	TableFunction function("glue_get_partition_response", {LogicalType::VARCHAR, LogicalType::ANY},
+	                       GlueGetPartitionResponseScan, GlueGetPartitionResponseBind, GluePartitionChangeInit);
+	return function;
+}
 
 TableFunction GetGluePartitionsFunction() {
 	TableFunction function("glue_partitions", {LogicalType::VARCHAR}, GluePartitionsScan, GluePartitionsBind,

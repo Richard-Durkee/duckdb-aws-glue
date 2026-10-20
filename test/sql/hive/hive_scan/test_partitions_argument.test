@@ -8,10 +8,6 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
-statement ok
-SET hive_default_format = 'parquet';
-
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -22,8 +18,9 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.pa_orders;
 
+# hive_scan reads Parquet unless given a format
 statement ok
-CREATE TABLE my_datalake.default.pa_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.default.pa_orders (id INTEGER, amount DOUBLE, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'parquet');
 
 statement ok
 INSERT INTO my_datalake.default.pa_orders VALUES (1, 10.0, '2016-05-14'), (2, 20.0, '2016-05-15');

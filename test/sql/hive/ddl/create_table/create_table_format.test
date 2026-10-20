@@ -12,9 +12,9 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# this test checks the built-in default format, so it starts from it whatever the config sets
 statement ok
-SET hive_default_format = 'parquet';
+RESET hive_default_format;
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (

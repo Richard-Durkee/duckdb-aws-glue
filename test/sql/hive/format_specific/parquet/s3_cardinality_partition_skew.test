@@ -1,6 +1,6 @@
-# name: test/sql/hive/bugs/s3_cardinality_partition_skew.test
+# name: test/sql/hive/format_specific/parquet/s3_cardinality_partition_skew.test
 # description: S3 - a near-empty sampled partition must not collapse the estimate to ~one row per partition.
-# group: [bugs]
+# group: [parquet]
 
 require httpfs
 
@@ -8,7 +8,7 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# the estimates come from Parquet footers, so the tables are Parquet whatever the config's default format
 statement ok
 SET hive_default_format = 'parquet';
 

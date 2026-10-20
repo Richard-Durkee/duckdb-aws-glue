@@ -1,6 +1,6 @@
-# name: test/sql/hive/bugs/s3_cardinality_partition_sizes.test
+# name: test/sql/hive/format_specific/parquet/s3_cardinality_partition_sizes.test
 # description: S3 - partitions of different sizes: the estimate must not take the first partition for all of them
-# group: [bugs]
+# group: [parquet]
 
 # The root listing's first page holds the files of many partitions. Measuring only the first one scaled a nearly empty
 # first partition (an early date bucket, NULL keys) to the whole table: TPC-DS web_returns came out at 651 rows of
@@ -14,7 +14,7 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# the estimates come from Parquet footers, so the tables are Parquet whatever the config's default format
 statement ok
 SET hive_default_format = 'parquet';
 

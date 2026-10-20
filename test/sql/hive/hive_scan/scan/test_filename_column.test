@@ -10,9 +10,9 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# the table is written in the config's default format; its files are read back with that format's own reader
 statement ok
-SET hive_default_format = 'parquet';
+SET VARIABLE hive_format = current_setting('hive_default_format');
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
@@ -42,8 +42,15 @@ INSERT INTO my_datalake.default.path_flat VALUES (4, 'four'), (5, 'five'), (6, '
 
 # The data files, read directly: every row with the file it is in
 statement ok
+SET VARIABLE flat_reader = CASE getvariable('hive_format')
+    WHEN 'csv' THEN 'read_csv(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'', delim = chr(1), header = false, columns = {''id'': ''INTEGER'', ''name'': ''VARCHAR''})'
+    WHEN 'json' THEN 'read_json(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'')'
+    WHEN 'avro' THEN 'read_avro(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'')'
+    ELSE 'read_parquet(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'')' END;
+
+statement ok
 CREATE TEMP TABLE flat_files AS
-SELECT id, filename AS path FROM read_parquet('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*');
+SELECT id, filename AS path FROM query('SELECT id::INTEGER AS id, filename FROM ' || getvariable('flat_reader'));
 
 query II
 SELECT count(*), count(DISTINCT path) FROM flat_files;
@@ -72,7 +79,7 @@ SELECT count(*) FROM my_datalake.default.path_flat t JOIN flat_files f ON t.id =
 6
 
 query III
-SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.parquet'
+SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.' || getvariable('hive_format')
 FROM my_datalake.default.path_flat ORDER BY id;
 ----
 1	one	true
@@ -202,7 +209,8 @@ SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat_csv GROUP 
 # hive_scan() over the same files
 #---------------------------------------------------------------------------
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'}) t
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'},
+    format := getvariable('hive_format'), delim := chr(1)) t
 JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
 ----
 6

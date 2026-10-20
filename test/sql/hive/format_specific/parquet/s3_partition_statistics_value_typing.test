@@ -1,6 +1,6 @@
-# name: test/sql/hive/bugs/s3_partition_statistics_value_typing.test
+# name: test/sql/hive/format_specific/parquet/s3_partition_statistics_value_typing.test
 # description: partition-column statistics must use the column's DECLARED type.
-# group: [bugs]
+# group: [parquet]
 
 #
 # Glue stores partition values as a string. Statistics built on a guessed numeric type would lead to
@@ -13,7 +13,7 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# the estimates come from Parquet footers, so the tables are Parquet whatever the config's default format
 statement ok
 SET hive_default_format = 'parquet';
 

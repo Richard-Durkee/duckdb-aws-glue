@@ -4,15 +4,9 @@
 
 require httpfs
 
-require parquet
-
 require glue
 
 require-env GLUE_CATALOG_ID
-
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
-statement ok
-SET hive_default_format = 'parquet';
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
@@ -28,6 +22,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.bucketed_orders;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.bucketed_orders_writer;
+
+statement ok
 CREATE TABLE my_datalake.default.bucketed_orders (id INTEGER, amount DOUBLE)
 WITH (BucketColumns = ['id'], NumberOfBuckets = 4, SortColumns = [{'Column': 'id', 'SortOrder': 1}]);
 
@@ -38,10 +35,16 @@ WHERE database_name = 'my_datalake' AND table_name = 'bucketed_orders' ORDER BY 
 id	INTEGER
 amount	DOUBLE
 
-# data written by another engine; COPY TO writes S3 directly and is not a write through the catalog
+# data written by another engine: an unbucketed table at the same location writes the files in the table's format
 statement ok
-COPY (SELECT 1 AS id, 10.0 AS amount UNION ALL SELECT 2, 20.0)
-TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bucketed_orders/data.parquet' (FORMAT parquet);
+CREATE TABLE my_datalake.default.bucketed_orders_writer (id INTEGER, amount DOUBLE)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bucketed_orders');
+
+statement ok
+INSERT INTO my_datalake.default.bucketed_orders_writer VALUES (1, 10.0), (2, 20.0);
+
+statement ok
+DROP TABLE my_datalake.default.bucketed_orders_writer;
 
 query II
 SELECT id, amount FROM my_datalake.default.bucketed_orders ORDER BY id;

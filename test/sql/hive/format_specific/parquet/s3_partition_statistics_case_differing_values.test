@@ -1,6 +1,6 @@
-# name: test/sql/hive/bugs/s3_partition_statistics_case_differing_values.test
+# name: test/sql/hive/format_specific/parquet/s3_partition_statistics_case_differing_values.test
 # description: partition-column statistics must not fold case.
-# group: [bugs]
+# group: [parquet]
 
 require httpfs
 
@@ -8,7 +8,7 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# the estimates come from Parquet footers, so the tables are Parquet whatever the config's default format
 statement ok
 SET hive_default_format = 'parquet';
 

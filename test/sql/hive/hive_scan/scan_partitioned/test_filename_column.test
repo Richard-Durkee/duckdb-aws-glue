@@ -13,9 +13,9 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# the table is written in the config's default format; its files are read back with that format's own reader
 statement ok
-SET hive_default_format = 'parquet';
+SET VARIABLE hive_format = current_setting('hive_default_format');
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
@@ -26,6 +26,21 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.path_nested;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_stage0;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_stage1;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_stage2;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_stage3;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.path_nested_stage4;
 
 statement ok
 CREATE TABLE my_datalake.default.path_nested (id INTEGER, val VARCHAR, year INTEGER, month INTEGER, day VARCHAR)
@@ -51,9 +66,18 @@ INSERT INTO my_datalake.default.path_nested VALUES (7, 'g', 2024, 1, '0');
 statement ok
 INSERT INTO my_datalake.default.path_nested VALUES (8, 'h', 2024, 3, 'a/b'), (9, 'i', 2024, 3, NULL);
 
+# The files of the partitions below are written through unpartitioned tables at their directories (dropping a
+# table leaves its files).
+
 # a partition registered INSIDE the directory of another partition (year=2024/month=1/day=01)
 statement ok
-COPY (SELECT 20 AS id, 'late' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late/data.parquet';
+CREATE TABLE my_datalake.default.path_nested_stage0 (id INTEGER, val VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=01/late');
+
+statement ok
+INSERT INTO my_datalake.default.path_nested_stage0 VALUES (20, 'late');
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_stage0;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.path_nested', {year: '2024', month: '1', day: 'late'},
@@ -61,7 +85,13 @@ CALL glue_add_partition('my_datalake.default.path_nested', {year: '2024', month:
 
 # a partition registered ABOVE the directories of other partitions: its files lie directly in year=2024
 statement ok
-COPY (SELECT 30 AS id, 'top' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/data.parquet';
+CREATE TABLE my_datalake.default.path_nested_stage1 (id INTEGER, val VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024');
+
+statement ok
+INSERT INTO my_datalake.default.path_nested_stage1 VALUES (30, 'top');
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_stage1;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.path_nested', {year: '2023', month: '12', day: 'top'},
@@ -69,7 +99,13 @@ CALL glue_add_partition('my_datalake.default.path_nested', {year: '2023', month:
 
 # a partition outside the table location
 statement ok
-COPY (SELECT 40 AS id, 'away' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p/data.parquet';
+CREATE TABLE my_datalake.default.path_nested_stage2 (id INTEGER, val VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/p');
+
+statement ok
+INSERT INTO my_datalake.default.path_nested_stage2 VALUES (40, 'away');
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_stage2;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.path_nested', {year: '2022', month: '6', day: 'away'},
@@ -78,10 +114,22 @@ CALL glue_add_partition('my_datalake.default.path_nested', {year: '2022', month:
 # a directory inside a partition that is not a partition itself, and one below the table location that is not a
 # partition either: both belong to the deepest partition registered above them (day=02 and top)
 statement ok
-COPY (SELECT 50 AS id, 'stray' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=02/extra/data.parquet';
+CREATE TABLE my_datalake.default.path_nested_stage3 (id INTEGER, val VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=1/day=02/extra');
 
 statement ok
-COPY (SELECT 51 AS id, 'unregistered' AS val) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=9/day=09/data.parquet';
+INSERT INTO my_datalake.default.path_nested_stage3 VALUES (50, 'stray');
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_stage3;
+
+statement ok
+CREATE TABLE my_datalake.default.path_nested_stage4 (id INTEGER, val VARCHAR) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/year=2024/month=9/day=09');
+
+statement ok
+INSERT INTO my_datalake.default.path_nested_stage4 VALUES (51, 'unregistered');
+
+statement ok
+DROP TABLE my_datalake.default.path_nested_stage4;
 
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.path_nested');
@@ -90,10 +138,15 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.path_nested');
 
 # every data file written above, read directly: each id is in exactly one file
 statement ok
+SET VARIABLE nested_reader = CASE getvariable('hive_format')
+    WHEN 'csv' THEN 'read_csv([''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*'', ''{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*''], hive_partitioning = false, delim = chr(1), header = false, columns = {''id'': ''INTEGER'', ''val'': ''VARCHAR''})'
+    WHEN 'json' THEN 'read_json([''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*'', ''{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*''], hive_partitioning = false)'
+    WHEN 'avro' THEN 'read_avro([''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*'', ''{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*''])'
+    ELSE 'read_parquet([''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*'', ''{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*''], hive_partitioning = false)' END;
+
+statement ok
 CREATE TEMP TABLE nested_files AS
-SELECT id, filename AS path
-FROM read_parquet(['{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested/**/*.parquet',
-                   '{DEFAULT_S3_LOCATION}/{TEST_DIR}/path_nested_elsewhere/**/*.parquet'], hive_partitioning = false);
+SELECT id, filename AS path FROM query('SELECT id::INTEGER AS id, filename FROM ' || getvariable('nested_reader'));
 
 query II
 SELECT count(*), count(DISTINCT id) FROM nested_files;
@@ -256,6 +309,7 @@ SET hive_partition_listing_threshold = {threshold};
 
 query III
 SELECT id, day, rel_dir(filename) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_nested',
+    format := getvariable('hive_format'), delim := chr(1),
     schema := {id: 'INTEGER', val: 'VARCHAR', year: 'INTEGER', month: 'INTEGER', day: 'VARCHAR'},
     partitions := [
         {year: 2024, month: 1, day: '01', location: NULL},

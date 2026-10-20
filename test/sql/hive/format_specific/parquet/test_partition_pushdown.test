@@ -1,6 +1,6 @@
-# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_pushdown.test
+# name: test/sql/hive/format_specific/parquet/test_partition_pushdown.test
 # description: Filters on partition columns prune partitions before anything is listed: only the directories of the
-# group: [scan_partitioned]
+# group: [parquet]
 
 #              partitions a query reads get an S3 ListObjects call. Counted through the HTTP log.
 
@@ -10,7 +10,7 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
+# it counts the files the Parquet reader and its estimate open, so the tables are Parquet whatever the default format
 statement ok
 SET hive_default_format = 'parquet';
 

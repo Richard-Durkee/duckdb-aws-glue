@@ -4,15 +4,9 @@
 
 require httpfs
 
-require parquet
-
 require glue
 
 require-env GLUE_CATALOG_ID
-
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
-statement ok
-SET hive_default_format = 'parquet';
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
@@ -37,7 +31,7 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_objec
 0
 
 query I
-SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_object/*.parquet');
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/no_dir_object/*');
 ----
 1
 

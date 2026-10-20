@@ -8,10 +8,6 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
-statement ok
-SET hive_default_format = 'parquet';
-
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -51,9 +47,13 @@ SELECT id FROM my_datalake.default.bi_orders WHERE dt = '2016-05-15';
 ----
 2
 
+# hive_scan reads Parquet unless given a format, so it reads a Parquet copy of the rows
+statement ok
+COPY (SELECT id, amount, dt FROM my_datalake.default.bi_orders) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bi_orders_parquet' (FORMAT parquet, PARTITION_BY (dt));
+
 # hive_scan() has no catalog entry, so the delegated bind info carries the format reader's scan type with a null table
 query III
-SELECT id, amount, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bi_orders',
+SELECT id, amount, dt FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bi_orders_parquet',
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'},
     partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}])
 ORDER BY id;

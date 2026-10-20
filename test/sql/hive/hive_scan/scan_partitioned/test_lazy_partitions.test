@@ -10,10 +10,6 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
-statement ok
-SET hive_default_format = 'parquet';
-
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -158,12 +154,16 @@ EXPLAIN SELECT count(*) FROM my_datalake.default.lp_orders WHERE dt = '2016-05-1
 ----
 physical_plan	<REGEX>:.*HIVE_SCAN.*Scanning Files: 1/3.*
 
+# hive_scan reads Parquet unless given a format, so it reads a Parquet copy of the rows
+statement ok
+COPY (SELECT id, amount, dt FROM my_datalake.default.lp_orders) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/lp_orders_parquet' (FORMAT parquet, PARTITION_BY (dt));
+
 # hive_scan with an explicit partition list never asks Glue
 statement ok
 CALL truncate_duckdb_logs();
 
 query I
-SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/lp_orders', schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'}, partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
+SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/lp_orders_parquet', schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR'}, partitions := [{dt: '2016-05-14'}, {dt: '2016-05-15'}]);
 ----
 2
 

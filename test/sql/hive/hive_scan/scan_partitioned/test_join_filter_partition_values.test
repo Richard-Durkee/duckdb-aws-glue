@@ -8,10 +8,6 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# this test is about Parquet tables, so they stay Parquet whatever the config's default format
-statement ok
-SET hive_default_format = 'parquet';
-
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -23,6 +19,9 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.jf_escaped;
 
 statement ok
+DROP TABLE IF EXISTS my_datalake.default.jf_escaped_extra;
+
+statement ok
 CREATE TABLE my_datalake.default.jf_escaped (id INTEGER, tag VARCHAR) PARTITIONED BY (tag);
 
 statement ok
@@ -30,7 +29,13 @@ INSERT INTO my_datalake.default.jf_escaped VALUES (1, 'plain'), (2, 'other'), (3
 
 # a partition whose Glue value looks URL-escaped
 statement ok
-COPY (SELECT 4 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom/data.parquet';
+CREATE TABLE my_datalake.default.jf_escaped_extra (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom');
+
+statement ok
+INSERT INTO my_datalake.default.jf_escaped_extra VALUES (4);
+
+statement ok
+DROP TABLE my_datalake.default.jf_escaped_extra;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.jf_escaped', {tag: 'a%20b'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom');

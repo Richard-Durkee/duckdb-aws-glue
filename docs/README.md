@@ -326,6 +326,8 @@ The tests are written against two `--test-config` files, which decide where the 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
+The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
+GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)

@@ -69,7 +69,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 
 - The data files are those below the location of every partition Glue lists (`GetPartitions`), at any depth, or
   below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
-  layout. Files and directories named `_*` or `.*` are skipped. When one partition's location lies inside another's,
+  layout. Files and directories named `_*` or `.*`, `*_$folder$` directory markers and objects the listing reports as
+  zero bytes are skipped.
+  When one partition's location lies inside another's,
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its

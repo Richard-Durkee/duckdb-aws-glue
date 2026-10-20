@@ -108,14 +108,25 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! Whether a path below a location is hidden: Hive skips _* and .* files and directories
-static bool IsHiddenPath(const string &relative_path) {
-	for (auto &component : StringUtil::Split(relative_path, '/')) {
+//! Whether a listed object below 'prefix' (the location, with its trailing slash) is a data file. Hive skips _* and .*
+//! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
+//! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
+//! file of any format the reader opens
+static bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
+	if (!StringUtil::StartsWith(file.path, prefix)) {
+		return false;
+	}
+	auto components = StringUtil::Split(file.path.substr(prefix.size()), '/');
+	for (auto &component : components) {
 		if (component.empty() || component[0] == '_' || component[0] == '.') {
-			return true;
+			return false;
 		}
 	}
-	return false;
+	if (components.empty() || StringUtil::EndsWith(components.back(), "_$folder$")) {
+		return false;
+	}
+	auto size = ListedFileSize(file);
+	return !size.IsValid() || size.GetIndex() > 0;
 }
 
 //! The data files below 'location', at any depth (like read_parquet on a directory)
@@ -127,7 +138,7 @@ static void ListDataFiles(ClientContext &context, const string &location, vector
 	}
 	auto prefix = directory + "/";
 	for (auto &file : HiveQueryCache::Get(context)->GetDirectoryListing(context, directory)->GetAllFiles()) {
-		if (!StringUtil::StartsWith(file.path, prefix) || IsHiddenPath(file.path.substr(prefix.size()))) {
+		if (!IsDataFile(file, prefix)) {
 			continue;
 		}
 		files.push_back(file);
@@ -299,7 +310,7 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	auto root_prefix = root + "/";
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
-		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
+		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
 		auto partition_index = OwningPartition(file.path, root.size() + 1);
@@ -436,7 +447,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
 			continue;
 		}
-		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
+		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
 		in_sampled = sampled.IsValid() && StringUtil::StartsWith(file.path, sampled_prefix);

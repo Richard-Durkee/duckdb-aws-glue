@@ -22,7 +22,7 @@ statement ok
 DROP VIEW IF EXISTS my_datalake.default.comment_col_view;
 
 statement ok
-CREATE TABLE my_datalake.default.comment_col (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt);
+CREATE TABLE my_datalake.default.comment_col (id INTEGER, name VARCHAR, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'parquet');
 
 statement ok
 COMMENT ON COLUMN my_datalake.default.comment_col.id IS 'the id';

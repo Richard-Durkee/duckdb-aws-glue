@@ -18,6 +18,8 @@ struct HiveCSVOptions {
 	string null_string;
 	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
 	bool serde_fields = false;
+	//! With serde_fields: a field that does not parse as its column type is NULL (TRY_CAST), else the query fails
+	bool null_for_invalid_data = true;
 
 public:
 	void Serialize(Serializer &serializer) const;

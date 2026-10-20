@@ -105,7 +105,7 @@ SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_null
 2	\N	false	3.5
 
 #---------------------------------------------------------------------------
-# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse is NULL
+# OpenCSVSerde without SerDe properties: ',' separated, '"' quoted; a value that does not parse fails the query
 #---------------------------------------------------------------------------
 statement ok
 COPY (SELECT * FROM (VALUES
@@ -124,11 +124,22 @@ COPY (SELECT * FROM (VALUES
     ('1,a,oops')
 ) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
 
-# as in Hive, where every OpenCSVSerde column is a string, a value that does not parse as its column type is NULL
-query I
+# a value that does not parse fails the query unless use.null.for.invalid.data is true
+statement error
 SELECT amount FROM my_datalake.default.fixture_text_opencsv;
 ----
-NULL
+<REGEX>:.*Could not convert string 'oops' to DOUBLE.*
+
+# use.null.for.invalid.data as a SerDe property
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,a,oops')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv_null_invalid/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query III
+SELECT id, name, amount FROM my_datalake.default.fixture_text_opencsv_null_invalid;
+----
+1	a	NULL
 
 # as OpenCSVSerde does: missing trailing fields are NULL and fields beyond the last column are ignored
 statement ok
@@ -280,6 +291,34 @@ SELECT id, name, name IS NULL FROM my_datalake.default.formats_csv_opencsv ORDER
 1	a,b	false
 2	(empty)	false
 3	(empty)	false
+
+statement ok
+COPY (SELECT '"x","d"' AS line) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/formats_csv_opencsv/invalid.csv' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+statement error
+SELECT id FROM my_datalake.default.formats_csv_opencsv WHERE name = 'd';
+----
+<REGEX>:.*Could not convert string 'x' to (INT32|INTEGER).*
+
+# with use.null.for.invalid.data, a value that does not parse as its column type is NULL
+statement ok
+ALTER TABLE my_datalake.default.formats_csv_opencsv SET ('use.null.for.invalid.data' = 'true');
+
+query II
+SELECT id, name FROM my_datalake.default.formats_csv_opencsv ORDER BY id NULLS LAST;
+----
+1	a,b
+2	(empty)
+3	(empty)
+NULL	d
+
+statement ok
+ALTER TABLE my_datalake.default.formats_csv_opencsv SET ('use.null.for.invalid.data' = 'false');
+
+statement error
+SELECT id FROM my_datalake.default.formats_csv_opencsv WHERE name = 'd';
+----
+<REGEX>:.*Could not convert string 'x' to (INT32|INTEGER).*
 
 # a separator of more than one byte can be read, but not written
 statement ok

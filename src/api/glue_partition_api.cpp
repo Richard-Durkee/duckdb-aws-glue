@@ -6,7 +6,7 @@
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/thread.hpp"
-#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context.hpp"
 
@@ -343,6 +343,11 @@ static bool IsTransientPartitionError(const string &code) {
 	       code == "ConcurrentModificationException";
 }
 
+//! Transient errors after which Glue may nevertheless have registered the partition
+static bool MayHaveRegistered(const string &code) {
+	return code == "InternalServiceException" || code == "OperationTimeoutException";
+}
+
 //! glue_debug_fail_partition_registration, '<error code>:<index>': the partition at 'index' of a registration and
 //! every one after it fail with the error code; a transient one fails the first attempt only
 struct InjectedPartitionFailure {
@@ -350,18 +355,14 @@ struct InjectedPartitionFailure {
 	idx_t from = 0;
 	bool enabled = false;
 
-	static InjectedPartitionFailure FromSettings(ClientContext &context) {
+	static InjectedPartitionFailure Parse(const string &text) {
 		InjectedPartitionFailure result;
-		Value setting;
-		if (!context.TryGetCurrentSetting("glue_debug_fail_partition_registration", setting) || setting.IsNull()) {
-			return result;
-		}
-		auto text = setting.ToString();
 		if (text.empty()) {
 			return result;
 		}
 		auto separator = text.find(':');
-		if (separator == string::npos) {
+		if (separator == string::npos || separator == 0 ||
+		    !Value(text.substr(separator + 1)).DefaultTryCastAs(LogicalType::UBIGINT)) {
 			throw InvalidInputException("glue_debug_fail_partition_registration '%s' is not '<error code>:<index>'",
 			                            text);
 		}
@@ -370,10 +371,23 @@ struct InjectedPartitionFailure {
 		result.enabled = true;
 		return result;
 	}
+	static InjectedPartitionFailure FromSettings(ClientContext &context) {
+		Value setting;
+		if (!context.TryGetCurrentSetting("glue_debug_fail_partition_registration", setting) || setting.IsNull()) {
+			return InjectedPartitionFailure();
+		}
+		return Parse(setting.ToString());
+	}
 	bool Fails(idx_t index, idx_t attempt) const {
 		return enabled && index >= from && (attempt == 0 || !IsTransientPartitionError(code));
 	}
 };
+
+void GlueAPI::CheckDebugFailPartitionRegistration(ClientContext &, SetScope, Value &parameter) {
+	if (!parameter.IsNull()) {
+		InjectedPartitionFailure::Parse(parameter.ToString());
+	}
+}
 
 GluePartitionRegistration GlueAPI::TryBatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
                                                             const string &database_name, const string &table_name,
@@ -403,6 +417,14 @@ GluePartitionRegistration GlueAPI::TryBatchCreatePartitions(ClientContext &conte
 	// partitions a successful response refuses, so those are sent again here when the error may pass.
 	constexpr idx_t BATCH_SIZE = 100;
 	constexpr idx_t MAX_ATTEMPTS = 4;
+	struct PartitionError {
+		idx_t index;
+		string code;
+		string message;
+		bool injected;
+	};
+	// partitions an earlier attempt may have registered although Glue reported an error for them
+	unordered_set<idx_t> may_be_registered;
 	for (idx_t offset = 0; offset < partitions.size(); offset += BATCH_SIZE) {
 		vector<idx_t> pending;
 		for (idx_t i = offset; i < MinValue<idx_t>(offset + BATCH_SIZE, partitions.size()); i++) {
@@ -413,13 +435,14 @@ GluePartitionRegistration GlueAPI::TryBatchCreatePartitions(ClientContext &conte
 				std::this_thread::sleep_for(std::chrono::milliseconds(100 << (2 * (attempt - 1))));
 			}
 			// the partition values of each partition sent, to match the errors of the response to them
-			unordered_map<string, idx_t> sent;
-			vector<pair<idx_t, string>> errors;
+			map<vector<string>, idx_t> sent;
+			vector<PartitionError> errors;
 			Aws::Vector<Aws::Glue::Model::PartitionInput> inputs;
 			for (auto index : pending) {
 				auto &partition = partitions[index];
 				if (injected.Fails(index, attempt)) {
-					errors.emplace_back(index, injected.code + ": injected by glue_debug_fail_partition_registration");
+					errors.push_back(
+					    {index, injected.code, "injected by glue_debug_fail_partition_registration", true});
 					continue;
 				}
 				Aws::Glue::Model::PartitionInput input;
@@ -428,9 +451,8 @@ GluePartitionRegistration GlueAPI::TryBatchCreatePartitions(ClientContext &conte
 				descriptor.SetLocation(partition.location);
 				input.SetStorageDescriptor(descriptor);
 				inputs.push_back(std::move(input));
-				sent.emplace(PartitionValuesToString(partition.values), index);
+				sent.emplace(partition.values, index);
 			}
-			unordered_set<idx_t> refused;
 			if (!inputs.empty()) {
 				Aws::Glue::Model::BatchCreatePartitionRequest request;
 				SetCatalogId(request, catalog);
@@ -443,40 +465,59 @@ GluePartitionRegistration GlueAPI::TryBatchCreatePartitions(ClientContext &conte
 					                                  table_name, ToStdString(outcome.GetError().GetMessage()));
 					return result;
 				}
+				// Every partition sent counts as created unless the response refused it. Counting one Glue did not
+				// create is harmless: BatchDeletePartitions skips partitions that do not exist.
+				unordered_set<idx_t> refused;
 				for (auto &error : outcome.GetResult().GetErrors()) {
 					vector<string> values;
 					for (auto &value : error.GetPartitionValues()) {
 						values.push_back(ToStdString(value));
 					}
-					auto entry = sent.find(PartitionValuesToString(values));
-					if (entry == sent.end()) {
-						continue;
-					}
-					refused.insert(entry->second);
 					auto code = ToStdString(error.GetErrorDetail().GetErrorCode());
-					if (code == "AlreadyExistsException") {
-						// appending to an existing partition
+					auto message = ToStdString(error.GetErrorDetail().GetErrorMessage());
+					auto entry = sent.find(values);
+					if (entry == sent.end()) {
+						// the error cannot be matched to a partition, so none of them is known to be registered
+						if (result.error.empty()) {
+							result.error = StringUtil::Format("Glue BatchCreatePartition '%s.%s' failed for partition "
+							                                  "[%s], which is not among the partitions sent: %s (%s)",
+							                                  database_name, table_name,
+							                                  PartitionValuesToString(values), message, code);
+						}
 						continue;
 					}
-					errors.emplace_back(entry->second,
-					                    code + ": " + ToStdString(error.GetErrorDetail().GetErrorMessage()));
+					auto index = entry->second;
+					refused.insert(index);
+					if (code == "AlreadyExistsException") {
+						// appending to an existing partition, unless an earlier attempt of this call registered it
+						if (may_be_registered.find(index) != may_be_registered.end()) {
+							result.uncertain.push_back(index);
+						}
+						continue;
+					}
+					errors.push_back({index, code, message, false});
 				}
 				for (auto &entry : sent) {
 					if (refused.find(entry.second) == refused.end()) {
 						result.created.push_back(entry.second);
 					}
 				}
+				if (!result.error.empty()) {
+					return result;
+				}
 			}
 			pending.clear();
 			for (auto &error : errors) {
-				auto code = error.second.substr(0, error.second.find(':'));
-				if (!IsTransientPartitionError(code) || attempt + 1 == MAX_ATTEMPTS) {
+				if (!IsTransientPartitionError(error.code) || attempt + 1 == MAX_ATTEMPTS) {
 					result.error = StringUtil::Format(
-					    "Glue BatchCreatePartition '%s.%s' failed for partition [%s]: %s", database_name, table_name,
-					    PartitionValuesToString(partitions[error.first].values), error.second);
+					    "Glue BatchCreatePartition '%s.%s' failed for partition [%s]: %s: %s", database_name,
+					    table_name, PartitionValuesToString(partitions[error.index].values), error.code, error.message);
 					return result;
 				}
-				pending.push_back(error.first);
+				if (!error.injected && MayHaveRegistered(error.code)) {
+					may_be_registered.insert(error.index);
+				}
+				pending.push_back(error.index);
 			}
 		}
 	}

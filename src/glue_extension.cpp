@@ -10,6 +10,7 @@
 #include "catalog/glue_attach.hpp"
 #include "functions/glue_functions.hpp"
 #include "grammar/glue_grammar.hpp"
+#include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
@@ -91,7 +92,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "and every later one, fail with that error code; a transient error (ThrottlingException, "
 	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
 	    "nothing.",
-	    LogicalType::VARCHAR, Value(""));
+	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();

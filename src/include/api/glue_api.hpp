@@ -6,6 +6,7 @@
 #include "core/glue_info.hpp"
 
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/enums/set_scope.hpp"
 
 #include <memory>
 
@@ -18,6 +19,7 @@ class GlueClient;
 namespace duckdb {
 class ClientContext;
 class GlueCatalog;
+class Value;
 
 class GlueException : public IOException {
 public:
@@ -31,6 +33,9 @@ public:
 struct GluePartitionRegistration {
 	//! The partitions this call created, as indexes into its input; those that already existed are not among them
 	vector<idx_t> created;
+	//! Partitions Glue reported as existing when they were sent again after a transient error: the earlier attempt may
+	//! have registered them, so a caller rolling back cannot tell whether they are its own
+	vector<idx_t> uncertain;
 	//! Why registration stopped, empty when every partition was registered or already existed
 	string error;
 };
@@ -115,6 +120,8 @@ public:
 	static GluePartitionRegistration TryBatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
 	                                                          const string &database_name, const string &table_name,
 	                                                          const vector<GluePartitionInput> &partitions);
+	//! SET callback of glue_debug_fail_partition_registration: rejects a value that is not '<error code>:<index>'
+	static void CheckDebugFailPartitionRegistration(ClientContext &context, SetScope scope, Value &parameter);
 	//! Unregister partitions by their values (BatchDeletePartition; the data files are left in place). Partitions that
 	//! do not exist are skipped; throws for the first one Glue refuses.
 	static void BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,

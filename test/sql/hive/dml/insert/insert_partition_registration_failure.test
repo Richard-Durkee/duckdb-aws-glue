@@ -89,13 +89,25 @@ SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
 ----
 250
 
-statement ok
-SET glue_debug_fail_partition_registration = 'nonsense';
-
+# a malformed setting is refused when it is set, not after a write has already written its files
 statement error
-INSERT INTO my_datalake.default.reg_fail VALUES (1000, 1000);
+SET glue_debug_fail_partition_registration = 'nonsense';
 ----
 glue_debug_fail_partition_registration 'nonsense' is not '<error code>:<index>'
+
+statement error
+SET glue_debug_fail_partition_registration = 'InvalidInputException:abc';
+----
+glue_debug_fail_partition_registration 'InvalidInputException:abc' is not '<error code>:<index>'
+
+# the previous, valid value is still in place
+statement ok
+INSERT INTO my_datalake.default.reg_fail VALUES (1000, 1000);
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
+----
+251
 
 statement ok
 SET glue_debug_fail_partition_registration = '';

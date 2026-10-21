@@ -1,5 +1,7 @@
 #include "planning/glue_hive_insert.hpp"
 
+#include "api/glue_api_util.hpp"
+
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
@@ -619,15 +621,26 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		left_behind.push_back(StringUtil::Format("%llu of the %llu files it wrote (%s)", files_left,
 		                                         state.written_files.size(), file_error));
 	}
+	// Partitions Glue reported as existing after a transient error are kept: they may have existed before, and a
+	// partition this INSERT registered is empty once its files are deleted, so running it again is still right
+	string kept;
+	if (!registration.uncertain.empty()) {
+		vector<string> values;
+		for (auto index : registration.uncertain) {
+			values.push_back("[" + PartitionValuesToString(to_register[index].values) + "]");
+		}
+		kept = StringUtil::Format(". %llu partitions that may have existed before it were kept: %s", values.size(),
+		                          StringUtil::Join(values, ", "));
+	}
 	if (left_behind.empty()) {
 		throw IOException("INSERT into Hive table '%s.%s' was rolled back: %s. The files it wrote were deleted and "
-		                  "the partitions it registered removed, so it can be run again",
-		                  table_info.database_name, table_info.name, registration.error);
+		                  "the partitions it registered removed, so it can be run again%s",
+		                  table_info.database_name, table_info.name, registration.error, kept);
 	}
 	throw IOException("INSERT into Hive table '%s.%s' failed: %s. Rolling it back left behind %s; remove them before "
-	                  "running it again",
+	                  "running it again%s",
 	                  table_info.database_name, table_info.name, registration.error,
-	                  StringUtil::Join(left_behind, " and "));
+	                  StringUtil::Join(left_behind, " and "), kept);
 }
 
 SourceResultType GlueHiveInsert::GetDataInternal(ExecutionContext &context, DataChunk &chunk,

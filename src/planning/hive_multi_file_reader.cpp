@@ -15,7 +15,7 @@
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/thread.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
@@ -146,6 +146,28 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 	}
 }
 
+//! Lists the data files of one partition location
+class ListPartitionTask : public BaseExecutorTask {
+public:
+	ListPartitionTask(TaskExecutor &executor, ClientContext &context, bool cached, const string &location,
+	                  vector<OpenFileInfo> &files)
+	    : BaseExecutorTask(executor), context(context), cached(cached), location(location), files(files) {
+	}
+
+	void ExecuteTask() override {
+		ListDataFiles(context, cached, location, files);
+	}
+	string TaskType() const override {
+		return "ListPartitionTask";
+	}
+
+private:
+	ClientContext &context;
+	bool cached;
+	const string &location;
+	vector<OpenFileInfo> &files;
+};
+
 //===--------------------------------------------------------------------===//
 // HiveMultiFileList
 //===--------------------------------------------------------------------===//
@@ -172,8 +194,9 @@ shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
 	return partition_indexes;
 }
 
-//! How many partition directories we list at once when each partition gets its own listing
-static constexpr idx_t PARTITION_LISTING_THREADS = 16;
+//! How many partition directories are listed together, as tasks on DuckDB's threads, when each partition gets its own
+//! listing
+static constexpr idx_t PARTITIONS_LISTED_TOGETHER = 16;
 
 void HiveMultiFileList::PlanListings() const {
 	if (planned) {
@@ -213,8 +236,8 @@ void HiveMultiFileList::PlanListings() const {
 	}
 	separately.insert(separately.end(), elsewhere.begin(), elsewhere.end());
 	// partitions that need their own listing go in batches, and each batch is listed in parallel
-	for (idx_t start = 0; start < separately.size(); start += PARTITION_LISTING_THREADS) {
-		auto end = MinValue<idx_t>(start + PARTITION_LISTING_THREADS, separately.size());
+	for (idx_t start = 0; start < separately.size(); start += PARTITIONS_LISTED_TOGETHER) {
+		auto end = MinValue<idx_t>(start + PARTITIONS_LISTED_TOGETHER, separately.size());
 		listing_jobs.push_back(ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end)});
 	}
 }
@@ -271,35 +294,17 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 		StringUtil::RTrim(location, "/");
 		locations.push_back(std::move(location));
 	}
-	// each listing costs at least one S3 round trip, so run them in parallel rather than one after another
+	// each listing costs at least one S3 round trip, so they run as tasks on DuckDB's threads rather than one after
+	// another; the first error cancels the listings not yet started and is thrown
 	vector<vector<OpenFileInfo>> listed(locations.size());
-	vector<ErrorData> errors(locations.size());
 	auto cached = CacheListings(client_context, *scan_info);
-	vector<thread> workers;
-	for (idx_t i = 1; i < locations.size(); i++) {
-		workers.emplace_back([&, i]() {
-			try {
-				ListDataFiles(client_context, cached, locations[i], listed[i]);
-			} catch (std::exception &ex) {
-				errors[i] = ErrorData(ex);
-			}
-		});
+	TaskExecutor executor(client_context);
+	vector<unique_ptr<BaseExecutorTask>> tasks;
+	for (idx_t i = 0; i < locations.size(); i++) {
+		tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
 	}
-	if (!locations.empty()) {
-		try {
-			ListDataFiles(client_context, cached, locations[0], listed[0]);
-		} catch (std::exception &ex) {
-			errors[0] = ErrorData(ex);
-		}
-	}
-	for (auto &worker : workers) {
-		worker.join();
-	}
-	for (auto &error : errors) {
-		if (error.HasError()) {
-			error.Throw();
-		}
-	}
+	executor.ScheduleTasks(std::move(tasks));
+	executor.WorkOnTasks();
 	BuildPartitionLocations();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (idx_t i = 0; i < locations.size(); i++) {

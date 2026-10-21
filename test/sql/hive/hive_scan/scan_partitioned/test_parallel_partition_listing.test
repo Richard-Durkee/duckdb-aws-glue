@@ -100,7 +100,7 @@ SELECT count(*), sum(id), count(DISTINCT dt) FROM my_datalake.default.pl_events;
 ----
 2050	2500225	25
 
-# if a listing fails on a worker thread, the query should fail too
+# if a listing fails in one of the tasks, the query fails too
 statement ok
 CALL glue_add_partition('my_datalake.default.pl_events', {dt: 'unreadable'},
     location := 's3://pl-missing-bucket/unreadable');

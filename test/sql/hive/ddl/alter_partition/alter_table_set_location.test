@@ -22,7 +22,7 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.customers_location;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.customers_location_files;
+DROP TABLE IF EXISTS my_datalake.default.customers_location_staging;
 
 # a customers table, partitioned by zip and state
 statement ok
@@ -32,13 +32,13 @@ statement ok
 INSERT INTO my_datalake.default.customers_location VALUES (1, 'mercer island', '98040', 'WA'), (2, 'boise', '83702', 'ID');
 
 # customer data for zip 98040 that lives outside the table location
-# written in the table's format through a table that is dropped again, which leaves its files in place
+# customers_location_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-CREATE TABLE my_datalake.default.customers_location_files WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata')
+CREATE TABLE my_datalake.default.customers_location_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custdata')
 AS SELECT 3 AS id, 'mercer island 2' AS name;
 
 statement ok
-DROP TABLE my_datalake.default.customers_location_files;
+DROP TABLE my_datalake.default.customers_location_staging;
 
 #---------------------------------------------------------------------------
 # ALTER TABLE customers PARTITION (zip='98040', state='WA') SET LOCATION 's3://.../custdata/';

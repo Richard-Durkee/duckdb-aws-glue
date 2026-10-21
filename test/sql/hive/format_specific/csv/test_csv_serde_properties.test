@@ -1,4 +1,4 @@
-# name: test/sql/hive/dml/formats/csv/test_csv_serde_properties.test
+# name: test/sql/hive/format_specific/csv/test_csv_serde_properties.test
 # description: text tables are read and written the way their SerDe properties say: delimiters, NULL format, headers
 # group: [csv]
 

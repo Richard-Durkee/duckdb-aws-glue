@@ -36,7 +36,7 @@
 			]
 		},
 		{
-			"reason": "Avro tables get no cardinality estimate yet",
+			"reason": "Avro tables get no cardinality estimate yet; these pass with the other formats, remove them here once Avro tables get one",
 			"paths": [
 				"test/sql/hive/bugs/s3_cardinality_empty_and_custom_partitions.test",
 				"test/sql/hive/bugs/s3_cardinality_ignores_data.test",

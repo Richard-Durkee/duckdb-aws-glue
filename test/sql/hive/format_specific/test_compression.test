@@ -8,6 +8,8 @@ require parquet
 
 require json
 
+require avro
+
 require glue
 
 require-env GLUE_CATALOG_ID

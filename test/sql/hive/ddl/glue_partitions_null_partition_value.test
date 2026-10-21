@@ -29,7 +29,7 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.gp_nullpart;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.gp_nullpart_files;
+DROP TABLE IF EXISTS my_datalake.default.gp_nullpart_staging;
 
 statement ok
 CREATE TABLE my_datalake.default.gp_nullpart (id INTEGER, k INTEGER) PARTITIONED BY (k);
@@ -106,20 +106,20 @@ SELECT k, k IS NULL FROM glue_partitions('my_datalake.default.gp_nullpart');
 statement ok
 CALL glue_add_partition('my_datalake.default.gp_nullpart', {k: NULL});
 
-# written in the table's format through a table that is dropped again, which leaves its files in place
+# gp_nullpart_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-CREATE TABLE my_datalake.default.gp_nullpart_files WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__')
+CREATE TABLE my_datalake.default.gp_nullpart_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=__HIVE_DEFAULT_PARTITION__')
 AS SELECT 1 AS id;
 
 statement ok
-DROP TABLE my_datalake.default.gp_nullpart_files;
+DROP TABLE my_datalake.default.gp_nullpart_staging;
 
 statement ok
-CREATE TABLE my_datalake.default.gp_nullpart_files WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=5')
+CREATE TABLE my_datalake.default.gp_nullpart_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gp_nullpart/k=5')
 AS SELECT 2 AS id;
 
 statement ok
-DROP TABLE my_datalake.default.gp_nullpart_files;
+DROP TABLE my_datalake.default.gp_nullpart_staging;
 
 query II
 SELECT id, k FROM my_datalake.default.gp_nullpart ORDER BY id;

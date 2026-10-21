@@ -9,11 +9,13 @@
 
 require httpfs
 
+require parquet
+
 require glue
 
 require-env GLUE_CATALOG_ID
 
-# the estimates come from Parquet footers, so the tables are Parquet whatever the config's default format
+# Parquet-specific: the estimates are computed from the row counts in Parquet footers
 statement ok
 SET hive_default_format = 'parquet';
 

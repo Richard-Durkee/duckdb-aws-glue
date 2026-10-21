@@ -10,6 +10,10 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+# Parquet-specific: parquet.compression is a Parquet table property
+statement ok
+SET hive_default_format = 'parquet';
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -21,7 +25,7 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.alter_parquet_codec;
 
 statement ok
-CREATE TABLE my_datalake.default.alter_parquet_codec (id INTEGER) WITH (format = 'parquet');
+CREATE TABLE my_datalake.default.alter_parquet_codec (id INTEGER);
 
 statement ok
 INSERT INTO my_datalake.default.alter_parquet_codec SELECT range FROM range(100);

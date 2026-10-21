@@ -10,10 +10,6 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# hive_scan() is given the format the tables are written in
-statement ok
-SET VARIABLE hive_format = current_setting('hive_default_format');
-
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -25,10 +21,10 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.ins_orders;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ins_orders_in16;
+DROP TABLE IF EXISTS my_datalake.default.ins_orders_staging1;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.ins_orders_us16;
+DROP TABLE IF EXISTS my_datalake.default.ins_orders_staging2;
 
 statement ok
 CREATE TABLE my_datalake.default.ins_orders (id INTEGER, amount DOUBLE, dt VARCHAR, country VARCHAR) PARTITIONED BY (dt, country);
@@ -44,26 +40,19 @@ INSERT INTO my_datalake.default.ins_orders VALUES
 statement ok
 INSERT INTO my_datalake.default.ins_orders VALUES (6, 60.0, '2016-05-14', 'IN');
 
-# partitions whose data lives at custom locations, outside the table location and not laid out as <key>=<value>;
-# their files are written through an unpartitioned table at that location, in the same format
+# partitions whose data lives at custom locations, outside the table location and not laid out as <key>=<value>
+# ins_orders_staging1 writes files in the default format at a given location; dropping it keeps the files
 statement ok
-CREATE TABLE my_datalake.default.ins_orders_in16 (id INTEGER, amount DOUBLE) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/india_may_16');
+CREATE TABLE my_datalake.default.ins_orders_staging1 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/india_may_16') AS SELECT 4 AS id, 40.0::DOUBLE AS amount;
 
 statement ok
-INSERT INTO my_datalake.default.ins_orders_in16 VALUES (4, 40.0);
+DROP TABLE my_datalake.default.ins_orders_staging1;
 
 statement ok
-CREATE TABLE my_datalake.default.ins_orders_us16 (id INTEGER, amount DOUBLE) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/us_may_16');
+CREATE TABLE my_datalake.default.ins_orders_staging2 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/us_may_16') AS SELECT 5 AS id, 50.0::DOUBLE AS amount;
 
 statement ok
-INSERT INTO my_datalake.default.ins_orders_us16 VALUES (5, 50.0);
-
-# dropping a table leaves its files
-statement ok
-DROP TABLE my_datalake.default.ins_orders_in16;
-
-statement ok
-DROP TABLE my_datalake.default.ins_orders_us16;
+DROP TABLE my_datalake.default.ins_orders_staging2;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.ins_orders', {dt: '2016-05-16', country: 'IN'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/custom/india_may_16');
@@ -106,7 +95,7 @@ statement ok
 DETACH my_datalake;
 
 query IIII
-SELECT id, amount, dt, country FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := getvariable('hive_format'), delim := chr(1),
+SELECT id, amount, dt, country FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partitions := [
         {dt: '2016-05-14', country: 'IN', location: NULL},
@@ -126,7 +115,7 @@ ORDER BY id;
 
 # filters on partition columns prune partitions
 query I
-SELECT id FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := getvariable('hive_format'), delim := chr(1),
+SELECT id FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partitions := [
         {dt: '2016-05-14', country: 'IN', location: NULL},
@@ -141,7 +130,7 @@ ORDER BY id;
 
 # only the partitions given are read
 query II
-SELECT count(*), sum(amount) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := getvariable('hive_format'), delim := chr(1),
+SELECT count(*), sum(amount) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partitions := [{dt: '2016-05-14', country: 'IN'}]);
 ----
@@ -149,7 +138,7 @@ SELECT count(*), sum(amount) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/de
 
 # the partition keys can be given explicitly, e.g. to fix their order
 query II
-SELECT dt, count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := getvariable('hive_format'), delim := chr(1),
+SELECT dt, count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partition_keys := ['dt', 'country'],
     partitions := [{country: 'US', dt: '2016-05-14'}, {country: 'IN', dt: '2016-05-15'}])
@@ -166,7 +155,7 @@ schema
 
 # every partition needs a value for every partition key
 statement error
-SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := getvariable('hive_format'), delim := chr(1),
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE', dt: 'VARCHAR', country: 'VARCHAR'},
     partition_keys := ['dt', 'country'],
     partitions := [{dt: '2016-05-14'}]);
@@ -175,7 +164,7 @@ no value for partition key
 
 # partition keys must be columns of the schema
 statement error
-SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := getvariable('hive_format'), delim := chr(1),
+SELECT * FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/ins_orders', format := current_setting('hive_default_format'), delim := chr(1),
     schema := {id: 'INTEGER', amount: 'DOUBLE'},
     partitions := [{dt: '2016-05-14', country: 'IN'}]);
 ----

@@ -22,7 +22,7 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.overlap_orders;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.overlap_orders_extra;
+DROP TABLE IF EXISTS my_datalake.default.overlap_orders_staging;
 
 statement ok
 CREATE TABLE my_datalake.default.overlap_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
@@ -35,23 +35,20 @@ statement ok
 CALL glue_add_partition('my_datalake.default.overlap_orders', {dt: 'inner'},
     location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub');
 
+# overlap_orders_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-CREATE TABLE my_datalake.default.overlap_orders_extra (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer');
+CREATE TABLE my_datalake.default.overlap_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer')
+AS SELECT 1 AS id;
 
 statement ok
-INSERT INTO my_datalake.default.overlap_orders_extra VALUES (1);
+DROP TABLE my_datalake.default.overlap_orders_staging;
 
 statement ok
-DROP TABLE my_datalake.default.overlap_orders_extra;
+CREATE TABLE my_datalake.default.overlap_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub')
+AS SELECT 2 AS id;
 
 statement ok
-CREATE TABLE my_datalake.default.overlap_orders_extra (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/sub');
-
-statement ok
-INSERT INTO my_datalake.default.overlap_orders_extra VALUES (2);
-
-statement ok
-DROP TABLE my_datalake.default.overlap_orders_extra;
+DROP TABLE my_datalake.default.overlap_orders_staging;
 
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.overlap_orders');
@@ -88,13 +85,11 @@ RESET hive_partition_listing_threshold;
 
 # an unregistered subdirectory belongs to the enclosing partition
 statement ok
-CREATE TABLE my_datalake.default.overlap_orders_extra (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/plain');
+CREATE TABLE my_datalake.default.overlap_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/overlap_orders/dt=outer/plain')
+AS SELECT 3 AS id;
 
 statement ok
-INSERT INTO my_datalake.default.overlap_orders_extra VALUES (3);
-
-statement ok
-DROP TABLE my_datalake.default.overlap_orders_extra;
+DROP TABLE my_datalake.default.overlap_orders_staging;
 
 foreach threshold 1 10
 

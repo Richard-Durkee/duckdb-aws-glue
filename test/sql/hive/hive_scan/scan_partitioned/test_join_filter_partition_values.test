@@ -19,7 +19,7 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.jf_escaped;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.jf_escaped_extra;
+DROP TABLE IF EXISTS my_datalake.default.jf_escaped_staging;
 
 statement ok
 CREATE TABLE my_datalake.default.jf_escaped (id INTEGER, tag VARCHAR) PARTITIONED BY (tag);
@@ -28,14 +28,13 @@ statement ok
 INSERT INTO my_datalake.default.jf_escaped VALUES (1, 'plain'), (2, 'other'), (3, 'third');
 
 # a partition whose Glue value looks URL-escaped
+# jf_escaped_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-CREATE TABLE my_datalake.default.jf_escaped_extra (id INTEGER) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom');
+CREATE TABLE my_datalake.default.jf_escaped_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom')
+AS SELECT 4 AS id;
 
 statement ok
-INSERT INTO my_datalake.default.jf_escaped_extra VALUES (4);
-
-statement ok
-DROP TABLE my_datalake.default.jf_escaped_extra;
+DROP TABLE my_datalake.default.jf_escaped_staging;
 
 statement ok
 CALL glue_add_partition('my_datalake.default.jf_escaped', {tag: 'a%20b'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/jf_escaped_custom');

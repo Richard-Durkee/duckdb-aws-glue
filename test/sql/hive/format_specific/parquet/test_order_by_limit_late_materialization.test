@@ -4,11 +4,13 @@
 
 require httpfs
 
+require parquet
+
 require glue
 
 require-env GLUE_CATALOG_ID
 
-# late materialization joins on the Parquet reader's file_row_number, so the table is Parquet
+# Parquet-specific: late materialization joins on the Parquet reader's file_row_number
 statement ok
 SET hive_default_format = 'parquet';
 

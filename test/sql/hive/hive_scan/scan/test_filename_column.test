@@ -10,10 +10,6 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# the table is written in the config's default format; its files are read back with that format's own reader
-statement ok
-SET VARIABLE hive_format = current_setting('hive_default_format');
-
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,
@@ -30,27 +26,27 @@ DROP TABLE IF EXISTS my_datalake.default.path_flat_csv;
 statement ok
 CREATE TABLE my_datalake.default.path_flat (id INTEGER, name VARCHAR);
 
-# every insert writes its own data file below the table location
+# every insert writes its own data file below the table location; flat_files records each new file with its rows
+statement ok
+CREATE TEMP TABLE flat_files (id INTEGER, path VARCHAR);
+
 statement ok
 INSERT INTO my_datalake.default.path_flat VALUES (1, 'one'), (2, 'two');
+
+statement ok
+INSERT INTO flat_files SELECT unnest([1, 2]), file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file NOT IN (SELECT path FROM flat_files);
 
 statement ok
 INSERT INTO my_datalake.default.path_flat VALUES (3, 'three');
 
 statement ok
+INSERT INTO flat_files SELECT unnest([3]), file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file NOT IN (SELECT path FROM flat_files);
+
+statement ok
 INSERT INTO my_datalake.default.path_flat VALUES (4, 'four'), (5, 'five'), (6, 'six');
 
-# The data files, read directly: every row with the file it is in
 statement ok
-SET VARIABLE flat_reader = CASE getvariable('hive_format')
-    WHEN 'csv' THEN 'read_csv(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'', delim = chr(1), header = false, columns = {''id'': ''INTEGER'', ''name'': ''VARCHAR''})'
-    WHEN 'json' THEN 'read_json(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'')'
-    WHEN 'avro' THEN 'read_avro(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'')'
-    ELSE 'read_parquet(''{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*'')' END;
-
-statement ok
-CREATE TEMP TABLE flat_files AS
-SELECT id, filename AS path FROM query('SELECT id::INTEGER AS id, filename FROM ' || getvariable('flat_reader'));
+INSERT INTO flat_files SELECT unnest([4, 5, 6]), file FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/*') WHERE file NOT IN (SELECT path FROM flat_files);
 
 query II
 SELECT count(*), count(DISTINCT path) FROM flat_files;
@@ -79,7 +75,7 @@ SELECT count(*) FROM my_datalake.default.path_flat t JOIN flat_files f ON t.id =
 6
 
 query III
-SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.' || getvariable('hive_format')
+SELECT id, name, filename LIKE '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat/%.' || current_setting('hive_default_format')
 FROM my_datalake.default.path_flat ORDER BY id;
 ----
 1	one	true
@@ -210,7 +206,7 @@ SELECT list(id ORDER BY id) AS ids FROM my_datalake.default.path_flat_csv GROUP 
 #---------------------------------------------------------------------------
 query I
 SELECT count(*) FROM hive_scan('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/path_flat', schema := {id: 'INTEGER', name: 'VARCHAR'},
-    format := getvariable('hive_format'), delim := chr(1)) t
+    format := current_setting('hive_default_format'), delim := chr(1)) t
 JOIN flat_files f ON t.id = f.id AND t.filename = f.path;
 ----
 6

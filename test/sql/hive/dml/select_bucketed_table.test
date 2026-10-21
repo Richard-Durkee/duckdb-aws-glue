@@ -45,8 +45,8 @@ CREATE TABLE my_datalake.default.bucket_sorted (id INTEGER, amount DOUBLE, regio
 WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read', BucketColumns = ['id', 'region'], NumberOfBuckets = 8,
       SortColumns = [{'Column': 'id', 'SortOrder': 1}, {'Column': 'region', 'SortOrder': 0}]);
 
-# One file per id % 4 over ids 0-9, so the layout is consistent with 'bucketed by id into 4 buckets'. The files are
-# written through the unbucketed table, so the write guard of the bucketed ones is not involved.
+# One INSERT, so one file, per id % 4 over ids 0-9: consistent with 'bucketed by id into 4 buckets', though the file
+# names do not say which bucket a file holds. Writing through the unbucketed table leaves the write guard out.
 statement ok
 INSERT INTO my_datalake.default.bucket_plain VALUES (0, 0.0, 'r0'), (4, 40.0, 'r0'), (8, 80.0, 'r0');
 
@@ -58,6 +58,12 @@ INSERT INTO my_datalake.default.bucket_plain VALUES (2, 20.0, 'r0'), (6, 60.0, '
 
 statement ok
 INSERT INTO my_datalake.default.bucket_plain VALUES (3, 30.0, 'r1'), (7, 70.0, 'r1');
+
+# the layout above: one file per bucket
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/bucket_read/*');
+----
+4
 
 #---------------------------------------------------------------------------
 # the bucketed tables return exactly what the unbucketed one does
@@ -118,7 +124,7 @@ SELECT count(*), sum(id), sum(amount), count(DISTINCT region) FROM my_datalake.d
 #---------------------------------------------------------------------------
 # a predicate on a bucket column returns the right rows
 #---------------------------------------------------------------------------
-# id = 7 lives in 000003_0 only: a bucket-aware engine would read one file, this reads all four
+# id = 7 lives in one of the four files only: a bucket-aware engine would read one file, this reads all four
 query II
 SELECT id, amount FROM my_datalake.default.bucket_hashed WHERE id = 7;
 ----

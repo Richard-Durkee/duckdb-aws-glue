@@ -22,7 +22,7 @@ statement ok
 DROP TABLE IF EXISTS my_datalake.default.bucketed_orders;
 
 statement ok
-DROP TABLE IF EXISTS my_datalake.default.bucketed_orders_writer;
+DROP TABLE IF EXISTS my_datalake.default.bucketed_orders_staging;
 
 statement ok
 CREATE TABLE my_datalake.default.bucketed_orders (id INTEGER, amount DOUBLE)
@@ -35,16 +35,14 @@ WHERE database_name = 'my_datalake' AND table_name = 'bucketed_orders' ORDER BY 
 id	INTEGER
 amount	DOUBLE
 
-# data written by another engine: an unbucketed table at the same location writes the files in the table's format
+# data written by another engine, not through the bucketed table
+# bucketed_orders_staging writes files in the default format at a given location; dropping it keeps the files
 statement ok
-CREATE TABLE my_datalake.default.bucketed_orders_writer (id INTEGER, amount DOUBLE)
-WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bucketed_orders');
+CREATE TABLE my_datalake.default.bucketed_orders_staging WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/bucketed_orders')
+AS SELECT 1 AS id, 10.0::DOUBLE AS amount UNION ALL SELECT 2, 20.0::DOUBLE;
 
 statement ok
-INSERT INTO my_datalake.default.bucketed_orders_writer VALUES (1, 10.0), (2, 20.0);
-
-statement ok
-DROP TABLE my_datalake.default.bucketed_orders_writer;
+DROP TABLE my_datalake.default.bucketed_orders_staging;
 
 query II
 SELECT id, amount FROM my_datalake.default.bucketed_orders ORDER BY id;

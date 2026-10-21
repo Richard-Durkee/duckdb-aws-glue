@@ -1,4 +1,4 @@
-# name: test/sql/hive/dml/formats/csv/test_csv_tables.test
+# name: test/sql/hive/format_specific/csv/test_csv_tables.test
 # description: Hive tables with the csv file format: CREATE TABLE ... WITH (format = 'csv'), the SerDe Glue stores,
 # group: [csv]
 

@@ -50,8 +50,10 @@ public:
 	shared_ptr<GlueTableEntry> GetGlueTable(const string &key);
 	//! 'table' identifies the table: its catalog and name, or the location of a hive_scan
 	shared_ptr<HiveTableSampleEntry> GetSample(const string &table);
-	//! The recursive listing of 'directory', fetched page by page as it is read
-	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory);
+	//! The recursive listing of 'directory', fetched page by page as it is read. With 'cache_in_connection' the
+	//! listing is kept beyond the query (glue_cache_listings)
+	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
+	                                              bool cache_in_connection = false);
 
 private:
 	annotated_mutex lock;
@@ -62,5 +64,7 @@ private:
 
 //! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info);
+//! Drop the connection's cached directory listings
+void ClearHiveListingCache(ClientContext &context);
 
 } // namespace duckdb

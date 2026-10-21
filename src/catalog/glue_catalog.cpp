@@ -21,6 +21,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -132,6 +133,10 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 		throw CatalogException("Glue database \"%s\" was created but could not be fetched afterwards", schema_name);
 	}
 	return schemas.CreateEntry(schemas.CreateSchemaEntry(created));
+}
+
+void GlueCatalog::OnDetach(ClientContext &context) {
+	GlueTransactionCache::OnDetach(context, *this);
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
@@ -280,19 +285,31 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	}
 }
 
-GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char *statement) {
+GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
+                                           GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
-	if (glue_table.table_info.GetFormat() != GlueTableFormat::HIVE) {
+	// another engine may have converted the table since the entry was cached
+	table_info = glue_table.RefreshTableInfo(context);
+	auto format = table_info.GetFormat();
+	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
 		                              "written",
-		                              statement, table.name.GetIdentifierName(), glue_table.table_info.GetFormatName());
+		                              statement, table.name.GetIdentifierName(), format.Describe(table_info));
+	}
+	// an InputFormat of another engine over a Parquet or text SerDe is a layout DuckDB does not know
+	auto file_format = table_info.GetFileFormat();
+	if (!format.IsWritable(table_info, file_format)) {
+		throw NotImplementedException("%s into Glue table '%s' is not supported: its InputFormat '%s' is not one Hive "
+		                              "uses for %s tables, so DuckDB does not know how the files below the table "
+		                              "location are laid out",
+		                              statement, table.name.GetIdentifierName(), table_info.input_format,
+		                              HiveFileFormatToString(file_format));
 	}
 	// Hive and Spark bucket with different hash functions and file names; neither is implemented
-	if (glue_table.table_info.IsBucketed()) {
+	if (table_info.IsBucketed()) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table is %s, and DuckDB does not "
 		                              "write a bucketed layout.",
-		                              statement, table.name.GetIdentifierName(),
-		                              glue_table.table_info.DescribeBucketing());
+		                              statement, table.name.GetIdentifierName(), table_info.DescribeBucketing());
 	}
 	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
 	// keys DuckDB writes
@@ -310,9 +327,10 @@ GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char 
 //===--------------------------------------------------------------------===//
 PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                           optional_ptr<PhysicalOperator> plan) {
-	auto &glue_table = GetHiveTableForDML(op.table, "INSERT");
 	ThrowIfInExplicitTransaction(context);
-	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, plan);
+	GlueTableInfo table_info;
+	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
+	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, table_info, plan);
 }
 
 PhysicalOperator &GlueCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,

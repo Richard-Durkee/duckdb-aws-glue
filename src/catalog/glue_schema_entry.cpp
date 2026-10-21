@@ -529,7 +529,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		GlueColumn column;
 		auto aliased = i < info.aliases.size() && !info.aliases[i].GetIdentifierName().empty();
 		column.name = (aliased ? info.aliases[i] : info.names[i]).GetIdentifierName();
-		column.type = GlueTypes::FromLogicalType(info.types[i]);
+		column.type = info.types[i].ToString();
 		view.columns.push_back(std::move(column));
 	}
 	if (existing) {
@@ -612,7 +612,7 @@ static void CheckTablePropertyChangeable(const string &key) {
 	if (key.empty()) {
 		throw InvalidInputException("A table property needs a name");
 	}
-	if (GlueTableInfo::IsFormatParameter(key)) {
+	if (GlueTableFormat::IsParameter(key)) {
 		throw InvalidInputException("Table property '%s' decides how the table is read and can not be changed "
 		                            "with ALTER TABLE",
 		                            key);
@@ -710,10 +710,11 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		throw BinderException("\"%s\" is a view", table_name);
 	}
 	auto &glue_table = entry->Cast<GlueTable>();
-	if (glue_table.table_info.GetFormat() != GlueTableFormat::HIVE) {
+	auto format = glue_table.table_info.GetFormat();
+	if (!format.IsHive()) {
 		throw NotImplementedException("ALTER TABLE is only supported for Hive tables in a Glue catalog, '%s' is a %s "
 		                              "table",
-		                              table_name, glue_table.table_info.GetFormatName());
+		                              table_name, format.Describe(glue_table.table_info));
 	}
 	if (info.type == AlterType::SET_COLUMN_COMMENT) {
 		SetColumnComment(context, table_name, info.Cast<SetColumnCommentInfo>());

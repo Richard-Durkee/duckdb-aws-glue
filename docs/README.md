@@ -27,10 +27,14 @@ Attach options:
 
 ## Reading
 
+A table's format is read from its parameters (`table_type`, `spark.sql.sources.provider`, `metadata_location`) and
+otherwise from its InputFormat: Hudi tables (`HoodieParquetInputFormat`, ...) and symlink manifest tables
+(`SymlinkTextInputFormat`, e.g. a Delta `_symlink_format_manifest`) register a Parquet or text SerDe, so only the
+InputFormat tells them apart from a Hive table. They are listed but not read or written, like Iceberg and Delta.
+
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
-`read_json` (one object per line, keys by name; of the SerDe properties only the OpenX JsonSerDe's
-`ignore.malformed.json` is applied, see below) and AvroSerDe with `read_avro`
+`read_json` (one object per line, keys by name; SerDe properties see below) and AvroSerDe with `read_avro`
 (columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
 Text tables are read the way their SerDe reads them:
 
@@ -43,8 +47,13 @@ Text tables are read the way their SerDe reads them:
   NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
   `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
-- OpenX JsonSerDe: with `ignore.malformed.json` set to `true` the files are read with
-  `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs.
+- OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
+  `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
+  its column is NULL; either property enables both. Other JsonSerDe properties that change how the files are read
+  (OpenX `mapping.*`, `dots.in.keys` and `case.insensitive=true`, Hive `timestamp.formats`) are not applied: the read
+  succeeds and a warning is logged (`CALL enable_logging(level := 'warning')`).
+- JSON keys are matched to the columns exactly, as with OpenX `case.insensitive=false`; both SerDes match them
+  ignoring case by default, so a key `userId` does not fill the column `userid`.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
   line break.
@@ -70,7 +79,14 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   partitioning. When a query reads at least
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
-  partitions, and partitions at custom locations, are listed one directory each, 16 at the same time.
+  partitions, and partitions at custom locations, are listed one directory each, 16 at the same time. A directory is listed once per
+  query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
+  false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
+  cache (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way
+  (another writer, `COPY TO` the table location) appear only after the next clear. Files removed any other way
+  (compaction, an overwrite, dropping and recreating the table at the same location) are worse than unseen: scans
+  under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear.
+  It suits hosts that run one query per connection.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the
@@ -133,7 +149,10 @@ their codec themselves.
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
   Athena, JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
   `CREATE TABLE ... WITH (format = 'json')` creates): `INSERT` into a table with the OpenX JSON SerDe
-  (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read.
+  (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read. `INSERT` also requires the table's InputFormat to
+  be one Hive uses for its file format (`MapredParquetInputFormat`, `TextInputFormat` or `CombineTextInputFormat` for
+  csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
+  know, and files written into it could corrupt the table.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.
@@ -174,11 +193,22 @@ of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue
 ...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
 `COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
 
+Within a DuckDB transaction
+(`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
+inside those partitions are listed at each scan. So a partition added outside the transaction becomes visible only after the transaction ends, while
+a file added to an existing partition is seen by the next query (the scans of one query share a listing) — or, under
+`glue_cache_listings`, after the next cache clear.
+
+With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the connection's later transactions. It is
+per connection — two connections never share one — so another connection's write stays unseen until something clears
+this connection's cache: a write through it, a rollback, or DETACH.
+
 ## Views
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...`, `CREATE SECURE VIEW` and
   `CREATE VIEW ... WITH (DEFER_BINDING)` create a Glue view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB.
-  `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database.
+  `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database. The view's
+  columns store their DuckDB types (e.g. `HUGEINT`, `INTEGER`), not Glue types.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
@@ -260,8 +290,8 @@ Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s be
 
 ## Inspecting tables
 
-Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA` or
-`UNKNOWN`). The full Glue definition of a table is available through a table function:
+Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,
+`SYMLINK` or `UNKNOWN`). The full Glue definition of a table is available through a table function:
 
 ```sql
 SELECT * FROM glue_get_table_response('my_datalake.default.some_table');
@@ -305,6 +335,8 @@ The tests are written against two `--test-config` files, which decide where the 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
+The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
+GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)

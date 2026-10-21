@@ -1,5 +1,8 @@
 #pragma once
 
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+
 #include "core/glue_info.hpp"
 
 #include "duckdb/common/pair.hpp"
@@ -16,6 +19,14 @@ namespace duckdb {
 class ClientContext;
 class GlueCatalog;
 
+class GlueException : public IOException {
+public:
+	GlueException(const string &message, bool access_denied) : IOException(message), access_denied(access_denied) {
+	}
+
+	bool access_denied;
+};
+
 //! Thin wrapper around the AWS SDK Glue client
 class GlueAPI {
 public:
@@ -28,8 +39,11 @@ public:
 	//! object of the response as JSON.
 	static bool GetDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        GlueDatabaseInfo &result, string *raw_json = nullptr);
-	//! List all tables of a database; none when the database no longer exists or its tables may not be listed
-	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name);
+	//! List all tables of a database; none when the database no longer exists or its tables may not be listed.
+	//! With 'single_page' only Glue's first page is fetched and 'has_more' reports whether the database holds
+	//! tables beyond it; a refused permission throws instead of returning none.
+	static vector<GlueTableInfo> GetTables(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                       bool single_page = false, optional_ptr<bool> has_more = nullptr);
 	//! Returns false if the database holds no tables (or views), otherwise true with the name of one of them
 	static bool GetAnyTableName(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            string &table_name);
@@ -59,7 +73,7 @@ public:
 	                             const string &table_name, const string &location);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
-	//! table format is derived from (GlueTableInfo::IsFormatParameter) are refused.
+	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
 	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<pair<string, string>> &set,
 	                                  const vector<string> &unset);

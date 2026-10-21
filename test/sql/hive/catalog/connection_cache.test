@@ -1,0 +1,209 @@
+# name: test/sql/hive/catalog/connection_cache.test
+# description: the connection-scoped metadata cache is per connection: a second connection starts cold, another connection's write stays unseen until this connection's own invalidation, and after DETACH + re-ATTACH every connection resolves fresh
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.cc_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.cc_orders (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.cc_orders VALUES (1, '2026-01-01'), (2, '2026-01-02');
+
+statement ok
+CREATE MACRO glue_calls(api) AS (
+    SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.headers['x-amz-target'] = 'AWSGlue.' || api
+);
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok con1
+SET glue_metadata_cache_scope = 'connection';
+
+statement ok con2
+SET glue_metadata_cache_scope = 'connection';
+
+# con1 warms its cache
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con1
+SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+----
+1
+2
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+1	1
+
+# a later con1 statement is served from con1's cache
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con1
+SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+----
+1
+2
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+0	0
+
+# con2's cache starts cold: its first read resolves from Glue itself (a cache shared between
+# connections would make this 0 0)
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+----
+1
+2
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+1	1
+
+# and that first read warmed con2's own cache
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+----
+1
+2
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+0	0
+
+# a write through con2 (a new partition) invalidates con2's caches, not con1's: con1 still serves
+# its cached partition list and does not see the new partition, with no Glue call
+statement ok con2
+INSERT INTO my_datalake.default.cc_orders VALUES (3, '2026-01-03');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con1
+SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+----
+1
+2
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+0	0
+
+# con2's own write invalidated con2's cache: its next read resolves fresh and sees the new partition
+query I con2
+SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+----
+1
+2
+3
+
+# a write through con1 is con1's own invalidation: the next con1 read resolves fresh and sees
+# everything, con2's partition included
+statement ok con1
+INSERT INTO my_datalake.default.cc_orders VALUES (4, '2026-01-01');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con1
+SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
+----
+1
+2
+3
+4
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+1	1
+
+# --- DETACH + re-ATTACH under the same alias must be fresh for every connection: the connection
+# --- states key their caches by the attach identity, so even a connection the DETACH hook could
+# --- not reach does not serve the old catalog's metadata. Warm con1 and con2 first.
+
+query I con1
+SELECT count(*) FROM my_datalake.default.cc_orders;
+----
+4
+
+query I con2
+SELECT count(*) FROM my_datalake.default.cc_orders;
+----
+4
+
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# a partition registered through the default connection, after con1 and con2 warmed their caches
+statement ok
+INSERT INTO my_datalake.default.cc_orders VALUES (5, '2026-01-04');
+
+# served from the pre-DETACH cache this would be 4 rows and no Glue call
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con1
+SELECT count(*) FROM my_datalake.default.cc_orders;
+----
+5
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+1	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT count(*) FROM my_datalake.default.cc_orders;
+----
+5
+
+query II
+SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
+----
+1	1
+
+statement ok
+DROP TABLE my_datalake.default.cc_orders;

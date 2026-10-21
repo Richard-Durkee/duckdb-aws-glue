@@ -6,15 +6,11 @@
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include "core/glue_format.hpp"
 #include "core/readers/hive_csv_options.hpp"
 #include "core/readers/hive_json_options.hpp"
 
 namespace duckdb {
-
-//! The (open) table format a Glue table is stored in, derived from the table parameters
-enum class GlueTableFormat : uint8_t { ICEBERG, DELTA, HUDI, HIVE, UNKNOWN };
-
-string GlueTableFormatToString(GlueTableFormat format);
 
 enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
 
@@ -94,12 +90,8 @@ public:
 	bool IsView() const {
 		return table_type == GlueTableType::VIRTUAL_VIEW;
 	}
-	//! Derive the open table format from the table parameters
+	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
-	//! Whether 'key' is one of the table parameters GetFormat() derives the format from
-	static bool IsFormatParameter(const string &key);
-	//! Human readable description of the table type, used in error messages
-	string GetFormatName() const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
@@ -128,8 +120,6 @@ public:
 	string GetNullFormat() const;
 	//! skip.header.line.count, 0 without
 	idx_t GetHeaderLineCount() const;
-	//! OpenX JsonSerDe's ignore.malformed.json, false for other SerDes
-	bool IgnoresMalformedJson() const;
 	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote

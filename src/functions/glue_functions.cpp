@@ -9,6 +9,7 @@
 
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_transaction.hpp"
 
 namespace duckdb {
 
@@ -28,11 +29,20 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 	auto name = ResolveGlueTableName(context, "glue_get_table_response", input.inputs[0].GetValue<string>());
 	auto &catalog = Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
 	auto result = make_uniq<GlueGetTableResponseBindData>();
-	if (!GlueAPI::GetTable(context, catalog, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
-	                       result->table, &result->raw_json)) {
-		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
-		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
+	auto database_name = name.Schema().GetIdentifierName();
+	auto table_name = name.Name().GetIdentifierName();
+	// Always fetches: the 'response' column carries the raw reply, which only a fresh call has. The fetched
+	// table warms the metadata cache for the binds that follow.
+	GlueTableInfo info;
+	if (!GlueAPI::GetTable(context, catalog, database_name, table_name, info, &result->raw_json)) {
+		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", database_name, table_name,
+		                       name.Catalog().GetIdentifierName());
 	}
+	result->table = info;
+	// Of() is null in a bare statement (nothing started the catalog's transaction); Get() starts it
+	auto &cache = *GlueTransaction::Get(context, catalog).cache;
+	auto fetched = make_shared_ptr<const GlueTableInfo>(std::move(info));
+	cache.GetTable(database_name, table_name, [&fetched]() { return fetched; });
 
 	auto column_type = LogicalType::LIST(LogicalType::STRUCT(
 	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}));
@@ -89,7 +99,7 @@ void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, 
 
 	output.data[0].Append(Value(table.database_name));
 	output.data[1].Append(Value(table.name));
-	output.data[2].Append(Value(GlueTableFormatToString(table.GetFormat())));
+	output.data[2].Append(Value(table.GetFormat().ToString()));
 	output.data[3].Append(Value(table.glue_table_type));
 	output.data[4].Append(Value(table.location));
 	output.data[5].Append(Value(table.serde_library));

@@ -24,6 +24,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
 #include "execution/hive_copy.hpp"
 
@@ -452,7 +453,8 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 }
 
 PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
-                                             GlueTable &table, optional_ptr<PhysicalOperator> plan) {
+                                             GlueTable &table, const GlueTableInfo &table_info,
+                                             optional_ptr<PhysicalOperator> plan) {
 	if (op.return_chunk) {
 		throw BinderException("RETURNING clause not yet supported for insertion into a Hive table");
 	}
@@ -470,9 +472,6 @@ PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPla
 		names.push_back(column.Name());
 		types.push_back(column.Type());
 	}
-	// Ask Glue for the current definition: the location, format, partition layout or dialect may have changed since the
-	// entry was cached (for example through ALTER TABLE ... SET LOCATION).
-	auto table_info = table.RefreshTableInfo(context);
 	auto &catalog = table.catalog.Cast<GlueCatalog>();
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
 	PlanWrite(context, planner, op, insert, table, table_info, *plan, names, types, nullptr, nullptr);
@@ -546,6 +545,10 @@ using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
+	if (!state.written_files.empty()) {
+		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
+		GlueTransactionCache::Invalidate(context, catalog);
+	}
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		return SinkFinalizeType::READY;
 	}

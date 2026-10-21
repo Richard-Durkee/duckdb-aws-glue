@@ -8,6 +8,7 @@
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
@@ -16,6 +17,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -52,11 +54,19 @@ vector<column_t> GlueTable::GetRowIdColumns() const {
 
 GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
-	GlueTableInfo result;
-	if (!GlueAPI::GetTable(context, glue_catalog, table_info.database_name, table_info.name, result)) {
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		GlueTableInfo info;
+		if (!GlueAPI::GetTable(context, glue_catalog, table_info.database_name, table_info.name, info)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(info));
+	};
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto result = cache ? cache->GetTable(table_info.database_name, table_info.name, load) : load();
+	if (!result) {
 		throw CatalogException("Glue table '%s.%s' no longer exists", table_info.database_name, table_info.name);
 	}
-	return result;
+	return *result;
 }
 
 //===--------------------------------------------------------------------===//
@@ -75,13 +85,14 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 		}
 		latest_info = entry->table_info;
 	}
-	switch (latest_info->GetFormat()) {
-	case GlueTableFormat::HIVE:
+	auto format = latest_info->GetFormat();
+	switch (format.format) {
+	case GlueFormat::HIVE:
 		return GetHiveScanFunction(context, bind_data, *latest_info);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
 		                              "glue_get_table_response() to inspect its definition",
-		                              latest_info->database_name, latest_info->name, latest_info->GetFormatName());
+		                              latest_info->database_name, latest_info->name, format.Describe(*latest_info));
 	}
 }
 
@@ -107,6 +118,10 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	}
 	if (scan_info->file_format == HiveFileFormat::JSON) {
 		scan_info->json_options = latest_info.GetJSONOptions();
+		for (auto &property : scan_info->json_options.unsupported_properties) {
+			DUCKDB_LOG_WARNING(context, "Glue table '%s.%s': SerDe property '%s' is not applied when reading",
+			                   latest_info.database_name, latest_info.name, property);
+		}
 	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());

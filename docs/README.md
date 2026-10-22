@@ -44,8 +44,10 @@ Text tables are read the way their SerDe reads them:
 - OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
   doubled quotes Hive writes). An empty field is an empty string; there is no NULL.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
-  NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
-  `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
+  NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
+  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
+  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
+  (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
 - OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
   `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit

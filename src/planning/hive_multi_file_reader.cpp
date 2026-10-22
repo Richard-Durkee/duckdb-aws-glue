@@ -1132,6 +1132,9 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 	if (!reader_data.reader->expression_map.empty()) {
 		throw InternalException("Hive text table '%s': a filter was pushed into read_csv", ScanInfo().Describe());
 	}
+	if (!ScanInfo().csv_options.null_for_invalid_data) {
+		return result;
+	}
 	for (auto &expr : reader_data.expressions) {
 		MakeTryCast(context, expr);
 	}

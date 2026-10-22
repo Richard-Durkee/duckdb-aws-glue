@@ -7,6 +7,7 @@
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -414,18 +415,21 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(copy_types, partition_columns, false);
 	auto function_data = copy_function->function.copy_to_bind(context, bind_input, names_to_write, types_to_write);
 
+	// Glue catalogs have no catalog version, so every execution plans again and gets its own write id
+	auto write_id = UUID::ToString(UUIDv7::GenerateRandomUUID());
 	auto return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST);
 	auto &copy = planner
 	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
-	                                     op.estimated_cardinality, create_schema, std::move(create_info), table_info)
+	                                     op.estimated_cardinality, insert.catalog, create_schema,
+	                                     std::move(create_info), table_info, write_id, location)
 	                 .Cast<GlueHiveCopy>();
 	// as the COPY binder does: without it every chunk becomes a batch of its own (a 2048-row parquet row group)
 	if (copy.function.desired_batch_size) {
 		copy.batch_size = copy.function.desired_batch_size(context, *copy.bind_data);
 	}
 	copy.use_tmp_file = false;
-	// files of earlier inserts are kept, so every file needs a unique name
-	copy.filename_pattern.SetFilenamePattern("{uuid}");
+	// files of earlier inserts are kept, so every file needs a unique name; the write id finds those of a failed one
+	copy.filename_pattern.SetFilenamePattern(write_id + "_{uuid}");
 	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
 		copy.file_path = location;
@@ -453,6 +457,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	copy.children.push_back(*source);
 
 	insert.partition_directories = std::move(partition_directories);
+	insert.write_id = std::move(write_id);
 	insert.children.push_back(copy);
 }
 
@@ -553,7 +558,9 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
 		GlueTransactionCache::Invalidate(context, catalog);
 	}
+	auto &transaction = GlueTransaction::Get(context, catalog);
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
+		transaction.CompleteHiveWrite(write_id);
 		return SinkFinalizeType::READY;
 	}
 
@@ -590,10 +597,12 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	auto registration =
 	    GlueAPI::TryBatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
 	if (registration.error.empty()) {
+		transaction.CompleteHiveWrite(write_id);
 		return SinkFinalizeType::READY;
 	}
 	// Undo the INSERT, so that running it again does not add its rows twice: unregister the partitions it created
-	// (those that already existed stay) and delete every file it wrote
+	// (those that already existed stay) and delete every file it wrote. The write stays with the transaction, whose
+	// rollback drops the table a CREATE TABLE AS created.
 	vector<string> left_behind;
 	vector<vector<string>> created_values;
 	for (auto index : registration.created) {
@@ -620,6 +629,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	if (files_left > 0) {
 		left_behind.push_back(StringUtil::Format("%llu of the %llu files it wrote (%s)", files_left,
 		                                         state.written_files.size(), file_error));
+	} else if (auto write = transaction.FindHiveWrite(write_id)) {
+		write->files_deleted = true;
 	}
 	// Partitions Glue reported as existing after a transient error are kept: they may have existed before, and a
 	// partition this INSERT registered is empty once its files are deleted, so running it again is still right

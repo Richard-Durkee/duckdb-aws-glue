@@ -1,0 +1,100 @@
+# name: test/sql/hive/dml/insert/insert_failure_undo.test
+# description: the files of a write carry its write id; a failed CREATE TABLE AS or INSERT leaves no files and no table behind
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_write;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.undo_ctas;
+
+statement ok
+CREATE TABLE my_datalake.default.undo_write (id INTEGER, p INTEGER) PARTITIONED BY (p);
+
+#---------------------------------------------------------------------------
+# the files of one statement are named <write id>_<file id>, with one write id per statement
+#---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(9) t(i);
+
+query I
+SELECT count(*) >= 3 AND count(*) = count(*) FILTER (WHERE regexp_matches(parse_filename(file), '^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}_'))
+FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+true
+
+query I
+SELECT count(DISTINCT split_part(parse_filename(file), '_', 1)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+1
+
+statement ok
+INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(9) t(i);
+
+query I
+SELECT count(DISTINCT split_part(parse_filename(file), '_', 1)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+2
+
+#---------------------------------------------------------------------------
+# an INSERT whose query fails adds nothing
+#---------------------------------------------------------------------------
+statement error
+INSERT INTO my_datalake.default.undo_write SELECT i, CASE WHEN i = 7 THEN error('boom') ELSE i % 3 END FROM range(9) t(i);
+----
+boom
+
+query II
+SELECT count(*), count(DISTINCT p) FROM my_datalake.default.undo_write;
+----
+18	3
+
+query I
+SELECT count(DISTINCT split_part(parse_filename(file), '_', 1)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_write/**');
+----
+2
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS whose query fails drops the table it created, so it can be run again
+#---------------------------------------------------------------------------
+statement error
+CREATE TABLE my_datalake.default.undo_ctas AS SELECT i, CASE WHEN i = 7 THEN error('boom') ELSE i END AS v FROM range(9) t(i);
+----
+boom
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name = 'undo_ctas';
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/undo_ctas/**');
+----
+0
+
+statement ok
+CREATE TABLE my_datalake.default.undo_ctas AS SELECT i, i AS v FROM range(9) t(i);
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_ctas;
+----
+9
+
+statement ok
+DROP TABLE my_datalake.default.undo_ctas;
+
+statement ok
+DROP TABLE my_datalake.default.undo_write;

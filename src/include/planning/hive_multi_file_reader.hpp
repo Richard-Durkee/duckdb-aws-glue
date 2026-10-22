@@ -41,6 +41,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
+	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
+	//! columns
+	table_function_get_virtual_columns_t format_virtual_columns = nullptr;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
@@ -65,7 +68,9 @@ private:
 //! only the partitions a query reads are ever listed. When at least 'hive_partition_listing_threshold' of those
 //! partitions live below the table root, the root is listed once (recursively, one request per 1000 keys on S3) and
 //! the files are matched to their partitions by prefix; otherwise, and for partitions elsewhere, every partition is
-//! one listing of its location. An unpartitioned table is one listing of the root location.
+//! one listing of its location. An unpartitioned table is one listing of the root location. A directory is listed once
+//! per query (scans and the sample share the listing); with glue_cache_listings the listings of Glue tables are kept
+//! for later statements of the connection as well.
 class HiveMultiFileList : public LazyMultiFileList {
 public:
 	//! 'partition_indexes' are the partitions to read
@@ -152,6 +157,17 @@ void SetHiveScanSerialization(TableFunction &function);
 //! file reads as NULL, a differently typed column is cast) and fills the partition columns of every file with the
 //! values Glue stores for its partition. Filters on partition columns prune whole partitions before any file is opened.
 class HiveMultiFileReader : public MultiFileReader {
+public:
+	//! Virtual column identifier for the "$path" column (the data file a row was read from, as filename)
+	static constexpr column_t COLUMN_IDENTIFIER_PATH = UINT64_C(9223372036854841344);
+	//! Virtual column identifier for the "$file_size" column (the size of the data file)
+	static constexpr column_t COLUMN_IDENTIFIER_FILE_SIZE = UINT64_C(9223372036854841345);
+	//! Virtual column identifier for the "$file_modified_time" column (the last modification time of the data file)
+	static constexpr column_t COLUMN_IDENTIFIER_FILE_MODIFIED_TIME = UINT64_C(9223372036854841346);
+
+	//! Add "$path", "$file_size" and "$file_modified_time"
+	static void AddMetadataColumns(virtual_column_map_t &result);
+
 public:
 	explicit HiveMultiFileReader(shared_ptr<HiveScanInfo> scan_info);
 

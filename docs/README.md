@@ -73,6 +73,10 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   zero bytes are skipped.
   When one partition's location lies inside another's,
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
+- A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
+  rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
+  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
+  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
@@ -81,7 +85,14 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   partitioning. When a query reads at least
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
-  partitions, and partitions at custom locations, are listed one directory each.
+  partitions, and partitions at custom locations, are listed one directory each. A directory is listed once per
+  query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
+  false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
+  cache (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way
+  (another writer, `COPY TO` the table location) appear only after the next clear. Files removed any other way
+  (compaction, an overwrite, dropping and recreating the table at the same location) are worse than unseen: scans
+  under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear.
+  It suits hosts that run one query per connection.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the
@@ -94,6 +105,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
+- Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
+  `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
+  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
@@ -191,7 +205,8 @@ of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue
 Within a DuckDB transaction
 (`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
 inside those partitions are listed at each scan. So a partition added outside the transaction becomes visible only after the transaction ends, while
-a file added to an existing partition is seen at once.
+a file added to an existing partition is seen by the next query (the scans of one query share a listing) — or, under
+`glue_cache_listings`, after the next cache clear.
 
 With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the connection's later transactions. It is
 per connection — two connections never share one — so another connection's write stays unseen until something clears

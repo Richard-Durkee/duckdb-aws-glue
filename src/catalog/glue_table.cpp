@@ -45,6 +45,7 @@ virtual_column_map_t GlueTable::GetVirtualColumns() const {
 	virtual_column_map_t result;
 	result.insert(
 	    make_pair(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR)));
+	HiveMultiFileReader::AddMetadataColumns(result);
 	return result;
 }
 
@@ -88,6 +89,17 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 	auto format = latest_info->GetFormat();
 	switch (format.format) {
 	case GlueFormat::HIVE:
+		if (latest_info->IsPartitionProjected()) {
+			// Athena derives the partitions from the projection.* parameters and ignores the registered ones, which
+			// such a table usually has none of: reading the registered partitions would silently return no or wrong
+			// rows
+			throw NotImplementedException("Glue table '%s.%s' uses Athena partition projection (projection.enabled), "
+			                              "which is not supported yet: Athena derives its partitions from the "
+			                              "projection.* parameters and ignores the ones registered in Glue, so a scan "
+			                              "of the registered ones would read no rows or the wrong ones. Set "
+			                              "projection.enabled to false and register the partitions to read it",
+			                              latest_info->database_name, latest_info->name);
+		}
 		return GetHiveScanFunction(context, bind_data, *latest_info);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "

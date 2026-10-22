@@ -107,13 +107,15 @@ public:
 	bool TryGetProperty(const string &key, string &result) const;
 	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
-	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
-	//! the table names none; throws for a codec DuckDB can not write. Files are read with the codec their extension
-	//! says, whatever the table records.
+	//! The codec to write a csv / json table's files with (write.compression, else write_compression, else
+	//! compressionType), uncompressed when the table names none; throws for a codec DuckDB can not write. Files are
+	//! read with the codec their extension says, whatever the table records.
 	FileCompressionType GetTextCompression() const;
 	//! The codec the table records for its files, as DuckDB's writer for 'format' names it ('null' for an uncompressed
 	//! avro file), empty when it records none; throws for a codec DuckDB can not write
 	string GetCodec(HiveFileFormat format) const;
+	//! The format's codec parameter 'key', else write_compression, empty when the table records neither
+	string GetCodecParameter(const string &key) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
 	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde

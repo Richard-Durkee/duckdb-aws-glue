@@ -6,25 +6,8 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/serializer/serializer.hpp"
-#include "duckdb/common/serializer/deserializer.hpp"
 
 namespace duckdb {
-
-string GlueTableFormatToString(GlueTableFormat format) {
-	switch (format) {
-	case GlueTableFormat::ICEBERG:
-		return "ICEBERG";
-	case GlueTableFormat::DELTA:
-		return "DELTA";
-	case GlueTableFormat::HUDI:
-		return "HUDI";
-	case GlueTableFormat::HIVE:
-		return "HIVE";
-	default:
-		return "UNKNOWN";
-	}
-}
 
 string GlueTableInfo::GetParameter(const string &key) const {
 	for (auto &entry : parameters) {
@@ -73,6 +56,15 @@ HiveFileFormat HiveFileFormatFromString(const string &format) {
 bool GlueTableInfo::IsBucketed() const {
 	// NumberOfBuckets is -1 or 0 for unbucketed tables but can also be unset on bucketed ones
 	return !bucket_columns.empty();
+}
+
+bool GlueTableInfo::IsPartitionProjected() const {
+	if (partition_keys.empty()) {
+		return false;
+	}
+	auto enabled = GetParameter("projection.enabled");
+	StringUtil::Trim(enabled);
+	return StringUtil::CIEquals(enabled, "true");
 }
 
 string GlueColumn::DescribeSortOrder() const {
@@ -270,8 +262,13 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	}
 }
 
+string GlueTableInfo::GetCodecParameter(const string &key) const {
+	auto codec = GetParameter(key);
+	return codec.empty() ? GetParameter("write_compression") : codec;
+}
+
 FileCompressionType GlueTableInfo::GetTextCompression() const {
-	auto codec = GetParameter("write.compression");
+	auto codec = GetCodecParameter("write.compression");
 	if (codec.empty()) {
 		codec = GetParameter("compressionType");
 	}
@@ -291,11 +288,11 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 string GlueTableInfo::GetCodec(HiveFileFormat format) const {
 	switch (format) {
 	case HiveFileFormat::PARQUET: {
-		auto codec = StringUtil::Lower(GetParameter("parquet.compression"));
+		auto codec = StringUtil::Lower(GetCodecParameter("parquet.compression"));
 		return codec == "none" ? "uncompressed" : codec;
 	}
 	case HiveFileFormat::AVRO: {
-		auto codec = StringUtil::Lower(GetParameter("avro.output.codec"));
+		auto codec = StringUtil::Lower(GetCodecParameter("avro.output.codec"));
 		if (codec == "none" || codec == "uncompressed") {
 			return "null";
 		}
@@ -337,40 +334,15 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	// OpenCSVSerde has no NULL: "\n" matches no unquoted field
 	options.null_string = GetSerDe() == HiveSerDe::OPEN_CSV ? "\n" : GetNullFormat();
 	options.serde_fields = true;
+	string null_for_invalid_data;
+	options.null_for_invalid_data =
+	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
+	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	return options;
 }
 
-GlueTableFormat GlueTableInfo::GetFormat() const {
-	// Open table formats register themselves through the 'table_type' parameter
-	auto table_type = StringUtil::Upper(GetParameter("table_type"));
-	if (table_type == "ICEBERG") {
-		return GlueTableFormat::ICEBERG;
-	}
-	if (table_type == "DELTA") {
-		return GlueTableFormat::DELTA;
-	}
-	if (table_type == "HUDI") {
-		return GlueTableFormat::HUDI;
-	}
-	// Spark registers Delta tables through the data source provider
-	auto provider = StringUtil::Lower(GetParameter("spark.sql.sources.provider"));
-	if (provider == "delta") {
-		return GlueTableFormat::DELTA;
-	}
-	if (provider == "iceberg") {
-		return GlueTableFormat::ICEBERG;
-	}
-	if (provider == "hudi") {
-		return GlueTableFormat::HUDI;
-	}
-	if (!GetMetadataLocation().empty()) {
-		return GlueTableFormat::ICEBERG;
-	}
-	if (!input_format.empty() || !location.empty()) {
-		// Regular (Hive style) table with a storage descriptor
-		return GlueTableFormat::HIVE;
-	}
-	return GlueTableFormat::UNKNOWN;
+HiveJSONOptions GlueTableInfo::GetJSONOptions() const {
+	return HiveJSONOptions::FromTable(*this);
 }
 
 GlueTableType GlueTableTypeFromString(const string &type) {
@@ -383,44 +355,13 @@ GlueTableType GlueTableTypeFromString(const string &type) {
 	return GlueTableType::OTHER;
 }
 
-string GlueTableInfo::GetFormatName() const {
-	auto format = GetFormat();
-	if (format == GlueTableFormat::HIVE) {
-		return StringUtil::Format("HIVE (input format '%s')", input_format);
-	}
-	if (format == GlueTableFormat::UNKNOWN && !glue_table_type.empty()) {
-		return StringUtil::Format("UNKNOWN (glue table type '%s')", glue_table_type);
-	}
-	return GlueTableFormatToString(format);
+GlueTableFormat GlueTableInfo::GetFormat() const {
+	auto &info = *this;
+	return GlueTableFormat::Detect(info);
 }
 
 string GlueTableInfo::GetMetadataLocation() const {
 	return GetParameter("metadata_location");
-}
-
-bool GlueTableInfo::IsFormatParameter(const string &key) {
-	return StringUtil::CIEquals(key, "table_type") || StringUtil::CIEquals(key, "spark.sql.sources.provider") ||
-	       StringUtil::CIEquals(key, "metadata_location");
-}
-
-void HiveCSVOptions::Serialize(Serializer &serializer) const {
-	serializer.WriteProperty(100, "delimiter", delimiter);
-	serializer.WriteProperty(101, "quote", quote);
-	serializer.WriteProperty(102, "escape", escape);
-	serializer.WriteProperty(103, "skip_lines", skip_lines);
-	serializer.WriteProperty(104, "null_string", null_string);
-	serializer.WriteProperty(105, "serde_fields", serde_fields);
-}
-
-HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
-	HiveCSVOptions result;
-	result.delimiter = deserializer.ReadProperty<string>(100, "delimiter");
-	result.quote = deserializer.ReadProperty<string>(101, "quote");
-	result.escape = deserializer.ReadProperty<string>(102, "escape");
-	result.skip_lines = deserializer.ReadProperty<idx_t>(103, "skip_lines");
-	result.null_string = deserializer.ReadProperty<string>(104, "null_string");
-	result.serde_fields = deserializer.ReadProperty<bool>(105, "serde_fields");
-	return result;
 }
 
 } // namespace duckdb

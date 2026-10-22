@@ -59,6 +59,7 @@ public:
 
 	optional_ptr<CatalogEntry> CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) override;
 	void DropSchema(ClientContext &context, DropInfo &info) override;
+	void OnDetach(ClientContext &context) override;
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
@@ -90,20 +91,32 @@ public:
 	AccessMode access_mode;
 	GlueAttachOptions options;
 
+	//! the CatalogId Glue reports in the response of GetDatabases call (during attach probe or first usage)
+	string FetchCatalogId(ClientContext &context);
+
 	//! The cached Glue client (managed by GlueAPI): rebuilt whenever the credentials it was built with change
 	mutex client_lock;
 	string client_cache_key;
 	std::shared_ptr<Aws::Glue::GlueClient> glue_client;
 
 private:
-	//! Throw unless 'table' is a Hive table, the only kind that can be written
-	static GlueTable &GetHiveTableForDML(TableCatalogEntry &table, const char *statement);
+	//! Throw unless Glue's current definition of 'table' (returned in 'table_info') is a Hive table DuckDB writes
+	static GlueTable &GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
+	                                     GlueTableInfo &table_info);
 	//! Apply one CREATE / ALTER SCHEMA option: 'comment' is the Description, 'location' the LocationUri and any other
 	//! key a database parameter
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
 
 private:
+	//! for reading - the fetched catalog id or account id from ATTACH
+	string KnownCatalogId();
+	friend struct GlueViewNames;
+
+private:
 	GlueSchemaSet schemas;
+	mutex reported_id_lock;
+	//! empty until Glue reports one: not cached as none, the catalog may get a database of its own later
+	string reported_catalog_id;
 };
 
 } // namespace duckdb

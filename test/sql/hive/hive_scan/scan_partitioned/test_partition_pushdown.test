@@ -133,8 +133,8 @@ SELECT count(*) FROM read_files() WHERE file LIKE '%/pp_days/%';
 ----
 3
 
-# several join keys: a range of partitions is read. Planning samples the footer of the first partition, so
-# day_sk=2450815 is read either way.
+# several join keys: a range of partitions is read. Planning, before the join prunes, measures one file of the
+# partitions the scan may read, so one file of another partition can be read either way.
 statement ok
 INSERT INTO my_datalake.default.pp_days VALUES (5, 2450818), (6, NULL);
 
@@ -150,10 +150,14 @@ SELECT count(*) FROM my_datalake.default.pp_days o, wanted_range w WHERE o.day_s
 3
 
 query I
-SELECT regexp_extract(file, 'day_sk=[^/]+') AS day FROM read_files() WHERE file LIKE '%/pp_days/%' AND day != 'day_sk=2450815' ORDER BY 1;
+SELECT count(DISTINCT regexp_extract(file, 'day_sk=[^/]+')) FROM read_files() WHERE file LIKE '%/pp_days/day_sk=245081_/%' AND (file LIKE '%day_sk=2450817/%' OR file LIKE '%day_sk=2450818/%');
 ----
-day_sk=2450817
-day_sk=2450818
+2
+
+query I
+SELECT count(*) <= 1 FROM read_files() WHERE file LIKE '%/pp_days/%' AND file NOT LIKE '%/pp_days/day_sk=2450817/%' AND file NOT LIKE '%/pp_days/day_sk=2450818/%';
+----
+true
 
 # a join on two keys can not use a bloom or range filter: it pushes optional min/max filters, which prune too
 statement ok
@@ -168,10 +172,14 @@ SELECT count(*) FROM my_datalake.default.pp_days o, wanted_pairs w WHERE o.day_s
 2
 
 query I
-SELECT regexp_extract(file, 'day_sk=[^/]+') AS day FROM read_files() WHERE file LIKE '%/pp_days/%' AND day != 'day_sk=2450815' ORDER BY 1;
+SELECT count(DISTINCT regexp_extract(file, 'day_sk=[^/]+')) FROM read_files() WHERE file LIKE '%/pp_days/day_sk=245081_/%' AND (file LIKE '%day_sk=2450817/%' OR file LIKE '%day_sk=2450818/%');
 ----
-day_sk=2450817
-day_sk=2450818
+2
+
+query I
+SELECT count(*) <= 1 FROM read_files() WHERE file LIKE '%/pp_days/%' AND file NOT LIKE '%/pp_days/day_sk=2450817/%' AND file NOT LIKE '%/pp_days/day_sk=2450818/%';
+----
+true
 
 # the same with a Hive table on the build side
 statement ok
@@ -189,10 +197,14 @@ SELECT count(*) FROM my_datalake.default.pp_days o, my_datalake.default.pp_wante
 3
 
 query I
-SELECT regexp_extract(file, 'day_sk=[^/]+') AS day FROM read_files() WHERE file LIKE '%/pp_days/%' AND day != 'day_sk=2450815' ORDER BY 1;
+SELECT count(DISTINCT regexp_extract(file, 'day_sk=[^/]+')) FROM read_files() WHERE file LIKE '%/pp_days/day_sk=245081_/%' AND (file LIKE '%day_sk=2450817/%' OR file LIKE '%day_sk=2450818/%');
 ----
-day_sk=2450817
-day_sk=2450818
+2
+
+query I
+SELECT count(*) <= 1 FROM read_files() WHERE file LIKE '%/pp_days/%' AND file NOT LIKE '%/pp_days/day_sk=2450817/%' AND file NOT LIKE '%/pp_days/day_sk=2450818/%';
+----
+true
 
 # with the table root listed instead of every partition, the root is listed once for the pruned and the unpruned list
 statement ok
@@ -212,10 +224,14 @@ SELECT dir FROM listed_dirs();
 default/pp_days/
 
 query I
-SELECT regexp_extract(file, 'day_sk=[^/]+') AS day FROM read_files() WHERE file LIKE '%/pp_days/%' AND day != 'day_sk=2450815' ORDER BY 1;
+SELECT count(DISTINCT regexp_extract(file, 'day_sk=[^/]+')) FROM read_files() WHERE file LIKE '%/pp_days/day_sk=245081_/%' AND (file LIKE '%day_sk=2450817/%' OR file LIKE '%day_sk=2450818/%');
 ----
-day_sk=2450817
-day_sk=2450818
+2
+
+query I
+SELECT count(*) <= 1 FROM read_files() WHERE file LIKE '%/pp_days/%' AND file NOT LIKE '%/pp_days/day_sk=2450817/%' AND file NOT LIKE '%/pp_days/day_sk=2450818/%';
+----
+true
 
 statement ok
 RESET hive_partition_listing_threshold;

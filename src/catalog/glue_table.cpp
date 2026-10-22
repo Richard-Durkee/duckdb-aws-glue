@@ -8,6 +8,7 @@
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 
@@ -16,7 +17,9 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_query_cache.hpp"
 
 namespace duckdb {
 
@@ -42,6 +45,7 @@ virtual_column_map_t GlueTable::GetVirtualColumns() const {
 	virtual_column_map_t result;
 	result.insert(
 	    make_pair(MultiFileReader::COLUMN_IDENTIFIER_FILENAME, TableColumn("filename", LogicalType::VARCHAR)));
+	HiveMultiFileReader::AddMetadataColumns(result);
 	return result;
 }
 
@@ -51,26 +55,56 @@ vector<column_t> GlueTable::GetRowIdColumns() const {
 
 GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
-	GlueTableInfo result;
-	if (!GlueAPI::GetTable(context, glue_catalog, table_info.database_name, table_info.name, result)) {
+	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		GlueTableInfo info;
+		if (!GlueAPI::GetTable(context, glue_catalog, table_info.database_name, table_info.name, info)) {
+			return nullptr;
+		}
+		return make_shared_ptr<const GlueTableInfo>(std::move(info));
+	};
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	auto result = cache ? cache->GetTable(table_info.database_name, table_info.name, load) : load();
+	if (!result) {
 		throw CatalogException("Glue table '%s.%s' no longer exists", table_info.database_name, table_info.name);
 	}
-	return result;
+	return *result;
 }
 
 //===--------------------------------------------------------------------===//
 // Scan
 //===--------------------------------------------------------------------===//
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
-	// Ask Glue what kind of table this is right before scanning: only Hive (Glue native) tables can be read
-	auto latest_info = RefreshTableInfo(context);
-	switch (latest_info.GetFormat()) {
-	case GlueTableFormat::HIVE:
-		return GetHiveScanFunction(context, bind_data, latest_info);
+	// Ask Glue what kind of table this is right before scanning (once per query): only Hive (Glue native) tables can
+	// be read
+	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
+	    HiveQueryCache::TableKey(catalog.GetName().GetIdentifierName(), table_info.database_name, table_info.name));
+	shared_ptr<const GlueTableInfo> latest_info;
+	{
+		annotated_lock_guard<annotated_mutex> guard(entry->lock);
+		if (!entry->table_info) {
+			entry->table_info = make_shared_ptr<const GlueTableInfo>(RefreshTableInfo(context));
+		}
+		latest_info = entry->table_info;
+	}
+	auto format = latest_info->GetFormat();
+	switch (format.format) {
+	case GlueFormat::HIVE:
+		if (latest_info->IsPartitionProjected()) {
+			// Athena derives the partitions from the projection.* parameters and ignores the registered ones, which
+			// such a table usually has none of: reading the registered partitions would silently return no or wrong
+			// rows
+			throw NotImplementedException("Glue table '%s.%s' uses Athena partition projection (projection.enabled), "
+			                              "which is not supported yet: Athena derives its partitions from the "
+			                              "projection.* parameters and ignores the ones registered in Glue, so a scan "
+			                              "of the registered ones would read no rows or the wrong ones. Set "
+			                              "projection.enabled to false and register the partitions to read it",
+			                              latest_info->database_name, latest_info->name);
+		}
+		return GetHiveScanFunction(context, bind_data, *latest_info);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
 		                              "glue_get_table_response() to inspect its definition",
-		                              latest_info.database_name, latest_info.name, latest_info.GetFormatName());
+		                              latest_info->database_name, latest_info->name, format.Describe(*latest_info));
 	}
 }
 
@@ -93,6 +127,13 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	}
 	if (scan_info->file_format == HiveFileFormat::CSV) {
 		scan_info->csv_options = latest_info.GetCSVOptions();
+	}
+	if (scan_info->file_format == HiveFileFormat::JSON) {
+		scan_info->json_options = latest_info.GetJSONOptions();
+		for (auto &property : scan_info->json_options.unsupported_properties) {
+			DUCKDB_LOG_WARNING(context, "Glue table '%s.%s': SerDe property '%s' is not applied when reading",
+			                   latest_info.database_name, latest_info.name, property);
+		}
 	}
 	for (auto &column : GetColumns().Logical()) {
 		scan_info->names.push_back(column.Name());

@@ -146,6 +146,8 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 			scan_info->csv_options.skip_lines = option.second.GetValue<bool>() ? 1 : 0;
 		} else if (name == "nullstr") {
 			scan_info->csv_options.null_string = option.second.GetValue<string>();
+		} else if (name == "ignore_errors") {
+			scan_info->json_options.ignore_errors = option.second.GetValue<bool>();
 		}
 	}
 	if (!schema) {
@@ -231,6 +233,7 @@ TableFunctionSet GetHiveScanFunction(DatabaseInstance &db) {
 		options.Add("escape", LogicalType::VARCHAR);
 		options.Add("header", LogicalType::BOOLEAN);
 		options.Add("nullstr", LogicalType::VARCHAR);
+		options.Add("ignore_errors", LogicalType::BOOLEAN);
 	});
 	function.GetSignature() = std::move(signature);
 	function.bind = HiveScanBind;

@@ -24,6 +24,7 @@
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
 #include "execution/hive_copy.hpp"
 
@@ -414,6 +415,10 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
 	                                     op.estimated_cardinality, create_schema, std::move(create_info), table_info)
 	                 .Cast<GlueHiveCopy>();
+	// as the COPY binder does: without it every chunk becomes a batch of its own (a 2048-row parquet row group)
+	if (copy.function.desired_batch_size) {
+		copy.batch_size = copy.function.desired_batch_size(context, *copy.bind_data);
+	}
 	copy.use_tmp_file = false;
 	// files of earlier inserts are kept, so every file needs a unique name
 	copy.filename_pattern.SetFilenamePattern("{uuid}");
@@ -448,7 +453,8 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 }
 
 PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
-                                             GlueTable &table, optional_ptr<PhysicalOperator> plan) {
+                                             GlueTable &table, const GlueTableInfo &table_info,
+                                             optional_ptr<PhysicalOperator> plan) {
 	if (op.return_chunk) {
 		throw BinderException("RETURNING clause not yet supported for insertion into a Hive table");
 	}
@@ -466,9 +472,6 @@ PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPla
 		names.push_back(column.Name());
 		types.push_back(column.Type());
 	}
-	// Ask Glue for the current definition: the location, format, partition layout or dialect may have changed since the
-	// entry was cached (for example through ALTER TABLE ... SET LOCATION).
-	auto table_info = table.RefreshTableInfo(context);
 	auto &catalog = table.catalog.Cast<GlueCatalog>();
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
 	PlanWrite(context, planner, op, insert, table, table_info, *plan, names, types, nullptr, nullptr);
@@ -495,6 +498,15 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 		supported.Throw();
 	}
 	auto table_info = schema.BuildTableInfo(context, op.info->Base());
+	// the same gate as GetHiveTableForDML: the table would be created, written and then refused on read
+	if (table_info.IsPartitionProjected()) {
+		throw NotImplementedException(
+		    "CREATE TABLE ... AS for Glue table '%s' is not supported: with 'projection.enabled' "
+		    "on a partitioned table it would use Athena partition projection, which this "
+		    "extension cannot read yet. Set projection.enabled to false; the partitions the "
+		    "statement writes are then registered in Glue and readable",
+		    table_info.name);
+	}
 	vector<Identifier> names;
 	vector<LogicalType> types;
 	for (auto &column : op.info->Base().columns.Logical()) {
@@ -542,6 +554,10 @@ using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
+	if (!state.written_files.empty()) {
+		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
+		GlueTransactionCache::Invalidate(context, catalog);
+	}
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		return SinkFinalizeType::READY;
 	}

@@ -1,9 +1,11 @@
 # DuckDB Glue extension
 
-Experimental extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
+**Experimental** extension that exposes an AWS Glue Data Catalog as a DuckDB catalog. It talks to Glue through the AWS
 SDK Glue client and works with Hive (Glue native) tables stored as parquet, csv, json or avro on S3. Tables of other
 formats that Glue registers (Iceberg, Delta, ...) are listed, with the columns Glue reports, but can not be read or
 written.
+
+Use DDL/DML statements in this extension in production at your own risk. There is no guarantee that all incompatibilities between DuckDB and Trino/Spark engines writing to hive tables in glue have been discovered.
 
 ```sql
 CREATE SECRET (TYPE S3, PROVIDER credential_chain, REGION 'eu-central-1');
@@ -25,9 +27,14 @@ Attach options:
 
 ## Reading
 
+A table's format is read from its parameters (`table_type`, `spark.sql.sources.provider`, `metadata_location`) and
+otherwise from its InputFormat: Hudi tables (`HoodieParquetInputFormat`, ...) and symlink manifest tables
+(`SymlinkTextInputFormat`, e.g. a Delta `_symlink_format_manifest`) register a Parquet or text SerDe, so only the
+InputFormat tells them apart from a Hive table. They are listed but not read or written, like Iceberg and Delta.
+
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet` (columns by name),
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
-`read_json` (one object per line, keys by name; SerDe properties are not applied) and AvroSerDe with `read_avro`
+`read_json` (one object per line, keys by name; SerDe properties see below) and AvroSerDe with `read_avro`
 (columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
 Text tables are read the way their SerDe reads them:
 
@@ -37,9 +44,18 @@ Text tables are read the way their SerDe reads them:
 - OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
   doubled quotes Hive writes). An empty field is an empty string; there is no NULL.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
-  NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
-  `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
+  NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
+  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
+  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
+  (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
+- OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
+  `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
+  its column is NULL; either property enables both. Other JsonSerDe properties that change how the files are read
+  (OpenX `mapping.*`, `dots.in.keys` and `case.insensitive=true`, Hive `timestamp.formats`) are not applied: the read
+  succeeds and a warning is logged (`CALL enable_logging(level := 'warning')`).
+- JSON keys are matched to the columns exactly, as with OpenX `case.insensitive=false`; both SerDes match them
+  ignoring case by default, so a key `userId` does not fill the column `userid`.
 - Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
   delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
   line break.
@@ -55,24 +71,45 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 
 - The data files are those below the location of every partition Glue lists (`GetPartitions`), at any depth, or
   below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
-  layout. Files and directories named `_*` or `.*` are skipped. When one partition's location lies inside another's,
+  layout. Files and directories named `_*` or `.*`, `*_$folder$` directory markers and objects the listing reports as
+  zero bytes are skipped.
+  When one partition's location lies inside another's,
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
+- A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
+  rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
+  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
+  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
-  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). When a query reads at least
+  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). A filter the partition values decide is
+  true of every row the scan then reads, and is dropped from the plan, as for `read_parquet` with hive
+  partitioning. When a query reads at least
   `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
   recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
-  partitions, and partitions at custom locations, are listed one directory each.
+  partitions, and partitions at custom locations, are listed one directory each. A directory is listed once per
+  query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
+  false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
+  cache (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way
+  (another writer, `COPY TO` the table location) appear only after the next clear. Files removed any other way
+  (compaction, an overwrite, dropping and recreating the table at the same location) are worse than unseen: scans
+  under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear.
+  It suits hosts that run one query per connection.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the
   parquet footer, or the lines of a 64 KiB prefix for csv and json. Every scan of the table in the query scales
-  that one measurement by the partitions it reads, and a scan that lists the same directory reuses the listing.
-  Avro tables are not measured, so planning them lists nothing.
+  that one measurement by the files and bytes of the partitions it reads: those the listing holds completely
+  count with their own size, the others with the average of those. A scan that lists the same directory reuses
+  the listing. Avro tables are not measured, so planning them lists nothing.
+- The Glue table definition and the partition list are fetched once per query and table, however often the
+  query scans the table.
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
+- Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
+  `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
+  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
@@ -123,7 +160,10 @@ their codec themselves.
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
   Athena, JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
   `CREATE TABLE ... WITH (format = 'json')` creates): `INSERT` into a table with the OpenX JSON SerDe
-  (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read.
+  (`org.openx.data.jsonserde.JsonSerDe`) is refused, it can be read. `INSERT` also requires the table's InputFormat to
+  be one Hive uses for its file format (`MapredParquetInputFormat`, `TextInputFormat` or `CombineTextInputFormat` for
+  csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
+  know, and files written into it could corrupt the table.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.
@@ -131,8 +171,15 @@ their codec themselves.
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped. `ALTER COLUMN ... TYPE ...
   USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
-  for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
-  codec is an error.
+  for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`, and avro
+  with `avro.output.codec`. A table without its format's codec parameter is written with `write_compression`, if it
+  records one. Another codec is an error.
+- `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
+  avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
+  column with `glue_replace_columns` to do that deliberately). Partition keys, bucket and sort columns can not be
+  renamed.
+- `COMMENT ON COLUMN` sets the Glue column comment (`IS NULL` removes it); the comments of Glue columns show in
+  `duckdb_columns()`. Comments on partition keys and on views are not supported yet.
 - `ALTER TABLE ... SET (key = 'value', ...)` and `RESET (key, ...)` change the Glue table parameters (Hive's
   `TBLPROPERTIES`) with UpdateTable: `SET` adds or overwrites the listed keys, `RESET` removes them, and every other
   parameter and the rest of the definition stay as they are. Values are stored as strings (`compression_level = 4`
@@ -158,11 +205,30 @@ of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue
 ...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
 `COMMIT`, `ABORT` or `ROLLBACK` and run the statement again.
 
+Within a DuckDB transaction
+(`BEGIN` … `COMMIT`) a table's definition and its list of partitions are fetched from Glue once and reused; the files
+inside those partitions are listed at each scan. So a partition added outside the transaction becomes visible only after the transaction ends, while
+a file added to an existing partition is seen by the next query (the scans of one query share a listing) — or, under
+`glue_cache_listings`, after the next cache clear.
+
+With `SET glue_metadata_cache_scope = 'connection'` the cache also serves the connection's later transactions. It is
+per connection — two connections never share one — so another connection's write stays unseen until something clears
+this connection's cache: a write through it, a rollback, or DETACH.
+
 ## Views
 
 - `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...`, `CREATE SECURE VIEW` and
   `CREATE VIEW ... WITH (DEFER_BINDING)` create a Glue view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB.
-  `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database.
+  `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database. The view's
+  columns store their DuckDB types (e.g. `HUGEINT`, `INTEGER`), not Glue types.
+- A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
+  `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
+  table, alias or column: use a table alias with another name.
+- With `SET experimental_glue_view_enable_external_catalogs = true`, a view can also read tables of other kinds of
+  catalogs (e.g. Iceberg, Postgres, a DuckDB file). Such a table is stored as `"external:<type>:<alias>".<schema>.<table>`,
+  with the alias the catalog was attached under, so the view is tied to that alias: it reads wherever a catalog of that
+  type is attached under that alias, whichever catalog that is, and fails where none is. Reading needs no setting.
+  Catalogs in memory are refused.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
@@ -185,7 +251,8 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
 - `schema` (required): a struct of column name to DuckDB type name, data columns and partition columns.
 - `format`: `'parquet'` (default), `'csv'`, `'json'` or `'avro'`. For csv, `header := true`, `delim := '|'`,
   `quote := '"'`, `escape := '\'` and `nullstr := '\N'` describe the files (an empty field is NULL unless `nullstr`
-  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name.
+  says otherwise, as in `read_csv`); csv columns are matched by position, json keys by name. For json,
+  `ignore_errors := true` reads a line that is not valid JSON as a row of NULLs.
 - `partitions`: one struct per partition with a value for every partition key and an optional `location`; without
   a location the partition lives at `<root>/<key>=<value>/...`. The partition keys are the struct fields other than
   `location`, in that order, unless `partition_keys := [...]` names them. Without `partitions` the table is
@@ -203,6 +270,7 @@ query.
 | function | Hive statement |
 |----------|------------------|
 | `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` |
+| `glue_get_partition_response('cat.db.t', {dt: '2016-05-14', country: 'IN'})` | `DESCRIBE FORMATTED ... PARTITION (...)`: the partition's location, SerDe, columns and parameters, and its complete Glue definition in `response` |
 | `CALL glue_add_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, location := 's3://...', if_not_exists := false)` | `ALTER TABLE ADD [IF NOT EXISTS] PARTITION (...) [LOCATION ...]`; without `location` the partition lives at `<table location>/dt=2016-05-14/country=IN` |
 | `CALL glue_drop_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, if_exists := false)` | `ALTER TABLE DROP [IF EXISTS] PARTITION (...)`; the data files stay in S3 |
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
@@ -243,8 +311,8 @@ Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s be
 
 ## Inspecting tables
 
-Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA` or
-`UNKNOWN`). The full Glue definition of a table is available through a table function:
+Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,
+`SYMLINK` or `UNKNOWN`). The full Glue definition of a table is available through a table function:
 
 ```sql
 SELECT * FROM glue_get_table_response('my_datalake.default.some_table');
@@ -256,6 +324,15 @@ parameters as columns, plus the complete Glue `Table` object as a VARIANT in `re
 (`'default.some_table'`, or `'some_table'` after `USE my_datalake.default`) is resolved like in a query, through the
 table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
 name.
+
+`glue_get_partition_response('<table>', {dt: '2024-01-01', ...})` does the same for one partition of a Hive table:
+its values, location, SerDe, columns and parameters as columns, plus the complete Glue `Partition` object in
+`response`. The partition is given like for the other partition functions, as a struct naming every partition key.
+
+```sql
+SELECT location, response.StorageDescriptor.InputFormat
+FROM glue_get_partition_response('my_datalake.default.some_table', {dt: '2024-01-01'});
+```
 
 `glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
 description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
@@ -288,6 +365,8 @@ The tests are written against two `--test-config` files, which decide where the 
 A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_ENDPOINT` and `DEFAULT_S3_LOCATION`,
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
+The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
+GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
@@ -361,8 +440,17 @@ that takes `FORMAT`, `SF` and `SF_NAME`. The TPC-DS load needs a build without a
 a `D_ASSERT` in DuckDB's partitioned copy (see the header of `benchmark/tpcds/tpcds.benchmark.in` for a repro without
 Glue).
 
+`benchmark/{tpch,tpcds}/sf10/parquet/` run the same queries at SF10 (the TPC-DS load writes ~4 GB to S3), and
+`benchmark/{tpch,tpcds}/sf0.01/parquet/` at SF0.01, which has as many partitions and files as SF1 but almost no rows,
+so its timings are mostly the Glue calls, the S3 listings and the file opens. Neither runs in CI. (TPC-H q17 fails at
+SF0.01: DuckDB's answer file for it is empty, the query returns one NULL.)
+
 Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so changing a load has no effect while
 the tables are in Glue: rebuild the fixture with `make glue-fixture-down && make glue-fixture` first.
+
+`benchmark_runner` runs the benchmarks below its own root (the repository), not the working directory. DuckDB's own
+TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
+`--root-dir duckdb` (`'benchmark/tpcds/sf1/.*' --sf 10` for TPC-DS at SF10).
 
 `.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
 their timings (5 runs each) in two jobs of about three minutes, so it runs only a few join-heavy TPC-H and TPC-DS

@@ -21,6 +21,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
+#include "catalog/glue_transaction.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -132,6 +133,10 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 		throw CatalogException("Glue database \"%s\" was created but could not be fetched afterwards", schema_name);
 	}
 	return schemas.CreateEntry(schemas.CreateSchemaEntry(created));
+}
+
+void GlueCatalog::OnDetach(ClientContext &context) {
+	GlueTransactionCache::OnDetach(context, *this);
 }
 
 void GlueCatalog::DropSchema(ClientContext &context, DropInfo &info) {
@@ -260,6 +265,24 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
                                                            const EntryLookupInfo &schema_lookup,
                                                            OnEntryNotFound if_not_found) {
 	auto &schema_name = schema_lookup.GetEntryName();
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
+	vector<string> path;
+	for (auto &component : schema_lookup.GetQualifiedName().Path()) {
+		if (!component.empty()) {
+			path.push_back(component.GetIdentifierName());
+		}
+	}
+	if (path.size() > 1 && StringUtil::CIEquals(path[0], GetName().GetIdentifierName())) {
+		path.erase(path.begin());
+	}
+	if (path.size() > 1) {
+		if (if_not_found == OnEntryNotFound::RETURN_NULL) {
+			return nullptr;
+		}
+		throw CatalogException(schema_lookup.GetErrorContext(),
+		                       "Glue database \"%s\" does not exist: Glue databases are not nested",
+		                       schema_lookup.GetQualifiedName().ToString());
+	}
 	auto &context = transaction.GetContext();
 	auto entry = schemas.GetEntry(context, schema_name);
 	if (!entry) {
@@ -272,6 +295,46 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 	return &entry->Cast<SchemaCatalogEntry>();
 }
 
+//! "<12-digit account>" or "<12-digit account>:..."
+static bool StartsWithAccountId(const string &path) {
+	constexpr auto num_digits_in_aws_account_id = 12;
+	if (path.size() < num_digits_in_aws_account_id) {
+		return false;
+	}
+	for (idx_t i = 0; i < num_digits_in_aws_account_id; i++) {
+		if (!StringUtil::CharacterIsDigit(path[i])) {
+			return false;
+		}
+	}
+	return path.size() == num_digits_in_aws_account_id || path[num_digits_in_aws_account_id] == ':';
+}
+
+string GlueCatalog::KnownCatalogId() {
+	{
+		lock_guard<mutex> guard(reported_id_lock);
+		if (!reported_catalog_id.empty()) {
+			return reported_catalog_id;
+		}
+	}
+	return StartsWithAccountId(options.catalog_id) ? options.catalog_id : string();
+}
+
+string GlueCatalog::FetchCatalogId(ClientContext &context) {
+	{
+		lock_guard<mutex> guard(reported_id_lock);
+		if (!reported_catalog_id.empty()) {
+			return reported_catalog_id;
+		}
+	}
+	// outside the lock, so that a read (KnownCatalogId) never waits on a Glue call
+	auto catalog_id = GlueAPI::GetReportedCatalogId(context, *this);
+	lock_guard<mutex> guard(reported_id_lock);
+	if (reported_catalog_id.empty()) {
+		reported_catalog_id = catalog_id;
+	}
+	return reported_catalog_id;
+}
+
 void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	if (!context.transaction.IsAutoCommit()) {
 		throw TransactionException("This connection is currently in a transaction. Transaction support is not "
@@ -280,19 +343,39 @@ void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {
 	}
 }
 
-GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char *statement) {
+GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogEntry &table, const char *statement,
+                                           GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
-	if (glue_table.table_info.GetFormat() != GlueTableFormat::HIVE) {
+	// another engine may have converted the table since the entry was cached
+	table_info = glue_table.RefreshTableInfo(context);
+	auto format = table_info.GetFormat();
+	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "
 		                              "written",
-		                              statement, table.name.GetIdentifierName(), glue_table.table_info.GetFormatName());
+		                              statement, table.name.GetIdentifierName(), format.Describe(table_info));
+	}
+	// an InputFormat of another engine over a Parquet or text SerDe is a layout DuckDB does not know
+	auto file_format = table_info.GetFileFormat();
+	if (!format.IsWritable(table_info, file_format)) {
+		throw NotImplementedException("%s into Glue table '%s' is not supported: its InputFormat '%s' is not one Hive "
+		                              "uses for %s tables, so DuckDB does not know how the files below the table "
+		                              "location are laid out",
+		                              statement, table.name.GetIdentifierName(), table_info.input_format,
+		                              HiveFileFormatToString(file_format));
+	}
+	// the partitions an INSERT registers are ignored by Athena, and the files may belong under a location template
+	if (table_info.IsPartitionProjected()) {
+		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses Athena partition "
+		                              "projection (projection.enabled), so the partitions it would register are "
+		                              "ignored by Athena. Set projection.enabled to false and register the partitions "
+		                              "to write it",
+		                              statement, table.name.GetIdentifierName());
 	}
 	// Hive and Spark bucket with different hash functions and file names; neither is implemented
-	if (glue_table.table_info.IsBucketed()) {
+	if (table_info.IsBucketed()) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table is %s, and DuckDB does not "
 		                              "write a bucketed layout.",
-		                              statement, table.name.GetIdentifierName(),
-		                              glue_table.table_info.DescribeBucketing());
+		                              statement, table.name.GetIdentifierName(), table_info.DescribeBucketing());
 	}
 	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
 	// keys DuckDB writes
@@ -310,9 +393,10 @@ GlueTable &GlueCatalog::GetHiveTableForDML(TableCatalogEntry &table, const char 
 //===--------------------------------------------------------------------===//
 PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                           optional_ptr<PhysicalOperator> plan) {
-	auto &glue_table = GetHiveTableForDML(op.table, "INSERT");
 	ThrowIfInExplicitTransaction(context);
-	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, plan);
+	GlueTableInfo table_info;
+	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
+	return GlueHiveInsert::PlanInsert(context, planner, op, glue_table, table_info, plan);
 }
 
 PhysicalOperator &GlueCatalog::PlanCreateTableAs(ClientContext &context, PhysicalPlanGenerator &planner,

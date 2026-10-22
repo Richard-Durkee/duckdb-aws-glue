@@ -44,9 +44,10 @@
 			]
 		},
 		{
-			"reason": "needs the OpenX JSON fixture table that scripts/docker-compose.yml creates in the local Glue",
+			"reason": "needs the OpenX JSON fixture tables that scripts/docker-compose.yml creates in the local Glue",
 			"paths": [
-				"test/sql/hive/dml/insert/insert_into_openx_json_table.test"
+				"test/sql/hive/dml/insert/insert_into_openx_json_table.test",
+				"test/sql/hive/dml/formats/json/test_json_serde_properties.test"
 			]
 		},
 		{
@@ -59,6 +60,12 @@
 			"reason": "AWS Glue stores column names in lower case ('Mixed Case' reads back as 'mixed case'); moto keeps them as given",
 			"paths": [
 				"test/sql/hive/ddl/alter_column/glue_replace_columns.test"
+			]
+		},
+		{
+			"reason": "needs the fixture tables with other engines' InputFormats that scripts/docker-compose.yml creates in the local Glue",
+			"paths": [
+				"test/sql/hive/bugs/foreign_input_format_as_hive.test"
 			]
 		}
 	]

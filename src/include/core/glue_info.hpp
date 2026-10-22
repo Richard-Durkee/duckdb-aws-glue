@@ -6,15 +6,11 @@
 #include "duckdb/common/vector.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
+#include "core/glue_format.hpp"
+#include "core/readers/hive_csv_options.hpp"
+#include "core/readers/hive_json_options.hpp"
+
 namespace duckdb {
-
-class Serializer;
-class Deserializer;
-
-//! The (open) table format a Glue table is stored in, derived from the table parameters
-enum class GlueTableFormat : uint8_t { ICEBERG, DELTA, HUDI, HIVE, UNKNOWN };
-
-string GlueTableFormatToString(GlueTableFormat format);
 
 enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
 
@@ -33,6 +29,10 @@ public:
 
 //! A Glue "Database", exposed as a DuckDB schema
 struct GlueDatabaseInfo {
+	//! the catalog the database resides in
+	string catalog_id;
+	//! a Glue resource link (TargetDatabase set): a database of another catalog
+	bool is_resource_link = false;
 	string name;
 	string description;
 	//! Optional S3 location tables of this database default to
@@ -52,22 +52,6 @@ HiveFileFormat HiveFileFormatFromString(const string &format);
 //! read the data files and which engines write them
 enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
 HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde);
-
-//! How the files of a csv table are read
-struct HiveCSVOptions {
-	string delimiter = ",";
-	string quote = "\"";
-	string escape = "\"";
-	//! The header lines every file starts with
-	idx_t skip_lines = 0;
-	string null_string;
-	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
-	bool serde_fields = false;
-
-public:
-	void Serialize(Serializer &serializer) const;
-	static HiveCSVOptions Deserialize(Deserializer &deserializer);
-};
 
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
 //! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.
@@ -110,17 +94,16 @@ public:
 	bool IsView() const {
 		return table_type == GlueTableType::VIRTUAL_VIEW;
 	}
-	//! Derive the open table format from the table parameters
+	//! The table format and what it was derived from (GlueTableFormat::Detect)
 	GlueTableFormat GetFormat() const;
-	//! Whether 'key' is one of the table parameters GetFormat() derives the format from
-	static bool IsFormatParameter(const string &key);
-	//! Human readable description of the table type, used in error messages
-	string GetFormatName() const;
 	//! The 'metadata_location' parameter of an Iceberg table (empty if not present)
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
 	string GetParameter(const string &key) const;
 	bool IsBucketed() const;
+	//! Whether this is a partitioned table with Athena partition projection on (projection.enabled): Athena then
+	//! derives the partitions from the projection.* parameters and ignores the ones registered in Glue
+	bool IsPartitionProjected() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
 	//! The SerDe, derived from serde_library; throws NotImplementedException for other SerDes
@@ -131,13 +114,15 @@ public:
 	bool TryGetProperty(const string &key, string &result) const;
 	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
-	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
-	//! the table names none; throws for a codec DuckDB can not write. Files are read with the codec their extension
-	//! says, whatever the table records.
+	//! The codec to write a csv / json table's files with (write.compression, else write_compression, else
+	//! compressionType), uncompressed when the table names none; throws for a codec DuckDB can not write. Files are
+	//! read with the codec their extension says, whatever the table records.
 	FileCompressionType GetTextCompression() const;
 	//! The codec the table records for its files, as DuckDB's writer for 'format' names it ('null' for an uncompressed
 	//! avro file), empty when it records none; throws for a codec DuckDB can not write
 	string GetCodec(HiveFileFormat format) const;
+	//! The format's codec parameter 'key', else write_compression, empty when the table records neither
+	string GetCodecParameter(const string &key) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
 	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
@@ -152,6 +137,8 @@ public:
 	string GetEscapeCharacter() const;
 	//! How the files of a csv table are read
 	HiveCSVOptions GetCSVOptions() const;
+	//! How the files of a json table are read
+	HiveJSONOptions GetJSONOptions() const;
 
 private:
 	//! A non-negative integer property, 0 when not set
@@ -165,8 +152,10 @@ struct GlueViewInfo {
 	//! The Glue database (a DuckDB schema) the view lives in
 	string database_name;
 	string name;
-	//! The SELECT as DuckDB prints it; unqualified names in it belong to database_name
+	//! ViewOriginalText: the SELECT as written
 	string sql;
+	//! ViewExpandedText: tables as <db>.<table>, of other Glue catalogs by catalog id (executed)
+	string expanded_sql;
 	//! The bound output columns; empty for a view created with DEFER_BINDING
 	vector<GlueColumn> columns;
 	bool secure = false;
@@ -183,6 +172,14 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+};
+
+//! A partition as GetPartition returns it: also its storage descriptor and parameters
+struct GluePartitionDetails : public GluePartitionInfo {
+	string serde_library;
+	unordered_map<string, string> serde_parameters;
+	vector<GlueColumn> columns;
+	unordered_map<string, string> parameters;
 };
 
 } // namespace duckdb

@@ -124,7 +124,7 @@ public:
 	void CheckTextSerdeSupported(HiveFileFormat format) const;
 	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote
 	string GetQuoteCharacter() const;
-	//! OpenCSVSerde's escapeChar, else its quote character; empty for LazySimpleSerDe
+	//! OpenCSVSerde's escapeChar ('\\' by default); empty for LazySimpleSerDe
 	string GetEscapeCharacter() const;
 	//! How the files of a csv table are read
 	HiveCSVOptions GetCSVOptions() const;

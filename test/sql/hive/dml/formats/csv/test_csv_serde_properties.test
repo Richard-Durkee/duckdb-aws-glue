@@ -130,6 +130,28 @@ SELECT amount FROM my_datalake.default.fixture_text_opencsv;
 ----
 NULL
 
+# the escape character, '\' by default, only escapes the quote and itself and is dropped anywhere else (a delimiter or
+# a line break after it still ends the field); a doubled quote is one quote
+statement ok
+COPY (SELECT * FROM (VALUES
+    ('1,a\b,1'),
+    ('2,"x""y",2'),
+    ('3,"x\"y",3'),
+    ('4,\'),
+    ('5,z,5'),
+    ('6,a\,7')
+) t(line)) TO '{DEFAULT_S3_LOCATION}/fixture/fixture_text_opencsv/data.txt' (FORMAT csv, HEADER false, QUOTE '', ESCAPE '');
+
+query IIII
+SELECT id, name, name IS NULL, amount FROM my_datalake.default.fixture_text_opencsv ORDER BY id;
+----
+1	ab	false	1.0
+2	x"y	false	2.0
+3	x"y	false	3.0
+4	(empty)	false	NULL
+5	z	false	5.0
+6	a	false	7.0
+
 # as OpenCSVSerde does: missing trailing fields are NULL and fields beyond the last column are ignored
 statement ok
 COPY (SELECT * FROM (VALUES

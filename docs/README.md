@@ -41,8 +41,9 @@ Text tables are read the way their SerDe reads them:
 - LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
   is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
   quoted.
-- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
-  doubled quotes Hive writes). An empty field is an empty string; there is no NULL.
+- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\`). As in OpenCSV, the escape character
+  only escapes the quote and itself and is dropped anywhere else, so a delimiter or a line break after it still ends
+  the field, and a doubled quote in a quoted field is one quote. An empty field is an empty string; there is no NULL.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
   `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).

@@ -308,7 +308,7 @@ string GlueTableInfo::GetQuoteCharacter() const {
 }
 
 string GlueTableInfo::GetEscapeCharacter() const {
-	return GetSerDe() == HiveSerDe::OPEN_CSV ? GetOpenCSVCharacter("escapeChar", GetQuoteCharacter()) : string();
+	return GetSerDe() == HiveSerDe::OPEN_CSV ? GetOpenCSVCharacter("escapeChar", "\\") : string();
 }
 
 HiveCSVOptions GlueTableInfo::GetCSVOptions() const {

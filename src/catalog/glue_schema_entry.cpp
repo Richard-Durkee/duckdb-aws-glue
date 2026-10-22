@@ -515,7 +515,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	view.database_name = database_info.name;
 	view.name = view_name;
 	// a DuckDB view's ViewOriginalText: the user's SQL; ViewExpandedText: tables of this catalog as db.t, of other
-	// catalogs by their Glue catalog id
+	// catalogs by their Glue catalog id or "external:<type>:<alias>"
 	view.sql = GlueView::RenderViewSql(info);
 	auto defer_binding = info.binding_mode == CreateViewBindingMode::SKIP_BINDING;
 	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());

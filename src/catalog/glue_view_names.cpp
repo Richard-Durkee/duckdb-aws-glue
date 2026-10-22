@@ -8,6 +8,7 @@
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database_manager.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/star_expression.hpp"
@@ -126,9 +127,7 @@ private:
 			break;
 		case TableReferenceType::TABLE_FUNCTION:
 			// a source outside the Glue catalog
-			throw BinderException("Glue views can not read from table functions (\"%s\"): a Glue view can only "
-			                      "reference tables in Glue catalogs",
-			                      ref.ToString());
+			throw BinderException("Glue views can not read from table functions (\"%s\")", ref.ToString());
 		default:
 			throw BinderException("Glue views can not store a FROM clause of type %s", EnumUtil::ToString(ref.type));
 		}
@@ -188,6 +187,20 @@ void RefuseCatalogQualifiedColumns(QueryNode &query, const identifier_set_t &cat
 	walker.Walk(query);
 }
 
+//! The stored catalog part of a non-Glue catalog's table: "external:<type>:<alias>", the alias it was written with.
+//! No Glue catalog id has the prefix (an id is an account id, optionally followed by ":<catalog>")
+constexpr char EXTERNAL_PREFIX[] = "external:";
+
+bool ExternalCatalogsEnabled(ClientContext &context) {
+	Value enabled;
+	return context.TryGetCurrentSetting("experimental_glue_view_enable_external_catalogs", enabled) &&
+	       !enabled.IsNull() && BooleanValue::Get(enabled);
+}
+
+string ExternalIdentity(Catalog &catalog) {
+	return EXTERNAL_PREFIX + catalog.GetCatalogType() + ":" + catalog.GetName().GetIdentifierName();
+}
+
 optional_ptr<CatalogEntry> LookupTable(ClientContext &context, QualifiedName name) {
 	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, std::move(name));
 	return Catalog::GetEntry(context, lookup, OnEntryNotFound::RETURN_NULL);
@@ -225,15 +238,28 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 		}
 		if (!catalog_name.empty()) {
 			// core has stripped the view's own catalog name, so this is another catalog: stored by its Glue catalog id
+			// or "external:<type>:<alias>"
 			auto entry = LookupTable(context, name);
 			if (!entry) {
 				throw BinderException("Glue view references table \"%s\", which was not found", name.ToString());
 			}
 			auto &catalog = entry->ParentCatalog();
 			if (catalog.GetCatalogType() != "glue") {
-				throw BinderException("Glue view references \"%s\" in catalog \"%s\" of type %s: a Glue view can only "
-				                      "reference tables in Glue catalogs",
-				                      name.ToString(), catalog.GetName().GetIdentifierName(), catalog.GetCatalogType());
+				if (!ExternalCatalogsEnabled(context)) {
+					throw BinderException(
+					    "Glue view references \"%s\" in catalog \"%s\" of type %s: a Glue view can only "
+					    "reference tables in Glue catalogs (SET experimental_glue_view_enable_external_catalogs = "
+					    "true to store it by the catalog's type and alias)",
+					    name.ToString(), catalog.GetName().GetIdentifierName(), catalog.GetCatalogType());
+				}
+				if (catalog.InMemory()) { // also the temp catalog
+					throw BinderException("Glue view references \"%s\" in catalog \"%s\", which is in memory: no "
+					                      "other session can read it",
+					                      name.ToString(), catalog.GetName().GetIdentifierName());
+				}
+				catalogs.insert(catalog_name);
+				ref.SetQualifiedName(Identifier(ExternalIdentity(catalog)), entry->ParentSchema().name, entry->name);
+				return;
 			}
 			auto &glue_catalog = catalog.Cast<GlueCatalog>();
 			if (!SameGlueService(glue_catalog, view_catalog)) {
@@ -316,6 +342,11 @@ identifier_tree_t<Identifier> GlueViewNames::AttachedAliases(GlueCatalog &view_c
 		}
 		auto &catalog = db->GetCatalog();
 		if (catalog.GetCatalogType() != "glue") {
+			// an identity names one alias
+			auto id = Identifier(ExternalIdentity(catalog));
+			if (ids.count(id)) {
+				aliases[id] = catalog.GetName();
+			}
 			continue;
 		}
 		auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -341,6 +372,10 @@ void GlueViewNames::ResolveForReading(GlueCatalog &view_catalog, const string &v
 		}
 		auto &id = name.Catalog();
 		auto alias = aliases.find(id);
+		if (alias == aliases.end() && StringUtil::StartsWith(id.GetIdentifierName(), EXTERNAL_PREFIX)) {
+			throw BinderException("Glue view \"%s\" reads %s: no catalog of that type is attached under that alias",
+			                      view_name, name.ToString());
+		}
 		if (alias == aliases.end()) {
 			auto &endpoint = view_catalog.options.endpoint;
 			throw BinderException("Glue view \"%s\" reads %s from Glue catalog %s, which is not attached in %s "

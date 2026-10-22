@@ -262,8 +262,13 @@ void GlueTableInfo::CheckTextSerdeSupported(HiveFileFormat format) const {
 	}
 }
 
+string GlueTableInfo::GetCodecParameter(const string &key) const {
+	auto codec = GetParameter(key);
+	return codec.empty() ? GetParameter("write_compression") : codec;
+}
+
 FileCompressionType GlueTableInfo::GetTextCompression() const {
-	auto codec = GetParameter("write.compression");
+	auto codec = GetCodecParameter("write.compression");
 	if (codec.empty()) {
 		codec = GetParameter("compressionType");
 	}
@@ -283,11 +288,11 @@ FileCompressionType GlueTableInfo::GetTextCompression() const {
 string GlueTableInfo::GetCodec(HiveFileFormat format) const {
 	switch (format) {
 	case HiveFileFormat::PARQUET: {
-		auto codec = StringUtil::Lower(GetParameter("parquet.compression"));
+		auto codec = StringUtil::Lower(GetCodecParameter("parquet.compression"));
 		return codec == "none" ? "uncompressed" : codec;
 	}
 	case HiveFileFormat::AVRO: {
-		auto codec = StringUtil::Lower(GetParameter("avro.output.codec"));
+		auto codec = StringUtil::Lower(GetCodecParameter("avro.output.codec"));
 		if (codec == "none" || codec == "uncompressed") {
 			return "null";
 		}

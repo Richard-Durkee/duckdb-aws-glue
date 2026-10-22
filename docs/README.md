@@ -365,11 +365,11 @@ Both loads create their Glue tables with `CREATE TABLE IF NOT EXISTS ... AS`, so
 the tables are in Glue: rebuild the fixture with `make glue-fixture-down && make glue-fixture` first.
 
 `.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
-their timings (5 runs each) in a job per format: the TPC-H and TPC-DS benchmarks of that format, plus
-`benchmark/*.benchmark`, `benchmark/pushdown/` and `benchmark/optimizer/` in the parquet job. To keep the jobs short it
-skips the queries that take under 0.6s on parquet at SF1 and the ones that are mostly filtered scans of one table
-(TPC-H q06, TPC-DS q09, q28, q88, q90, q96), and per format the TPC-DS queries that time out or fail: q85 on parquet
-(bad join order), q95 except on csv (the CTE inliner can't copy the Glue scan), and q64 and q72 on avro.
+their timings (5 runs each) in two jobs of about three minutes, so it runs only a few join-heavy TPC-H and TPC-DS
+queries. The parquet job runs `benchmark/*.benchmark`, `benchmark/pushdown/`, the parquet benchmarks of
+`benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
+`benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
+other queries and the json and avro TPC benchmarks only run locally.
 
 ## Building
 

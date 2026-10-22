@@ -304,6 +304,19 @@ parameters as columns, plus the complete Glue `Table` object as a VARIANT in `re
 table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
 name.
 
+With `format := 'describe' | 'formatted' | 'extended'` it describes the table instead, one row per entry
+(`category`, `name`, `value`, `comment`): `describe` lists the columns and partition keys, `formatted` adds the table's
+details, parameters and storage (SerDe, input and output format, compression, buckets, sort columns, SerDe
+parameters), and `extended` adds the complete Glue definition as JSON. Iceberg, Delta and Hudi tables are described
+from their Glue definition as well. `partition := {dt: '2024-01-01'}` describes one partition of a Hive table instead:
+its values, location, creation time, parameters and storage.
+
+```sql
+SELECT * FROM glue_get_table_response('my_datalake.default.some_table', format := 'formatted');
+SELECT name, value FROM glue_get_table_response('my_datalake.default.some_table', format := 'formatted',
+                                                partition := {dt: '2024-01-01'}) WHERE category = 'storage';
+```
+
 `glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
 description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
 `'<database>'` is resolved like in a query, through the search path.

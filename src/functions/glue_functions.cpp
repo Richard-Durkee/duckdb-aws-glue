@@ -3,6 +3,8 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/optional_ptr.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/qualified_name.hpp"
@@ -10,6 +12,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "functions/glue_describe.hpp"
 
 namespace duckdb {
 
@@ -18,11 +21,63 @@ namespace {
 struct GlueGetTableResponseBindData : public TableFunctionData {
 	GlueTableInfo table;
 	string raw_json;
+	//! With 'format': a description of the table instead of the response
+	bool describe = false;
+	vector<GlueDescribeRow> describe_rows;
 };
 
 struct GlueGetTableResponseState : public GlobalTableFunctionState {
 	bool done = false;
+	idx_t offset = 0;
 };
+
+GlueDescribeFormat ParseDescribeFormat(const Value &value) {
+	auto format = StringUtil::Lower(value.ToString());
+	if (format == "describe") {
+		return GlueDescribeFormat::DESCRIBE;
+	}
+	if (format == "formatted") {
+		return GlueDescribeFormat::FORMATTED;
+	}
+	if (format == "extended") {
+		return GlueDescribeFormat::EXTENDED;
+	}
+	throw BinderException(
+	    "glue_get_table_response: unknown format '%s', expected 'describe', 'extended' or 'formatted'",
+	    value.ToString());
+}
+
+//! Describe a table, or one of its partitions, for glue_get_table_response(..., format := ...)
+vector<GlueDescribeRow> DescribeGlueTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
+                                          const string &raw_json, GlueDescribeFormat format,
+                                          optional_ptr<const Value> partition) {
+	auto table_name = table.database_name + "." + table.name;
+	if (!partition) {
+		return GlueDescribe(format, raw_json);
+	}
+	auto table_format = table.GetFormat();
+	if (table.IsView() || !table_format.IsHive()) {
+		throw NotImplementedException("glue_get_table_response: 'partition' describes partitions of Hive tables, '%s' "
+		                              "is a %s",
+		                              table_name,
+		                              table.IsView() ? "Glue view" : table_format.Describe(table) + " table");
+	}
+	if (table.partition_keys.empty()) {
+		throw InvalidInputException("Table '%s' is not partitioned", table_name);
+	}
+	auto values = ParseGluePartitionSpec("glue_get_table_response", table, *partition);
+	GluePartitionInfo partition_info;
+	string partition_json;
+	if (!GlueAPI::GetPartition(context, catalog, table.database_name, table.name, values, partition_info,
+	                           &partition_json)) {
+		vector<string> spec;
+		for (idx_t i = 0; i < values.size(); i++) {
+			spec.push_back(table.partition_keys[i].name + "=" + values[i]);
+		}
+		throw CatalogException("Table '%s' has no partition %s", table_name, StringUtil::Join(spec, ", "));
+	}
+	return GlueDescribe(format, raw_json, &partition_json);
+}
 
 unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableFunctionBindInput &input,
                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
@@ -38,12 +93,35 @@ unique_ptr<FunctionData> GlueGetTableResponseBind(ClientContext &context, TableF
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", database_name, table_name,
 		                       name.Catalog().GetIdentifierName());
 	}
+	optional_ptr<const Value> format;
+	optional_ptr<const Value> partition;
+	for (auto &option : input.named_parameters) {
+		auto option_name = StringUtil::Lower(option.first.GetIdentifierName());
+		if (option_name == "format") {
+			format = &option.second;
+		} else if (option_name == "partition") {
+			partition = &option.second;
+		}
+	}
+	if (partition && !format) {
+		throw BinderException("glue_get_table_response: 'partition' describes a partition and needs a 'format'");
+	}
+	if (format) {
+		result->describe = true;
+		result->describe_rows =
+		    DescribeGlueTable(context, catalog, info, result->raw_json, ParseDescribeFormat(*format), partition);
+	}
 	result->table = info;
 	// Of() is null in a bare statement (nothing started the catalog's transaction); Get() starts it
 	auto &cache = *GlueTransaction::Get(context, catalog).cache;
 	auto fetched = make_shared_ptr<const GlueTableInfo>(std::move(info));
 	cache.GetTable(database_name, table_name, [&fetched]() { return fetched; });
 
+	if (result->describe) {
+		names = {"category", "name", "value", "comment"};
+		return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+		return std::move(result);
+	}
 	auto column_type = LogicalType::LIST(LogicalType::STRUCT(
 	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}));
 	auto map_type = LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR);
@@ -90,11 +168,24 @@ Value MapToValue(const unordered_map<string, string> &map) {
 
 void GlueGetTableResponseScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
 	auto &state = data.global_state->Cast<GlueGetTableResponseState>();
+	auto &bind_data = data.bind_data->Cast<GlueGetTableResponseBindData>();
+	if (bind_data.describe) {
+		auto &rows = bind_data.describe_rows;
+		idx_t count = 0;
+		for (; state.offset < rows.size() && count < STANDARD_VECTOR_SIZE; state.offset++, count++) {
+			auto &row = rows[state.offset];
+			output.data[0].Append(Value(row.category));
+			output.data[1].Append(Value(row.name));
+			output.data[2].Append(Value(row.value));
+			output.data[3].Append(Value(row.comment));
+		}
+		output.CheckCardinality(count);
+		return;
+	}
 	if (state.done) {
 		return;
 	}
 	state.done = true;
-	auto &bind_data = data.bind_data->Cast<GlueGetTableResponseBindData>();
 	auto &table = bind_data.table;
 
 	output.data[0].Append(Value(table.database_name));
@@ -212,6 +303,11 @@ TableFunction GetGlueGetDatabaseResponseFunction() {
 TableFunction GetGlueGetTableResponseFunction() {
 	TableFunction function("glue_get_table_response", {LogicalType::VARCHAR}, GlueGetTableResponseScan,
 	                       GlueGetTableResponseBind, GlueGetTableResponseInit);
+	// a description of the table (or one of its partitions) instead of the response
+	function.GetSignature().WithTypedKwargs("options", [](TypedKwargs &options) {
+		options.Add("format", LogicalType::VARCHAR);
+		options.Add("partition", LogicalType::ANY);
+	});
 	return function;
 }
 

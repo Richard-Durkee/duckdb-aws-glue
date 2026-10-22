@@ -886,6 +886,12 @@ void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataCh
 
 } // namespace
 
+vector<string> ParseGluePartitionSpec(const string &function_name, const GlueTableInfo &table, const Value &spec) {
+	GluePartitionTarget target;
+	target.table = table;
+	return ParsePartitionSpec(function_name, target, spec);
+}
+
 TableFunction GetGluePartitionsFunction() {
 	TableFunction function("glue_partitions", {LogicalType::VARCHAR}, GluePartitionsScan, GluePartitionsBind,
 	                       GluePartitionsInit);

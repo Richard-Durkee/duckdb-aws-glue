@@ -80,9 +80,11 @@ public:
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const vector<string> &values, const string &location);
-	//! Fetch a single partition by its values, returns false if it does not exist
+	//! Fetch a single partition by its values, returns false if it does not exist. 'raw_json' receives the complete
+	//! Glue Partition object as JSON.
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
+	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result,
+	                         string *raw_json = nullptr);
 	//! Register one partition of a Hive table. Returns false if it already exists and 'if_not_exists' is set, throws
 	//! a CatalogException if it already exists otherwise.
 	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,

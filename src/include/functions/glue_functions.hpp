@@ -5,6 +5,8 @@
 
 namespace duckdb {
 
+struct GlueColumn;
+
 //! Resolve the table argument of a glue_* function to a fully qualified name in a Glue catalog; a partially qualified
 //! name is resolved like in a query (search path, default catalog)
 QualifiedName ResolveGlueTableName(ClientContext &context, const string &function_name, const string &table_name);
@@ -17,6 +19,15 @@ TableFunction GetGlueGetTableResponseFunction();
 //! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and
 //! parameters as columns and the complete Glue Database object as VARIANT.
 TableFunction GetGlueGetDatabaseResponseFunction();
+//! glue_get_partition_response(table, {key: value, ...}): the Glue GetPartition response for one partition of a Hive
+//! table. One row with the values, location, SerDe, columns and parameters as columns and the complete Glue Partition
+//! object as VARIANT.
+TableFunction GetGlueGetPartitionResponseFunction();
+
+//! The 'columns' type of the glue_get_*_response functions: LIST(STRUCT(name, type, comment))
+LogicalType GlueColumnsType();
+Value GlueColumnsToValue(const vector<GlueColumn> &columns);
+Value GlueParametersToValue(const unordered_map<string, string> &parameters);
 
 //! glue_partitions('<catalog>.<schema>.<table>'): the partitions of a Hive table as registered in Glue, one row
 //! per partition with a typed column per partition key and the partition's location

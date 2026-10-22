@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context_state.hpp"
@@ -12,6 +13,7 @@
 
 namespace duckdb {
 class GlueCatalog;
+class GlueSchemaEntry;
 
 enum class GlueTransactionState { TRANSACTION_NOT_YET_STARTED, TRANSACTION_STARTED, TRANSACTION_FINISHED };
 
@@ -153,8 +155,25 @@ private:
 	unordered_map<string, CatalogCache> caches DUCKDB_GUARDED_BY(lock);
 };
 
+//! What an INSERT or CREATE TABLE AS into a Hive table changed, so that a failed statement can be taken back
+struct GlueHiveWrite {
+	string write_id;
+	string database_name;
+	string table_name;
+	//! The files of the write are named <write_id>_..., below this location
+	string location;
+	//! CREATE TABLE AS: the schema it created the table in, and the client to drop it with (the rollback runs when the
+	//! transaction has ended, too late to look up the secret)
+	optional_ptr<GlueSchemaEntry> created_table_schema;
+	std::shared_ptr<Aws::Glue::GlueClient> client;
+	//! The statement deleted its files itself (a failed partition registration does), so the undo need not look
+	bool files_deleted = false;
+};
+
 //! Glue has no transactional semantics in this extension: every DDL statement is executed against the Glue API
-//! immediately. The transaction exists because every attached database needs one, and carries the metadata cache.
+//! immediately. The transaction exists because every attached database needs one, and carries the metadata cache. It
+//! also keeps the Hive writes of the running statement: a write that is still there when the transaction ends belongs
+//! to a statement that failed, and is undone (UndoHiveWrite).
 class GlueTransaction : public Transaction {
 public:
 	GlueTransaction(GlueCatalog &glue_catalog, TransactionManager &manager, ClientContext &context);
@@ -166,6 +185,13 @@ public:
 
 	static GlueTransaction &Get(ClientContext &context, Catalog &catalog);
 
+	//! A Hive write starts: it is undone when the transaction ends before CompleteHiveWrite
+	void AddHiveWrite(GlueHiveWrite write);
+	//! The write, or null when it was not added or has completed; the pointer stays valid until then
+	optional_ptr<GlueHiveWrite> FindHiveWrite(const string &write_id);
+	//! The write's files are written and its partitions registered, nothing to undo
+	void CompleteHiveWrite(const string &write_id);
+
 public:
 	GlueCatalog &glue_catalog;
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
@@ -173,7 +199,15 @@ public:
 	shared_ptr<GlueTransactionCache> cache;
 
 private:
+	//! Undo the writes that did not complete: delete their files and, for CREATE TABLE AS, the table. Best effort: a
+	//! step that fails is logged, and nothing is done once the connection is gone
+	void UndoHiveWrites();
+	//! Delete the files, and the created table, of one write
+	static void UndoHiveWrite(ClientContext &context, GlueCatalog &catalog, GlueHiveWrite &write);
+
 	GlueTransactionState transaction_state;
+	mutex hive_writes_lock;
+	vector<unique_ptr<GlueHiveWrite>> hive_writes;
 };
 
 } // namespace duckdb

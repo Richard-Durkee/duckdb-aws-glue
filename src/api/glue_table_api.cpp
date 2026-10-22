@@ -430,6 +430,19 @@ void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog
 	});
 }
 
+void GlueAPI::DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
+                          GlueCatalog &catalog, const string &database_name, const string &table_name) {
+	// no GlueHttpClientContextScope: the connection's HTTP parameters need its transaction, the database's do not
+	Aws::Glue::Model::DeleteTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetName(table_name);
+	auto outcome = client->DeleteTable(request);
+	if (!outcome.IsSuccess() && !IsEntityNotFound(outcome)) {
+		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
+	}
+}
+
 void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           const string &table_name) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);

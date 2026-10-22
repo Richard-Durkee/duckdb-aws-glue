@@ -67,6 +67,8 @@ public:
 	GlueTableInfo table_info;
 	//! The directories of existing partitions not laid out as <key=value>, with their Glue values.
 	unordered_map<string, vector<string>> partition_directories;
+	//! Names the files of this write, and its entry in the Glue transaction
+	string write_id;
 };
 
 } // namespace duckdb

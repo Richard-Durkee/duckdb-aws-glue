@@ -134,8 +134,10 @@ public:
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
-
-private:
+	//! DeleteTable with a client taken earlier, for a rollback, which runs when the transaction has ended and the
+	//! secret can no longer be looked up. Leaves the metadata cache alone (the rollback clears it).
+	static void DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
+	                        GlueCatalog &catalog, const string &database_name, const string &table_name);
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret
 	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);
 };

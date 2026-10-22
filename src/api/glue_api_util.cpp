@@ -30,6 +30,10 @@ vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input)
 
 GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database) {
 	GlueDatabaseInfo result;
+	if (database.CatalogIdHasBeenSet()) {
+		result.catalog_id = ToStdString(database.GetCatalogId());
+	}
+	result.is_resource_link = database.TargetDatabaseHasBeenSet();
 	result.name = ToStdString(database.GetName());
 	result.description = ToStdString(database.GetDescription());
 	result.location_uri = ToStdString(database.GetLocationUri());

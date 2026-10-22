@@ -1,4 +1,6 @@
 #include "catalog/glue_view.hpp"
+#include "catalog/glue_catalog.hpp"
+#include "catalog/glue_view_names.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/common/sql_identifier.hpp"
@@ -23,16 +25,44 @@ const SelectStatement &GlueView::GetQuery() {
 	}
 	lock_guard<mutex> guard(parse_lock);
 	if (!parsed) {
+		unique_ptr<SelectStatement> statement;
 		try {
 			auto parser = Parser::GetBuiltinParser();
-			parsed = CreateViewInfo::ParseSelect(parser, select_sql);
+			statement = CreateViewInfo::ParseSelect(parser, select_sql);
 		} catch (std::exception &ex) {
 			ErrorData error(ex);
 			throw BinderException("Glue view \"%s.%s\" could not be parsed: %s", table_info.database_name,
 			                      table_info.name, error.RawMessage());
 		}
+		// set together: a failure here must not leave a parse without its ids
+		referenced_ids = GlueViewNames::ReferencedCatalogIds(*statement->node);
+		if (referenced_ids.empty()) {
+			GlueViewNames::PinToCatalog(*statement->node, catalog.GetName());
+		}
+		parsed = std::move(statement);
 	}
-	return *parsed;
+	if (referenced_ids.empty()) {
+		// only the view's own catalog, which DuckDB binds the view in
+		return *parsed;
+	}
+	// map stored catalog ids to the aliases attached now
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, referenced_ids);
+	string signature;
+	for (auto &entry : aliases) {
+		signature += entry.first.GetIdentifierName() + "=" + entry.second.GetIdentifierName() + ";";
+	}
+	auto existing = resolved.find(signature);
+	if (existing != resolved.end()) {
+		return *existing->second;
+	}
+	auto copy = unique_ptr_cast<SQLStatement, SelectStatement>(parsed->Copy());
+	GlueViewNames::ResolveForReading(glue_catalog, table_info.database_name + "." + table_info.name, aliases,
+	                                 *copy->node);
+	GlueViewNames::PinToCatalog(*copy->node, catalog.GetName());
+	auto &result = *copy;
+	resolved.emplace(std::move(signature), std::move(copy));
+	return result;
 }
 
 string GlueView::ToSQL() const {
@@ -48,7 +78,9 @@ string GlueView::RenderViewSql(const CreateViewInfo &info) {
 }
 
 unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntry &schema, const GlueTableInfo &table) {
-	auto sql = table.view_original_text.empty() ? table.view_expanded_text : table.view_original_text;
+	// shown: ViewOriginalText; executed: ViewExpandedText, by DuckDB views only (others are refused below)
+	auto sql = table.view_expanded_text.empty() ? table.view_original_text : table.view_expanded_text;
+	auto display_sql = table.view_original_text.empty() ? table.view_expanded_text : table.view_original_text;
 
 	// Why the view can not be used, if it can not: decided here so that listing and DROP work on any view and only
 	// SELECT / DESCRIBE report it
@@ -78,7 +110,7 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 		info.security_type = ViewSecurityType::SECURE_VIEW;
 	}
 	info.sql = string("CREATE ") + (info.security_type == ViewSecurityType::SECURE_VIEW ? "SECURE " : "") + "VIEW " +
-	           SQLIdentifier::ToString(table.name) + " AS " + sql + ";";
+	           SQLIdentifier::ToString(table.name) + " AS " + display_sql + ";";
 	if (!table.description.empty()) {
 		info.comment = Value(table.description);
 	}

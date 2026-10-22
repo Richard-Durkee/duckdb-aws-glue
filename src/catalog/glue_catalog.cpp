@@ -265,6 +265,24 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
                                                            const EntryLookupInfo &schema_lookup,
                                                            OnEntryNotFound if_not_found) {
 	auto &schema_name = schema_lookup.GetEntryName();
+	// Glue databases are not nested: "x".db.t with an unknown catalog x arrives as [x, db]
+	vector<string> path;
+	for (auto &component : schema_lookup.GetQualifiedName().Path()) {
+		if (!component.empty()) {
+			path.push_back(component.GetIdentifierName());
+		}
+	}
+	if (path.size() > 1 && StringUtil::CIEquals(path[0], GetName().GetIdentifierName())) {
+		path.erase(path.begin());
+	}
+	if (path.size() > 1) {
+		if (if_not_found == OnEntryNotFound::RETURN_NULL) {
+			return nullptr;
+		}
+		throw CatalogException(schema_lookup.GetErrorContext(),
+		                       "Glue database \"%s\" does not exist: Glue databases are not nested",
+		                       schema_lookup.GetQualifiedName().ToString());
+	}
 	auto &context = transaction.GetContext();
 	auto entry = schemas.GetEntry(context, schema_name);
 	if (!entry) {
@@ -275,6 +293,46 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 		                       schema_name);
 	}
 	return &entry->Cast<SchemaCatalogEntry>();
+}
+
+//! "<12-digit account>" or "<12-digit account>:..."
+static bool StartsWithAccountId(const string &path) {
+	constexpr auto num_digits_in_aws_account_id = 12;
+	if (path.size() < num_digits_in_aws_account_id) {
+		return false;
+	}
+	for (idx_t i = 0; i < num_digits_in_aws_account_id; i++) {
+		if (!StringUtil::CharacterIsDigit(path[i])) {
+			return false;
+		}
+	}
+	return path.size() == num_digits_in_aws_account_id || path[num_digits_in_aws_account_id] == ':';
+}
+
+string GlueCatalog::KnownCatalogId() {
+	{
+		lock_guard<mutex> guard(reported_id_lock);
+		if (!reported_catalog_id.empty()) {
+			return reported_catalog_id;
+		}
+	}
+	return StartsWithAccountId(options.catalog_id) ? options.catalog_id : string();
+}
+
+string GlueCatalog::FetchCatalogId(ClientContext &context) {
+	{
+		lock_guard<mutex> guard(reported_id_lock);
+		if (!reported_catalog_id.empty()) {
+			return reported_catalog_id;
+		}
+	}
+	// outside the lock, so that a read (KnownCatalogId) never waits on a Glue call
+	auto catalog_id = GlueAPI::GetReportedCatalogId(context, *this);
+	lock_guard<mutex> guard(reported_id_lock);
+	if (reported_catalog_id.empty()) {
+		reported_catalog_id = catalog_id;
+	}
+	return reported_catalog_id;
 }
 
 void GlueCatalog::ThrowIfInExplicitTransaction(ClientContext &context) {

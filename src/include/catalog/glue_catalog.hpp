@@ -61,6 +61,9 @@ public:
 	void DropSchema(ClientContext &context, DropInfo &info) override;
 	void OnDetach(ClientContext &context) override;
 	void ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) override;
+	//! Serves a single-name equality on schema_name with one database lookup instead of listing every database
+	vector<reference<SchemaCatalogEntry>> GetSchemasForScan(ClientContext &context,
+	                                                        const SchemaScanFilters &filters) override;
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();

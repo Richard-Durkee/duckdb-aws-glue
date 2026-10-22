@@ -68,6 +68,15 @@ public:
 	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata.
 	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                               const string &table_name, const vector<GlueColumn> &columns);
+	//! Replace the partition keys of a table, keeping everything else of its Glue definition as is. Only the names,
+	//! types and comments of the partition keys are overwritten; the StorageDescriptor and registered partitions are
+	//! untouched. Used for COMMENT ON COLUMN on a partition key.
+	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                     const string &table_name, const vector<GlueColumn> &partition_keys);
+	//! Replace the description of a table (Glue's Table.Description), keeping everything else of its Glue definition
+	//! as is. An empty description clears it.
+	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                   const string &table_name, const string &description);
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
 	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                             const string &table_name, const string &location);

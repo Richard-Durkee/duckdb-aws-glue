@@ -11,11 +11,14 @@
 namespace duckdb {
 struct CreateTableInfo;
 struct SetColumnCommentInfo;
+struct SetCommentInfo;
 
 //! Options accepted in CREATE TABLE ... WITH (...) for Glue tables
 struct GlueCreateTableOptions {
 	//! Optional explicit S3 location of the table
 	string location;
+	//! Optional description of the table (comment = '...'), stored as Glue's Table.Description
+	string description;
 	//! The file format of the table (format = 'parquet' | 'csv' | 'json' | 'avro'), parquet by default
 	HiveFileFormat format = HiveFileFormat::PARQUET;
 	//! csv only: delimiter, quote and escape (single characters; quote and escape empty unless given)
@@ -83,6 +86,8 @@ private:
 	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column
 	void SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info);
+	//! COMMENT ON TABLE: Glue stores it as the table's Description
+	void SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info);
 
 public:
 	//! The database definition as returned by Glue

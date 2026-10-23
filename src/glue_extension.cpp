@@ -66,6 +66,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "not write one: INSERT into it and CREATE TABLE ... AS with these options are refused. "
 	                          "Default false.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+	config.AddExtensionOption(
+	    "experimental_glue_view_enable_external_catalogs",
+	    "Allow Glue views over tables of other kinds of catalogs, stored by the catalog's type and "
+	    "the alias it is attached under: a view reads only where a catalog of that type is "
+	    "attached under that alias. Default false.",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	config.AddExtensionOption("glue_metadata_cache_scope",
 	                          "How long resolved Glue metadata (tables, partitions) is reused: 'transaction' (default) "
 	                          "re-resolves per transaction, so writes from other sessions become visible between "
@@ -96,6 +102,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
+	config.AddExtensionOption("hive_csv_parallel",
+	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
+	                          "twice `threads` files. False reads one thread per file, which a file that holds a line "
+	                          "break inside a quoted field needs: the parallel scanner refuses such a field together "
+	                          "with the NULL padding of short rows. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();
@@ -110,6 +123,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
 	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());
+	loader.RegisterFunction(GetGlueGetPartitionResponseFunction());
 	loader.RegisterFunction(GetGluePartitionsFunction());
 	loader.RegisterFunction(GetGlueAddPartitionFunction());
 	loader.RegisterFunction(GetGlueDropPartitionFunction());

@@ -36,16 +36,27 @@ The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `rea
 LazySimpleSerDe and OpenCSVSerde with `read_csv` (columns by position), the Hive and the OpenX JsonSerDe with
 `read_json` (one object per line, keys by name; SerDe properties see below) and AvroSerDe with `read_avro`
 (columns by name) from the avro extension, which is loaded on demand. Other SerDes (ORC, Ion, ...) are not supported.
+A parquet `BYTE_ARRAY` column without a `STRING` annotation (as Impala and older Hive writers produce) is read as
+UTF-8 text when Glue declares the column `string` (bytes that are not UTF-8 are an error), and as bytes when it
+declares it `binary`, whatever the session's `binary_as_string`. In a table that declares a `binary` column (or field),
+such bytes inside an `array`, `struct` or `map` column keep the escaped form the reader gives a BLOB.
 Text tables are read the way their SerDe reads them:
 
 - LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
   is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
   quoted.
 - OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
-  doubled quotes Hive writes). An empty field is an empty string; there is no NULL.
+  doubled quotes Hive writes). An empty field is an empty string; there is no NULL. A line break inside a quoted field
+  fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner
+  does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
+  file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
+  file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
+  broken rows, a difference this extension does not reproduce.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
-  NULL. Fields are converted with `TRY_CAST`, which differs from Hive in details: surrounding spaces are ignored,
-  `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
+  NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
+  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
+  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
+  (Hive: a row of NULLs).
 - `skip.header.line.count` lines are skipped at the start of every file.
 - OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
   `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
@@ -69,8 +80,14 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 
 - The data files are those below the location of every partition Glue lists (`GetPartitions`), at any depth, or
   below the table location for an unpartitioned table. Partition locations need not follow the `<key>=<value>`
-  layout. Files and directories named `_*` or `.*` are skipped. When one partition's location lies inside another's,
+  layout. Files and directories named `_*` or `.*`, `*_$folder$` directory markers and objects the listing reports as
+  zero bytes are skipped.
+  When one partition's location lies inside another's,
   a file belongs to the deepest one. A table without data files (just created) scans as empty.
+- A partitioned table with Athena partition projection (`projection.enabled = true`) is refused on read and write
+  rather than scanned: Athena derives its partitions from the `projection.*` parameters and ignores the registered
+  ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
+  `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
   partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
   build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
@@ -100,6 +117,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
 - The schema is Glue's, data columns first and partition keys last, in `PARTITIONED BY` order. Files are matched
   by column name: a column a file does not have (added after the file was written) reads as NULL, a column with
   a different type in the file is cast, and file columns Glue does not list are ignored.
+- Besides `filename`, the scan has three of the metadata columns of Trino's Hive connector, which `SELECT *` leaves out:
+  `"$path"` (the data file, as `filename`), `"$file_size"` (`BIGINT`) and `"$file_modified_time"`
+  (`TIMESTAMP WITH TIME ZONE`), as the listing reports them. `hive_scan()` has them too.
 
 The SerDe of the Glue table decides the reader: ParquetHiveSerDe reads with `read_parquet`, LazySimpleSerDe and
 OpenCSVSerde with `read_csv` (columns by position, no header unless `skip.header.line.count` is 1, delimiter
@@ -161,8 +181,9 @@ their codec themselves.
   BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped. `ALTER COLUMN ... TYPE ...
   USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
-  for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`. Another
-  codec is an error.
+  for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`, and avro
+  with `avro.output.codec`. A table without its format's codec parameter is written with `write_compression`, if it
+  records one. Another codec is an error.
 - `ALTER TABLE ... RENAME COLUMN` is supported for csv tables, whose files are read by position. Parquet, json and
   avro files are matched by name, so a rename would make the existing data read as NULL and is refused (replace the
   column with `glue_replace_columns` to do that deliberately). Partition keys, bucket and sort columns can not be
@@ -210,6 +231,14 @@ this connection's cache: a write through it, a rollback, or DETACH.
   `CREATE VIEW ... WITH (DEFER_BINDING)` create a Glue view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB.
   `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database. The view's
   columns store their DuckDB types (e.g. `HUGEINT`, `INTEGER`), not Glue types.
+- A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
+  `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
+  table, alias or column: use a table alias with another name.
+- With `SET experimental_glue_view_enable_external_catalogs = true`, a view can also read tables of other kinds of
+  catalogs (e.g. Iceberg, Postgres, a DuckDB file). Such a table is stored as `"external:<type>:<alias>".<schema>.<table>`,
+  with the alias the catalog was attached under, so the view is tied to that alias: it reads wherever a catalog of that
+  type is attached under that alias, whichever catalog that is, and fails where none is. Reading needs no setting.
+  Catalogs in memory are refused.
 - `SHOW [ALL] TABLES`, `duckdb_views()`, `information_schema.views` and `duckdb_columns()` list every view of a database,
   including views written by other engines. Only views written by DuckDB can be queried, replaced or dropped.
 - `DROP VIEW [IF EXISTS] db.v` deletes the view.
@@ -251,6 +280,7 @@ query.
 | function | Hive statement |
 |----------|------------------|
 | `glue_partitions('cat.db.t')` | `SHOW PARTITIONS`: one row per registered partition, a typed column per partition key plus `location` |
+| `glue_get_partition_response('cat.db.t', {dt: '2016-05-14', country: 'IN'})` | `DESCRIBE FORMATTED ... PARTITION (...)`: the partition's location, SerDe, columns and parameters, and its complete Glue definition in `response` |
 | `CALL glue_add_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, location := 's3://...', if_not_exists := false)` | `ALTER TABLE ADD [IF NOT EXISTS] PARTITION (...) [LOCATION ...]`; without `location` the partition lives at `<table location>/dt=2016-05-14/country=IN` |
 | `CALL glue_drop_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, if_exists := false)` | `ALTER TABLE DROP [IF EXISTS] PARTITION (...)`; the data files stay in S3 |
 | `CALL glue_rename_partition('cat.db.t', {dt: '2016-05-14', country: 'IN'}, {dt: '2016-05-15', country: 'IN'})` | `ALTER TABLE PARTITION (...) RENAME TO PARTITION (...)`; changes the values, keeps the location |
@@ -304,6 +334,15 @@ parameters as columns, plus the complete Glue `Table` object as a VARIANT in `re
 (`'default.some_table'`, or `'some_table'` after `USE my_datalake.default`) is resolved like in a query, through the
 table's catalog entry, so for a table DuckDB can not read (e.g. an unsupported column type) give the fully qualified
 name.
+
+`glue_get_partition_response('<table>', {dt: '2024-01-01', ...})` does the same for one partition of a Hive table:
+its values, location, SerDe, columns and parameters as columns, plus the complete Glue `Partition` object in
+`response`. The partition is given like for the other partition functions, as a struct naming every partition key.
+
+```sql
+SELECT location, response.StorageDescriptor.InputFormat
+FROM glue_get_partition_response('my_datalake.default.some_table', {dt: '2024-01-01'});
+```
 
 `glue_get_database_response('<catalog>.<database>')` does the same for a Glue database (a DuckDB schema): its
 description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
@@ -424,11 +463,11 @@ TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
 `--root-dir duckdb` (`'benchmark/tpcds/sf1/.*' --sf 10` for TPC-DS at SF10).
 
 `.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
-their timings (5 runs each) in a job per format: the TPC-H and TPC-DS benchmarks of that format, plus
-`benchmark/*.benchmark`, `benchmark/pushdown/` and `benchmark/optimizer/` in the parquet job. To keep the jobs short it
-skips the queries that take under 0.6s on parquet at SF1 (TPC-H q06 and TPC-DS q96, mostly filtered scans of one table,
-among them), and per format the TPC-DS queries that time out or come close: q85 on parquet (the base build's join
-order takes ~75s at 2 threads) and q64 and q72 on avro (avro tables are not sampled for their row count).
+their timings (5 runs each) in two jobs of about three minutes, so it runs only a few join-heavy TPC-H and TPC-DS
+queries. The parquet job runs `benchmark/*.benchmark`, `benchmark/pushdown/`, the parquet benchmarks of
+`benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
+`benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
+other queries and the json and avro TPC benchmarks only run locally.
 
 ## Building
 

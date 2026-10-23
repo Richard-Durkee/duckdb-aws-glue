@@ -30,8 +30,8 @@ public:
 //! Thin wrapper around the AWS SDK Glue client
 class GlueAPI {
 public:
-	//! Verify that the catalog can be reached with the configured credentials
-	static void VerifyConnection(ClientContext &context, GlueCatalog &catalog);
+	//! CatalogId from the GetDatabases response
+	static string GetReportedCatalogId(ClientContext &context, GlueCatalog &catalog);
 
 	//! List all databases of the catalog
 	static vector<GlueDatabaseInfo> GetDatabases(ClientContext &context, GlueCatalog &catalog);
@@ -68,6 +68,15 @@ public:
 	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata.
 	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                               const string &table_name, const vector<GlueColumn> &columns);
+	//! Replace the partition keys of a table, keeping everything else of its Glue definition as is. Only the names,
+	//! types and comments of the partition keys are overwritten; the StorageDescriptor and registered partitions are
+	//! untouched. Used for COMMENT ON COLUMN on a partition key.
+	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                     const string &table_name, const vector<GlueColumn> &partition_keys);
+	//! Replace the description of a table (Glue's Table.Description), keeping everything else of its Glue definition
+	//! as is. An empty description clears it.
+	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                   const string &table_name, const string &description);
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
 	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                             const string &table_name, const string &location);
@@ -83,6 +92,11 @@ public:
 	//! Fetch a single partition by its values, returns false if it does not exist
 	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                         const string &table_name, const vector<string> &values, GluePartitionInfo &result);
+	//! GetPartition with the partition's storage descriptor and parameters. 'raw_json' (optional) receives the Glue
+	//! Partition object of the response as JSON.
+	static bool GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                         const string &table_name, const vector<string> &values, GluePartitionDetails &result,
+	                         string *raw_json = nullptr);
 	//! Register one partition of a Hive table. Returns false if it already exists and 'if_not_exists' is set, throws
 	//! a CatalogException if it already exists otherwise.
 	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,

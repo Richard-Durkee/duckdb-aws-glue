@@ -15,9 +15,11 @@
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/type_visitor.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -110,14 +112,25 @@ string HiveScanInfo::Describe() const {
 	return database_name + "." + table_name;
 }
 
-//! Whether a path below a location is hidden: Hive skips _* and .* files and directories
-static bool IsHiddenPath(const string &relative_path) {
-	for (auto &component : StringUtil::Split(relative_path, '/')) {
+//! Whether a listed object below 'prefix' (the location, with its trailing slash) is a data file. Hive skips _* and .*
+//! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
+//! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
+//! file of any format the reader opens
+static bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
+	if (!StringUtil::StartsWith(file.path, prefix)) {
+		return false;
+	}
+	auto components = StringUtil::Split(file.path.substr(prefix.size()), '/');
+	for (auto &component : components) {
 		if (component.empty() || component[0] == '_' || component[0] == '.') {
-			return true;
+			return false;
 		}
 	}
-	return false;
+	if (components.empty() || StringUtil::EndsWith(components.back(), "_$folder$")) {
+		return false;
+	}
+	auto size = ListedFileSize(file);
+	return !size.IsValid() || size.GetIndex() > 0;
 }
 
 //! Glue tables only: a hive_scan root has no catalog, and no write through the extension clears its listing
@@ -139,7 +152,7 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 	}
 	auto prefix = directory + "/";
 	for (auto &file : HiveQueryCache::Get(context)->GetDirectoryListing(context, directory, cached)->GetAllFiles()) {
-		if (!StringUtil::StartsWith(file.path, prefix) || IsHiddenPath(file.path.substr(prefix.size()))) {
+		if (!IsDataFile(file, prefix)) {
 			continue;
 		}
 		files.push_back(file);
@@ -356,7 +369,7 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	auto root_prefix = root + "/";
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
-		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
+		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
 		auto partition_index = OwningPartition(file.path, root.size() + 1);
@@ -495,7 +508,7 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
 			continue;
 		}
-		if (!StringUtil::StartsWith(file.path, root_prefix) || IsHiddenPath(file.path.substr(root_prefix.size()))) {
+		if (!IsDataFile(file, root_prefix)) {
 			continue;
 		}
 		in_sampled = sampled.IsValid() && StringUtil::StartsWith(file.path, sampled_prefix);
@@ -660,6 +673,29 @@ static optional_ptr<TableCatalogEntry> HiveScanGetTableEntry(optional_ptr<const 
 	return multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo().table;
 }
 
+static virtual_column_map_t HiveScanGetVirtualColumns(ClientContext &context, optional_ptr<FunctionData> bind_data_p) {
+	auto &bind_data = bind_data_p->Cast<MultiFileBindData>();
+	auto &info = bind_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	virtual_column_map_t result;
+	if (info.format_virtual_columns) {
+		result = info.format_virtual_columns(context, bind_data_p);
+	}
+	HiveMultiFileReader::AddMetadataColumns(result);
+	// the column mapper looks the types of the virtual columns up here
+	HiveMultiFileReader::AddMetadataColumns(bind_data.virtual_columns);
+	return result;
+}
+
+//! Whether a column of the table, or a field nested in one, is declared binary (BLOB)
+static bool HasBinaryColumn(const HiveScanInfo &scan_info) {
+	for (auto &type : scan_info.types) {
+		if (TypeVisitor::Contains(type, LogicalTypeId::BLOB)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -676,6 +712,10 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	switch (scan_info->file_format) {
 	case HiveFileFormat::PARQUET:
 		function_name = "read_parquet";
+		// the Glue type decides how a BYTE_ARRAY column without a STRING annotation reads, not the session setting.
+		// A table without a binary column has the reader read such a column as text (it verifies the UTF-8); with a
+		// binary column the reader keeps the bytes, and InitializeReader decodes the ones Glue declares string
+		param_map["binary_as_string"] = Value::BOOLEAN(!HasBinaryColumn(*scan_info));
 		break;
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table
@@ -695,6 +735,14 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);
 			param_map["strict_mode"] = Value::BOOLEAN(false);
+			if (!scan_info->csv_options.quote.empty()) {
+				// the parallel scanner refuses null_padding together with a quoted line break (hive_csv_parallel)
+				Value parallel;
+				if (context.TryGetCurrentSetting("hive_csv_parallel", parallel) && !parallel.IsNull() &&
+				    !BooleanValue::Get(parallel)) {
+					param_map["parallel"] = Value::BOOLEAN(false);
+				}
+			}
 		}
 		break;
 	case HiveFileFormat::JSON:
@@ -733,6 +781,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	// and the row count comes from a sampled file rather than the format's constant
 	scan_function.cardinality = HiveScanCardinality;
 	scan_function.get_table_entry = HiveScanGetTableEntry;
+	scan_info->format_virtual_columns = scan_function.get_virtual_columns;
+	scan_function.get_virtual_columns = HiveScanGetVirtualColumns;
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
@@ -753,6 +803,16 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 //===--------------------------------------------------------------------===//
 // HiveMultiFileReader
 //===--------------------------------------------------------------------===//
+constexpr column_t HiveMultiFileReader::COLUMN_IDENTIFIER_PATH;
+constexpr column_t HiveMultiFileReader::COLUMN_IDENTIFIER_FILE_SIZE;
+constexpr column_t HiveMultiFileReader::COLUMN_IDENTIFIER_FILE_MODIFIED_TIME;
+
+void HiveMultiFileReader::AddMetadataColumns(virtual_column_map_t &result) {
+	result.emplace(COLUMN_IDENTIFIER_PATH, TableColumn("$path", LogicalType::VARCHAR));
+	result.emplace(COLUMN_IDENTIFIER_FILE_SIZE, TableColumn("$file_size", LogicalType::BIGINT));
+	result.emplace(COLUMN_IDENTIFIER_FILE_MODIFIED_TIME, TableColumn("$file_modified_time", LogicalType::TIMESTAMP_TZ));
+}
+
 HiveMultiFileReader::HiveMultiFileReader(shared_ptr<HiveScanInfo> scan_info_p) : scan_info(std::move(scan_info_p)) {
 }
 
@@ -1018,6 +1078,34 @@ unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDyna
 //===--------------------------------------------------------------------===//
 // Per file
 //===--------------------------------------------------------------------===//
+//! The size and modification time the listing reported for the file, asked of the file system when it did not
+static FileMetadata DataFileMetadata(ClientContext &context, const OpenFileInfo &file) {
+	FileMetadata result;
+	if (file.extended_info) {
+		auto &options = file.extended_info->options;
+		auto size = options.find("file_size");
+		if (size != options.end() && !size->second.IsNull()) {
+			result.file_size = size->second.GetValue<int64_t>();
+		}
+		auto last_modified = options.find("last_modified");
+		if (last_modified != options.end() && !last_modified->second.IsNull()) {
+			result.last_modification_time = last_modified->second.GetValue<timestamp_t>();
+		}
+	}
+	if (result.file_size < 0 || !result.last_modification_time.IsFinite()) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		auto handle = fs.OpenFile(file, FileFlags::FILE_FLAGS_READ);
+		auto stats = handle->Stats();
+		if (result.file_size < 0) {
+			result.file_size = stats.file_size;
+		}
+		if (!result.last_modification_time.IsFinite()) {
+			result.last_modification_time = stats.last_modification_time;
+		}
+	}
+	return result;
+}
+
 void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const MultiFileOptions &file_options,
                                        const MultiFileReaderBindData &options,
                                        const vector<MultiFileColumnDefinition> &global_columns,
@@ -1035,9 +1123,32 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	if (!info.partition_keys.empty()) {
 		partition = &info.GetPartitionOfFile(reader_data.reader->GetFileName());
 	}
+	auto &reader = *reader_data.reader;
+	bool file_metadata_read = false;
+	FileMetadata file_metadata;
 	for (idx_t i = 0; i < global_column_ids.size(); i++) {
 		auto &column_id = global_column_ids[i];
 		if (column_id.IsVirtualColumn()) {
+			auto virtual_id = column_id.GetPrimaryIndex();
+			if (virtual_id == COLUMN_IDENTIFIER_PATH) {
+				reader_data.constant_map.Add(MultiFileGlobalIndex(i), Value(reader.GetFileName()));
+			} else if (virtual_id == COLUMN_IDENTIFIER_FILE_SIZE ||
+			           virtual_id == COLUMN_IDENTIFIER_FILE_MODIFIED_TIME) {
+				if (!file_metadata_read) {
+					file_metadata = DataFileMetadata(context, reader.file);
+					file_metadata_read = true;
+				}
+				Value value;
+				if (virtual_id == COLUMN_IDENTIFIER_FILE_SIZE) {
+					value = file_metadata.file_size < 0 ? Value(LogicalType::BIGINT)
+					                                    : Value::BIGINT(file_metadata.file_size);
+				} else {
+					auto &last_modified = file_metadata.last_modification_time;
+					value = last_modified.IsFinite() ? Value::TIMESTAMPTZ(timestamp_tz_t(last_modified))
+					                                 : Value(LogicalType::TIMESTAMP_TZ);
+				}
+				reader_data.constant_map.Add(MultiFileGlobalIndex(i), std::move(value));
+			}
 			continue;
 		}
 		auto &global_column = global_columns[column_id.GetPrimaryIndex()];
@@ -1076,6 +1187,28 @@ static void MakeTryCast(ClientContext &context, unique_ptr<Expression> &expr) {
 	expr = BoundCastExpression::AddCastToType(context, std::move(child), target_type, true);
 }
 
+//! A parquet BYTE_ARRAY column without a STRING annotation (Impala, older Hive and parquet-mr writers) reads as a
+//! BLOB when the table has a binary column (binary_as_string = false, BindHiveScan), while Glue declares this column
+//! 'string'. The reader's cast of that BLOB to VARCHAR would escape every non-ASCII byte (\xC3\xBC for ü); the bytes
+//! are the text, so decode() them as UTF-8 instead, as Hive and Trino do, which fails when they are not UTF-8. Only a
+//! column's own cast is replaced: the same bytes inside a LIST, STRUCT or MAP are converted by the reader's nested
+//! cast and keep the escaped form.
+static void DecodeBlobAsText(ClientContext &context, unique_ptr<Expression> &expr) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	// the whole type, not the id: a cast to an alias of VARCHAR such as JSON must keep its own conversion
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (cast.GetReturnType() != LogicalType::VARCHAR ||
+	    BoundCastExpression::Child(cast).GetReturnType() != LogicalType::BLOB) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
+	FunctionBinder function_binder(context);
+	expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, "decode", std::move(children));
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1084,11 +1217,27 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
                                                            ClientContext &context, MultiFileGlobalState &gstate) {
 	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
 	                                                table_filters, context, gstate);
+	if (ScanInfo().file_format == HiveFileFormat::PARQUET) {
+		// without a binary column the reader reads unannotated BYTE_ARRAY columns as text itself (binary_as_string)
+		if (HasBinaryColumn(ScanInfo())) {
+			for (auto &expr : reader_data.expressions) {
+				DecodeBlobAsText(context, expr);
+			}
+			// a filter pushed into the reader evaluates the column's conversion there, on a copy of the expression
+			for (auto &entry : reader_data.reader->expression_map) {
+				DecodeBlobAsText(context, entry.second.expression);
+			}
+		}
+		return result;
+	}
 	if (!ScanInfo().csv_options.serde_fields) {
 		return result;
 	}
 	if (!reader_data.reader->expression_map.empty()) {
 		throw InternalException("Hive text table '%s': a filter was pushed into read_csv", ScanInfo().Describe());
+	}
+	if (!ScanInfo().csv_options.null_for_invalid_data) {
+		return result;
 	}
 	for (auto &expr : reader_data.expressions) {
 		MakeTryCast(context, expr);

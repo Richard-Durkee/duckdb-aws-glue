@@ -1,5 +1,6 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_view.hpp"
+#include "catalog/glue_view_names.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
@@ -265,6 +266,9 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 		} else if (StringUtil::CIEquals(key, "location")) {
 			result.location = string_value;
 			StringUtil::RTrim(result.location, "/");
+		} else if (StringUtil::CIEquals(key, "comment")) {
+			// Stored as Glue's Table.Description
+			result.description = string_value;
 		} else if (StringUtil::CIEquals(key, "delimiter") || StringUtil::CIEquals(key, "quote") ||
 		           StringUtil::CIEquals(key, "escape")) {
 			// the csv dialect: Hive SerDes take single characters
@@ -384,6 +388,15 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	GlueTableInfo table;
 	table.name = table_name;
 	table.database_name = database_info.name;
+	// Table description: `WITH (comment = '...')` is the primary spelling (DuckDB's parser accepts a trailing
+	// `COMMENT '...'` only on CREATE SCHEMA, not CREATE TABLE); CreateInfo::comment is a Value and set by a
+	// future parser or an engine wrapper, so honor it too and let the WITH value override when both are given.
+	if (!base.comment.IsNull()) {
+		table.description = base.comment.ToString();
+	}
+	if (!options.description.empty()) {
+		table.description = options.description;
+	}
 	table.location =
 	    options.location.empty() ? glue_catalog.GetTableLocation(database_info, table_name) : options.location;
 	table.parameters = options.parameters;
@@ -413,6 +426,9 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 		GlueColumn glue_column;
 		glue_column.name = column.Name().GetIdentifierName();
 		glue_column.type = GlueTypes::FromLogicalType(column.Type());
+		if (!column.Comment().IsNull()) {
+			glue_column.comment = column.Comment().ToString();
+		}
 		table.columns.push_back(std::move(glue_column));
 	}
 	for (auto &partition_column : partition_columns) {
@@ -420,6 +436,9 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 		GlueColumn glue_column;
 		glue_column.name = column.Name().GetIdentifierName();
 		glue_column.type = GlueTypes::FromLogicalType(column.Type());
+		if (!column.Comment().IsNull()) {
+			glue_column.comment = column.Comment().ToString();
+		}
 		table.partition_keys.push_back(std::move(glue_column));
 	}
 	if (table.columns.empty()) {
@@ -513,15 +532,39 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	GlueViewInfo view;
 	view.database_name = database_info.name;
 	view.name = view_name;
+	// a DuckDB view's ViewOriginalText: the user's SQL; ViewExpandedText: tables of this catalog as db.t, of other
+	// catalogs by their Glue catalog id or "external:<type>:<alias>"
 	view.sql = GlueView::RenderViewSql(info);
-	try {
-		// what is stored must read back: never write a view DuckDB itself could not parse
-		auto parser = Parser::GetBuiltinParser();
-		CreateViewInfo::ParseSelect(parser, view.sql);
-	} catch (std::exception &ex) {
-		ErrorData error(ex);
-		throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
-		                        error.RawMessage(), view.sql);
+	auto defer_binding = info.binding_mode == CreateViewBindingMode::SKIP_BINDING;
+	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
+	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node, defer_binding);
+	view.expanded_sql = expanded->ToString();
+	if (!defer_binding) {
+		// names were resolved by lookups, not the binder: check they bind to the same column types (not names:
+		// an unaliased expression is named after its text, which the rewrite changes)
+		auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
+		auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
+		GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
+		GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
+		vector<LogicalType> types;
+		vector<Identifier> names;
+		Binder::BindView(context, *check, catalog.GetName(), name, nullptr, info.aliases, types, names);
+		if (types != info.types) {
+			throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the "
+			                      "view query:\n%s",
+			                      view_name, view.expanded_sql);
+		}
+	}
+	for (auto &text : {view.sql, view.expanded_sql}) {
+		try {
+			// what is stored must read back: never write a view DuckDB itself could not parse
+			auto parser = Parser::GetBuiltinParser();
+			CreateViewInfo::ParseSelect(parser, text);
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			throw InternalException("The SQL rendered for Glue view \"%s\" does not parse: %s\n%s", view_name,
+			                        error.RawMessage(), text);
+		}
 	}
 	view.secure = info.security_type == ViewSecurityType::SECURE_VIEW;
 	// the stored columns carry the column alias list of CREATE VIEW: an alias replaces the query's own name
@@ -669,20 +712,34 @@ void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &tab
 		                       database_info.name);
 	}
 	auto &name = info.column_name.GetIdentifierName();
-	for (auto &key : current.partition_keys) {
-		if (StringUtil::CIEquals(key.name, name)) {
-			throw NotImplementedException("Comments on the partition keys of Glue tables are not supported yet");
-		}
+	auto by_name = [&](const GlueColumn &column) {
+		return StringUtil::CIEquals(column.name, name);
+	};
+	auto partition_key = std::find_if(current.partition_keys.begin(), current.partition_keys.end(), by_name);
+	if (partition_key != current.partition_keys.end()) {
+		// NULL removes the comment
+		partition_key->comment = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
+		GlueAPI::UpdateTablePartitionKeys(context, glue_catalog, database_info.name, table_name,
+		                                  current.partition_keys);
+		RefreshTable(context, table_name);
+		return;
 	}
 	auto columns = current.columns;
-	auto column = std::find_if(columns.begin(), columns.end(),
-	                           [&](const GlueColumn &column) { return StringUtil::CIEquals(column.name, name); });
+	auto column = std::find_if(columns.begin(), columns.end(), by_name);
 	if (column == columns.end()) {
 		throw CatalogException("Table \"%s\" does not have a column with name \"%s\"", table_name, name);
 	}
 	// NULL removes the comment
 	column->comment = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
 	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	RefreshTable(context, table_name);
+}
+
+void GlueSchemaEntry::SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	// NULL removes the description
+	auto description = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
+	GlueAPI::UpdateTableDescription(context, glue_catalog, database_info.name, table_name, description);
 	RefreshTable(context, table_name);
 }
 
@@ -718,6 +775,10 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	}
 	if (info.type == AlterType::SET_COLUMN_COMMENT) {
 		SetColumnComment(context, table_name, info.Cast<SetColumnCommentInfo>());
+		return;
+	}
+	if (info.type == AlterType::SET_COMMENT) {
+		SetTableComment(context, table_name, info.Cast<SetCommentInfo>());
 		return;
 	}
 	if (info.type != AlterType::ALTER_TABLE) {

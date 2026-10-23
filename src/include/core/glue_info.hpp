@@ -29,6 +29,10 @@ public:
 
 //! A Glue "Database", exposed as a DuckDB schema
 struct GlueDatabaseInfo {
+	//! the catalog the database resides in
+	string catalog_id;
+	//! a Glue resource link (TargetDatabase set): a database of another catalog
+	bool is_resource_link = false;
 	string name;
 	string description;
 	//! Optional S3 location tables of this database default to
@@ -97,6 +101,9 @@ public:
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
 	string GetParameter(const string &key) const;
 	bool IsBucketed() const;
+	//! Whether this is a partitioned table with Athena partition projection on (projection.enabled): Athena then
+	//! derives the partitions from the projection.* parameters and ignores the ones registered in Glue
+	bool IsPartitionProjected() const;
 	//! Hive-style description of the bucketing, used in error messages
 	string DescribeBucketing() const;
 	//! The SerDe, derived from serde_library; throws NotImplementedException for other SerDes
@@ -107,13 +114,15 @@ public:
 	bool TryGetProperty(const string &key, string &result) const;
 	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
 	string GetFieldDelimiter() const;
-	//! The codec to write a csv / json table's files with (write.compression, else compressionType), uncompressed when
-	//! the table names none; throws for a codec DuckDB can not write. Files are read with the codec their extension
-	//! says, whatever the table records.
+	//! The codec to write a csv / json table's files with (write.compression, else write_compression, else
+	//! compressionType), uncompressed when the table names none; throws for a codec DuckDB can not write. Files are
+	//! read with the codec their extension says, whatever the table records.
 	FileCompressionType GetTextCompression() const;
 	//! The codec the table records for its files, as DuckDB's writer for 'format' names it ('null' for an uncompressed
 	//! avro file), empty when it records none; throws for a codec DuckDB can not write
 	string GetCodec(HiveFileFormat format) const;
+	//! The format's codec parameter 'key', else write_compression, empty when the table records neither
+	string GetCodecParameter(const string &key) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
 	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
@@ -143,8 +152,10 @@ struct GlueViewInfo {
 	//! The Glue database (a DuckDB schema) the view lives in
 	string database_name;
 	string name;
-	//! The SELECT as DuckDB prints it; unqualified names in it belong to database_name
+	//! ViewOriginalText: the SELECT as written
 	string sql;
+	//! ViewExpandedText: tables as <db>.<table>, of other Glue catalogs by catalog id (executed)
+	string expanded_sql;
 	//! The bound output columns; empty for a view created with DEFER_BINDING
 	vector<GlueColumn> columns;
 	bool secure = false;
@@ -161,6 +172,14 @@ struct GluePartitionInput {
 struct GluePartitionInfo {
 	vector<string> values;
 	string location;
+};
+
+//! A partition as GetPartition returns it: also its storage descriptor and parameters
+struct GluePartitionDetails : public GluePartitionInfo {
+	string serde_library;
+	unordered_map<string, string> serde_parameters;
+	vector<GlueColumn> columns;
+	unordered_map<string, string> parameters;
 };
 
 } // namespace duckdb

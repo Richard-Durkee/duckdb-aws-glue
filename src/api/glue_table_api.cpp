@@ -178,10 +178,18 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 		storage_descriptor.AddSortColumns(std::move(order));
 	}
 	parameters.emplace("EXTERNAL", "TRUE");
+	// Mirror the table description in Parameters.comment: the comment lives in both locations so
+	// readers of either see the same value.
+	if (!table.description.empty()) {
+		parameters.emplace("comment", table.description);
+	}
 
 	Aws::Glue::Model::TableInput table_input;
 	table_input.SetName(table.name);
 	table_input.SetTableType("EXTERNAL_TABLE");
+	if (!table.description.empty()) {
+		table_input.SetDescription(table.description);
+	}
 	table_input.SetStorageDescriptor(storage_descriptor);
 	if (!table.partition_keys.empty()) {
 		table_input.SetPartitionKeys(ToAwsColumns(table.partition_keys));
@@ -216,12 +224,11 @@ static void SetViewParameters(Aws::Map<Aws::String, Aws::String> &parameters, co
 	}
 }
 
-//! Glue's (Hive's) two view fields: the SQL as written and the SQL with names resolved. Both are free text and readers
-//! differ in which one they parse, so both carry the same DuckDB SQL - there is no separate expansion
+//! Glue's (Hive's) two view fields: the SQL as written (shown) and the SQL with every table as db.t (executed)
 static void SetViewDefinition(Aws::Glue::Model::TableInput &table_input, const GlueViewInfo &view) {
 	table_input.SetTableType("VIRTUAL_VIEW");
 	table_input.SetViewOriginalText(view.sql);
-	table_input.SetViewExpandedText(view.sql);
+	table_input.SetViewExpandedText(view.expanded_sql);
 	Aws::Glue::Model::StorageDescriptor storage_descriptor;
 	if (!view.columns.empty()) {
 		storage_descriptor.SetColumns(ToAwsColumns(view.columns));
@@ -356,6 +363,37 @@ void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, c
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetColumns(ToAwsColumns(columns));
 		table_input.SetStorageDescriptor(storage_descriptor);
+	});
+}
+
+void GlueAPI::UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                       const string &table_name, const vector<GlueColumn> &partition_keys) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdateTable");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+		table_input.SetPartitionKeys(ToAwsColumns(partition_keys));
+	});
+}
+
+void GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                     const string &table_name, const string &description) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdateTable");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+		// Glue has no explicit "unset Description"; set it to the given value (empty clears it on the next GetTable)
+		table_input.SetDescription(description);
+		// Mirror the description in Parameters.comment: the comment lives in both locations
+		auto parameters = table_input.GetParameters();
+		if (description.empty()) {
+			parameters.erase("comment");
+		} else {
+			parameters["comment"] = description;
+		}
+		table_input.SetParameters(parameters);
 	});
 }
 

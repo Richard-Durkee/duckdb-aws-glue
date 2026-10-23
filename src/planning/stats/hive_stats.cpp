@@ -19,9 +19,7 @@
 
 namespace duckdb {
 
-//! The size the listing reported for a file, when it reported one. S3 and the local filesystem both carry it, so the
-//! bytes of a table are known from the listing alone, without opening anything
-static optional_idx ListedFileSize(const OpenFileInfo &file) {
+optional_idx ListedFileSize(const OpenFileInfo &file) {
 	if (!file.extended_info) {
 		return optional_idx();
 	}

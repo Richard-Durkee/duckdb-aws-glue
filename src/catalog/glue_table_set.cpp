@@ -26,6 +26,10 @@ unique_ptr<CatalogEntry> GlueTableSet::CreateEntry(const GlueTableInfo &table) {
 		return GlueView::FromTableInfo(catalog, schema, table);
 	}
 	CreateTableInfo info(schema, Identifier(table.name));
+	if (!table.description.empty()) {
+		// So duckdb_tables().comment shows what Glue stores as Table.Description
+		info.comment = Value(table.description);
+	}
 	auto add_column = [&](const GlueColumn &column) {
 		ColumnDefinition definition(Identifier(column.name), GlueTypes::ToLogicalType(column.type));
 		if (!column.comment.empty()) {

@@ -2,12 +2,11 @@
 #include "api/glue_http_client.hpp"
 #include "catalog/glue_transaction.hpp"
 
-#include "duckdb/common/error_data.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
-#include "duckdb/common/thread.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/parallel/task_executor.hpp"
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
 #include <aws/glue/model/CreatePartitionRequest.h>
@@ -62,6 +61,18 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                            const string &table_name, const vector<string> &values, GluePartitionInfo &result) {
+	GluePartitionDetails details;
+	if (!GetPartition(context, catalog, database_name, table_name, values, details)) {
+		return false;
+	}
+	result.values = std::move(details.values);
+	result.location = std::move(details.location);
+	return true;
+}
+
+bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                           const string &table_name, const vector<string> &values, GluePartitionDetails &result,
+                           string *raw_json) {
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetPartitionRequest request;
@@ -82,7 +93,15 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	for (auto &value : partition.GetValues()) {
 		result.values.push_back(ToStdString(value));
 	}
-	result.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+	auto &storage_descriptor = partition.GetStorageDescriptor();
+	result.location = ToStdString(storage_descriptor.GetLocation());
+	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
+	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
+	result.columns = ToColumns(storage_descriptor.GetColumns());
+	result.parameters = ToStdMap(partition.GetParameters());
+	if (raw_json) {
+		*raw_json = ToStdString(partition.Jsonize().View().WriteReadable());
+	}
 	return true;
 }
 
@@ -257,6 +276,36 @@ static void FetchPartitionSegment(Aws::Glue::GlueClient &client, const GlueCatal
 	} while (!next_token.empty());
 }
 
+class FetchPartitionSegmentTask : public BaseExecutorTask {
+public:
+	FetchPartitionSegmentTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
+	                          const GlueCatalog &catalog, const string &database_name, const string &table_name,
+	                          int segment_number, int total_segments, vector<GluePartitionInfo> &result)
+	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), database_name(database_name),
+	      table_name(table_name), segment_number(segment_number), total_segments(total_segments), result(result) {
+	}
+
+	void ExecuteTask() override {
+		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
+		// connection's HTTP log
+		GlueHttpClientContextScope http_scope(context);
+		FetchPartitionSegment(client, catalog, database_name, table_name, segment_number, total_segments, result);
+	}
+	string TaskType() const override {
+		return "FetchPartitionSegmentTask";
+	}
+
+private:
+	ClientContext &context;
+	Aws::Glue::GlueClient &client;
+	const GlueCatalog &catalog;
+	const string &database_name;
+	const string &table_name;
+	int segment_number;
+	int total_segments;
+	vector<GluePartitionInfo> &result;
+};
+
 //! The number of GetPartitions requests to run at the same time: the setting when it is given, otherwise one request
 //! against a server given with ENDPOINT (moto ignores Segment and answers every segment with the whole table) and
 //! GLUE_DEFAULT_PARTITION_SEGMENTS against AWS.
@@ -285,35 +334,14 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 	if (total_segments == 1) {
 		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, segment_results[0]);
 	} else {
-		// The segments do not overlap, so their requests can run at the same time. Every worker sets the context
-		// scope itself: it is thread local, and without it the requests would use the database level HTTP settings
-		// and stay out of this connection's HTTP log.
-		vector<ErrorData> errors(NumericCast<idx_t>(total_segments));
-		vector<thread> workers;
-		for (int segment = 1; segment < total_segments; segment++) {
-			workers.emplace_back([&, segment]() {
-				GlueHttpClientContextScope worker_scope(context);
-				try {
-					FetchPartitionSegment(*client, catalog, database_name, table_name, segment, total_segments,
-					                      segment_results[NumericCast<idx_t>(segment)]);
-				} catch (std::exception &ex) {
-					errors[NumericCast<idx_t>(segment)] = ErrorData(ex);
-				}
-			});
+		// the segments do not overlap, so their requests can run at the same time
+		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+		for (int segment = 0; segment < total_segments; segment++) {
+			executor.ScheduleTask(make_uniq<FetchPartitionSegmentTask>(
+			    executor, context, *client, catalog, database_name, table_name, segment, total_segments,
+			    segment_results[NumericCast<idx_t>(segment)]));
 		}
-		try {
-			FetchPartitionSegment(*client, catalog, database_name, table_name, 0, total_segments, segment_results[0]);
-		} catch (std::exception &ex) {
-			errors[0] = ErrorData(ex);
-		}
-		for (auto &worker : workers) {
-			worker.join();
-		}
-		for (auto &error : errors) {
-			if (error.HasError()) {
-				error.Throw();
-			}
-		}
+		executor.WorkOnTasks();
 	}
 
 	vector<GluePartitionInfo> result;

@@ -80,6 +80,17 @@ SELECT * FROM glue_get_table_response('my_datalake.default.gr_defer');
 ----
 gr_defer
 
+# a DuckDB view stored without columns (seeded by scripts/docker-compose.yml) is listed unbound and still reads
+query I
+SELECT is_bound FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name = 'fixture_nocols_view';
+----
+false
+
+query I
+SELECT * FROM my_datalake.default.fixture_nocols_view;
+----
+1
+
 statement ok
 DROP VIEW my_datalake.default.gr_view;
 

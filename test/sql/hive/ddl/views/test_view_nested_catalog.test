@@ -8,13 +8,18 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
-# an account-implicit nested catalog path ("s3tablescatalog/<bucket>"), a database in it, and the database the test
-# view is written to; set only for a live Glue Data Catalog that has them
+# an account-implicit nested catalog path ("s3tablescatalog/<bucket>"), a database and a table in it, and the
+# database the test view is written to; set only for a live Glue Data Catalog that has them
 require-env GLUE_NESTED_CATALOG
 
 require-env GLUE_NESTED_DATABASE
 
+require-env GLUE_NESTED_TABLE
+
 require-env GLUE_VIEW_DATABASE
+
+# Skipped until #79 (Iceberg reads): a nested S3 Tables catalog holds only Iceberg tables, so no view can bind yet.
+mode skip
 
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
@@ -26,14 +31,7 @@ statement ok
 DROP VIEW IF EXISTS my_datalake.{GLUE_VIEW_DATABASE}.nc_view;
 
 statement ok
-DROP VIEW IF EXISTS nested_short.{GLUE_NESTED_DATABASE}.nc_source;
-
-# the nested catalog's tables are Iceberg, which this extension can not read yet: the view reads a view in it
-statement ok
-CREATE VIEW nested_short.{GLUE_NESTED_DATABASE}.nc_source AS SELECT 42 AS id;
-
-statement ok
-CREATE VIEW my_datalake.{GLUE_VIEW_DATABASE}.nc_view AS SELECT * FROM nested_short.{GLUE_NESTED_DATABASE}.nc_source;
+CREATE VIEW my_datalake.{GLUE_VIEW_DATABASE}.nc_view AS SELECT * FROM nested_short.{GLUE_NESTED_DATABASE}.{GLUE_NESTED_TABLE};
 
 # stored by the fully qualified id Glue reports, not by the path as attached nor by the alias
 query II
@@ -52,17 +50,15 @@ SELECT * FROM my_datalake.{GLUE_VIEW_DATABASE}.nc_view;
 ----
 is not attached
 
-# attached under the other spelling, the view's name resolves to the same catalog
+# attached under the other spelling, the view's name resolves to the same catalog and reaches the table (which then
+# can not be read, being Iceberg)
 statement ok
 attach '{GLUE_CATALOG_ID}:{GLUE_NESTED_CATALOG}' as nested_full (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
 
-query I
+statement error
 SELECT * FROM my_datalake.{GLUE_VIEW_DATABASE}.nc_view;
 ----
-42
+can not be read yet
 
 statement ok
 DROP VIEW my_datalake.{GLUE_VIEW_DATABASE}.nc_view;
-
-statement ok
-DROP VIEW nested_full.{GLUE_NESTED_DATABASE}.nc_source;

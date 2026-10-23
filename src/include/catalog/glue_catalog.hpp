@@ -108,6 +108,15 @@ private:
 	static void SetDatabaseOption(GlueDatabaseInfo &database, const string &key, const Value &value);
 
 private:
+	//! A table in a database not loaded yet is asked from Glue first: when it exists so does the database, which then
+	//! needs no GetDatabase. Anything else takes the regular lookup, schema first
+	CatalogEntryLookup TryLookupEntryInternal(CatalogTransaction transaction,
+	                                          const EntryLookupInfo &lookup_info) override;
+	//! The table through a schema entry built from the database name alone; nullptr if it was not found
+	CatalogEntryLookup TryLookupTableBeforeSchema(CatalogTransaction transaction, const EntryLookupInfo &lookup_info,
+	                                              const string &schema_name);
+
+private:
 	//! for reading - the fetched catalog id or account id from ATTACH
 	string KnownCatalogId();
 	friend struct GlueViewNames;

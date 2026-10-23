@@ -57,6 +57,25 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	return result.first->second.get();
 }
 
+optional_ptr<CatalogEntry> GlueSchemaSet::GetLoadedEntry(const string &name) {
+	lock_guard<mutex> guard(entry_lock);
+	auto entry = entries.find(name);
+	if (entry == entries.end()) {
+		return nullptr;
+	}
+	return entry->second.get();
+}
+
+optional_ptr<CatalogEntry> GlueSchemaSet::AddEntryIfAbsent(unique_ptr<GlueSchemaEntry> entry) {
+	lock_guard<mutex> guard(entry_lock);
+	auto name = entry->name.GetIdentifierName();
+	if (entries.find(name) != entries.end()) {
+		return nullptr;
+	}
+	auto result = entries.emplace(name, std::move(entry));
+	return result.first->second.get();
+}
+
 void GlueSchemaSet::Scan(ClientContext &context, const std::function<void(CatalogEntry &)> &callback) {
 	Transaction::Get(context, catalog);
 	lock_guard<mutex> guard(entry_lock);

@@ -397,8 +397,13 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	if (!options.description.empty()) {
 		table.description = options.description;
 	}
-	table.location =
-	    options.location.empty() ? glue_catalog.GetTableLocation(database_info, table_name) : options.location;
+	if (options.location.empty()) {
+		// the database's LocationUri only matters without DEFAULT_LOCATION, which wins over it
+		auto &database = glue_catalog.options.default_location.empty() ? GetDatabaseInfo(context) : database_info;
+		table.location = glue_catalog.GetTableLocation(database, table_name);
+	} else {
+		table.location = options.location;
+	}
 	table.parameters = options.parameters;
 	table.file_format = options.format;
 	if (table.file_format == HiveFileFormat::CSV) {
@@ -974,6 +979,19 @@ void GlueSchemaEntry::Scan(ClientContext &context, CatalogType type,
 
 void GlueSchemaEntry::Scan(CatalogType type, const std::function<void(CatalogEntry &)> &callback) {
 	throw NotImplementedException("Scan without context not supported for Glue databases");
+}
+
+const GlueDatabaseInfo &GlueSchemaEntry::GetDatabaseInfo(ClientContext &context) {
+	lock_guard<mutex> guard(database_info_lock);
+	if (!database_info_loaded) {
+		GlueDatabaseInfo database;
+		if (!GlueAPI::GetDatabase(context, catalog.Cast<GlueCatalog>(), database_info.name, database)) {
+			throw CatalogException("Glue database \"%s\" no longer exists", database_info.name);
+		}
+		database_info = std::move(database);
+		database_info_loaded = true;
+	}
+	return database_info;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,

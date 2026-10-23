@@ -295,6 +295,69 @@ optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction tr
 	return &entry->Cast<SchemaCatalogEntry>();
 }
 
+CatalogEntryLookup GlueCatalog::TryLookupEntryInternal(CatalogTransaction transaction,
+                                                       const EntryLookupInfo &lookup_info) {
+	if (lookup_info.GetAtClause() && !SupportsTimeTravel()) {
+		return {nullptr, nullptr, ErrorData(BinderException("Catalog type does not support time travel"))};
+	}
+	auto &full_path = lookup_info.GetQualifiedName().Path();
+	vector<Identifier> schema_path(full_path.begin(), full_path.end() - 1);
+	if (!options.governance && lookup_info.GetCatalogType() == CatalogType::TABLE_ENTRY) {
+		// the schema as LookupSchema resolves it: "x".db.t with an unknown catalog x arrives as [x, db]
+		vector<string> path;
+		for (auto &component : schema_path) {
+			if (!component.empty()) {
+				path.push_back(component.GetIdentifierName());
+			}
+		}
+		if (path.size() > 1 && StringUtil::CIEquals(path[0], GetName().GetIdentifierName())) {
+			path.erase(path.begin());
+		}
+		if (path.size() == 1 && !schemas.GetLoadedEntry(path[0])) {
+			auto result = TryLookupTableBeforeSchema(transaction, lookup_info, path[0]);
+			if (result.Found()) {
+				return result;
+			}
+		}
+	}
+	auto schema_lookup = EntryLookupInfo::SchemaLookup(lookup_info, std::move(schema_path));
+	auto schema_entry = LookupSchema(transaction, schema_lookup, OnEntryNotFound::RETURN_NULL);
+	if (!schema_entry) {
+		return {nullptr, nullptr, ErrorData()};
+	}
+	auto entry = schema_entry->LookupEntry(transaction, lookup_info);
+	if (!entry) {
+		return {schema_entry, nullptr, ErrorData()};
+	}
+	return {schema_entry, entry, ErrorData()};
+}
+
+CatalogEntryLookup GlueCatalog::TryLookupTableBeforeSchema(CatalogTransaction transaction,
+                                                           const EntryLookupInfo &lookup_info,
+                                                           const string &schema_name) {
+	// Glue keeps database names in lower case, as GetDatabase would name the schema
+	GlueDatabaseInfo database;
+	database.name = StringUtil::Lower(schema_name);
+	auto schema = schemas.CreateSchemaEntry(database);
+	schema->database_info_loaded = false;
+	optional_ptr<CatalogEntry> entry;
+	try {
+		entry = schema->LookupEntry(transaction, lookup_info);
+	} catch (std::exception &) {
+		// the regular lookup reports it, after asking for the database first as it always has
+		return {nullptr, nullptr, ErrorData()};
+	}
+	if (!entry) {
+		return {nullptr, nullptr, ErrorData()};
+	}
+	auto added = schemas.AddEntryIfAbsent(std::move(schema));
+	if (!added) {
+		// loaded meanwhile: the regular lookup finds the table in that entry, from the cache
+		return {nullptr, nullptr, ErrorData()};
+	}
+	return {&added->Cast<SchemaCatalogEntry>(), entry, ErrorData()};
+}
+
 //! "<12-digit account>" or "<12-digit account>:..."
 static bool StartsWithAccountId(const string &path) {
 	constexpr auto num_digits_in_aws_account_id = 12;

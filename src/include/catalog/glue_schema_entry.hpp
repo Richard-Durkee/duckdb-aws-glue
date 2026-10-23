@@ -78,6 +78,8 @@ public:
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
 	//! Replace the cached entry of an altered table with what Glue stored
 	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
+	//! The database definition, asked from Glue first if the entry was created from the name alone
+	const GlueDatabaseInfo &GetDatabaseInfo(ClientContext &context);
 
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
@@ -90,9 +92,14 @@ private:
 	void SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info);
 
 public:
-	//! The database definition as returned by Glue
+	//! The database definition as returned by Glue; only the name is set until GetDatabaseInfo when
+	//! 'database_info_loaded' is false
 	GlueDatabaseInfo database_info;
+	bool database_info_loaded = true;
 	GlueTableSet tables;
+
+private:
+	mutex database_info_lock;
 };
 
 } // namespace duckdb

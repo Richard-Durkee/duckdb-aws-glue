@@ -102,6 +102,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
 
+	config.AddExtensionOption("hive_csv_parallel",
+	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "
+	                          "twice `threads` files. False reads one thread per file, which a file that holds a line "
+	                          "break inside a quoted field needs: the parallel scanner refuses such a field together "
+	                          "with the NULL padding of short rows. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();

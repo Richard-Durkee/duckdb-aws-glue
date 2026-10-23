@@ -14,8 +14,10 @@
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/type_visitor.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
@@ -639,6 +641,16 @@ static virtual_column_map_t HiveScanGetVirtualColumns(ClientContext &context, op
 	return result;
 }
 
+//! Whether a column of the table, or a field nested in one, is declared binary (BLOB)
+static bool HasBinaryColumn(const HiveScanInfo &scan_info) {
+	for (auto &type : scan_info.types) {
+		if (TypeVisitor::Contains(type, LogicalTypeId::BLOB)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -655,6 +667,10 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	switch (scan_info->file_format) {
 	case HiveFileFormat::PARQUET:
 		function_name = "read_parquet";
+		// the Glue type decides how a BYTE_ARRAY column without a STRING annotation reads, not the session setting.
+		// A table without a binary column has the reader read such a column as text (it verifies the UTF-8); with a
+		// binary column the reader keeps the bytes, and InitializeReader decodes the ones Glue declares string
+		param_map["binary_as_string"] = Value::BOOLEAN(!HasBinaryColumn(*scan_info));
 		break;
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table
@@ -1118,6 +1134,28 @@ static void MakeTryCast(ClientContext &context, unique_ptr<Expression> &expr) {
 	expr = BoundCastExpression::AddCastToType(context, std::move(child), target_type, true);
 }
 
+//! A parquet BYTE_ARRAY column without a STRING annotation (Impala, older Hive and parquet-mr writers) reads as a
+//! BLOB when the table has a binary column (binary_as_string = false, BindHiveScan), while Glue declares this column
+//! 'string'. The reader's cast of that BLOB to VARCHAR would escape every non-ASCII byte (\xC3\xBC for ü); the bytes
+//! are the text, so decode() them as UTF-8 instead, as Hive and Trino do, which fails when they are not UTF-8. Only a
+//! column's own cast is replaced: the same bytes inside a LIST, STRUCT or MAP are converted by the reader's nested
+//! cast and keep the escaped form.
+static void DecodeBlobAsText(ClientContext &context, unique_ptr<Expression> &expr) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	// the whole type, not the id: a cast to an alias of VARCHAR such as JSON must keep its own conversion
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (cast.GetReturnType() != LogicalType::VARCHAR ||
+	    BoundCastExpression::Child(cast).GetReturnType() != LogicalType::BLOB) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
+	FunctionBinder function_binder(context);
+	expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, "decode", std::move(children));
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1126,6 +1164,19 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
                                                            ClientContext &context, MultiFileGlobalState &gstate) {
 	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
 	                                                table_filters, context, gstate);
+	if (ScanInfo().file_format == HiveFileFormat::PARQUET) {
+		// without a binary column the reader reads unannotated BYTE_ARRAY columns as text itself (binary_as_string)
+		if (HasBinaryColumn(ScanInfo())) {
+			for (auto &expr : reader_data.expressions) {
+				DecodeBlobAsText(context, expr);
+			}
+			// a filter pushed into the reader evaluates the column's conversion there, on a copy of the expression
+			for (auto &entry : reader_data.reader->expression_map) {
+				DecodeBlobAsText(context, entry.second.expression);
+			}
+		}
+		return result;
+	}
 	if (!ScanInfo().csv_options.serde_fields) {
 		return result;
 	}

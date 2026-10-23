@@ -15,11 +15,6 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 //! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
 //! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.
 TableFunction GetGlueGetTableResponseFunction();
-
-//! glue_bytes_as_text(bytes BLOB, table VARCHAR, column VARCHAR) -> VARCHAR: the bytes as UTF-8 text, an error naming
-//! the table and column when they are not UTF-8. The Hive scan applies it to a parquet BYTE_ARRAY column without a
-//! STRING annotation that Glue declares string
-ScalarFunction GetGlueBytesAsTextFunction();
 //! glue_get_database_response('<catalog>.<database>'): the Glue GetDatabase response for a database (schema) of an
 //! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and
 //! parameters as columns and the complete Glue Database object as VARIANT.

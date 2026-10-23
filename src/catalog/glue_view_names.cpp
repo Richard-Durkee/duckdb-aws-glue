@@ -221,7 +221,7 @@ string ServiceName(const GlueCatalog &catalog) {
 } // namespace
 
 void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_catalog, const Identifier &view_schema,
-                                      QueryNode &query, bool defer_binding) {
+                                      QueryNode &query) {
 	auto view_catalog_name = view_catalog.GetName();
 	// catalogs named in the body, which the stored view does not keep
 	identifier_set_t catalogs {view_catalog_name};
@@ -301,11 +301,6 @@ void GlueViewNames::QualifyForStorage(ClientContext &context, GlueCatalog &view_
 		}
 		if (!entry) {
 			entry = LookupTable(context, name);
-		}
-		if (!entry && defer_binding) {
-			// not there yet: the view's own database
-			ref.SetQualifiedName(Identifier(), view_schema, name.Name());
-			return;
 		}
 		if (!entry) {
 			throw BinderException("Glue view references table \"%s\", which was not found", name.ToString());

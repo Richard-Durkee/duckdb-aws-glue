@@ -101,7 +101,7 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 	}
 
 	// unbound on purpose: the binder derives names and types from the query on first use; the stored columns
-	// carry the column alias list of CREATE VIEW (none for a view created with DEFER_BINDING)
+	// carry the column alias list of CREATE VIEW
 	CreateViewInfo info(schema, Identifier(table.name));
 	for (auto &column : table.columns) {
 		info.aliases.emplace_back(column.name);

@@ -8,8 +8,11 @@
 #include "duckdb/parser/qualified_name.hpp"
 
 #include "api/glue_api.hpp"
+#include "api/glue_api_util.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction.hpp"
+
+#include <aws/core/utils/json/JsonSerializer.h>
 
 namespace duckdb {
 
@@ -205,6 +208,156 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 		                      qualified.Catalog().GetIdentifierName(), catalog->GetCatalogType());
 	}
 	return qualified;
+}
+
+namespace {
+
+using Aws::Utils::Json::JsonValue;
+using Aws::Utils::Json::JsonView;
+
+//! Parse a JSON column list: [{"name": "id", "type": "int", "comment": "..."}, ...]
+vector<GlueColumn> ParseColumnsFromJSON(JsonView arr) {
+	vector<GlueColumn> result;
+	if (!arr.IsListType()) {
+		return result;
+	}
+	for (auto &elem : arr.AsArray()) {
+		GlueColumn col;
+		if (elem.ValueExists("name")) {
+			col.name = ToStdString(elem.GetString("name"));
+		}
+		if (elem.ValueExists("type")) {
+			col.type = ToStdString(elem.GetString("type"));
+		}
+		if (elem.ValueExists("comment")) {
+			col.comment = ToStdString(elem.GetString("comment"));
+		}
+		result.push_back(std::move(col));
+	}
+	return result;
+}
+
+//! Parse a JSON string map: {"key": "value", ...}
+unordered_map<string, string> ParseStringMapFromJSON(JsonView obj) {
+	unordered_map<string, string> result;
+	if (!obj.IsObject()) {
+		return result;
+	}
+	for (auto &entry : obj.GetAllObjects()) {
+		if (entry.second.IsString()) {
+			result[ToStdString(entry.first)] = ToStdString(entry.second.AsString());
+		}
+	}
+	return result;
+}
+
+//! Parse a JSON object into a GlueTableInfo, the same struct GlueAPI::GetTable populates from an AWS SDK response
+GlueTableInfo ParseTableInfoFromJSON(JsonView root, const string &database_name, const string &table_name) {
+	GlueTableInfo info;
+	info.name = table_name;
+	info.database_name = database_name;
+	if (root.ValueExists("location")) {
+		info.location = ToStdString(root.GetString("location"));
+	}
+	if (root.ValueExists("serde_library")) {
+		info.serde_library = ToStdString(root.GetString("serde_library"));
+	}
+	if (root.ValueExists("input_format")) {
+		info.input_format = ToStdString(root.GetString("input_format"));
+	}
+	if (root.ValueExists("output_format")) {
+		info.output_format = ToStdString(root.GetString("output_format"));
+	}
+	if (root.ValueExists("description")) {
+		info.description = ToStdString(root.GetString("description"));
+	}
+	if (root.ValueExists("table_type")) {
+		info.glue_table_type = ToStdString(root.GetString("table_type"));
+	}
+	if (info.glue_table_type.empty()) {
+		info.glue_table_type = "EXTERNAL_TABLE";
+	}
+	info.table_type = GlueTableTypeFromString(info.glue_table_type);
+	if (root.ValueExists("number_of_buckets")) {
+		info.number_of_buckets = root.GetInteger("number_of_buckets");
+	}
+	if (root.ValueExists("columns")) {
+		info.columns = ParseColumnsFromJSON(root.GetArray("columns"));
+	}
+	if (root.ValueExists("partition_keys")) {
+		info.partition_keys = ParseColumnsFromJSON(root.GetArray("partition_keys"));
+	}
+	if (root.ValueExists("parameters")) {
+		info.parameters = ParseStringMapFromJSON(root.GetObject("parameters"));
+	}
+	if (root.ValueExists("serde_parameters")) {
+		info.serde_parameters = ParseStringMapFromJSON(root.GetObject("serde_parameters"));
+	}
+	return info;
+}
+
+struct GluePrefetchTableBindData : public TableFunctionData {
+	string catalog_name;
+	string database_name;
+	string table_name;
+	GlueTableInfo table_info;
+};
+
+unique_ptr<FunctionData> GluePrefetchTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto table_ref = input.inputs[0].GetValue<string>();
+	auto json_str = input.inputs[1].GetValue<string>();
+
+	auto qualified = ResolveGlueTableName(context, "glue_prefetch_table", table_ref);
+	auto &catalog = Catalog::GetCatalog(context, qualified.Catalog()).Cast<GlueCatalog>();
+	auto database_name = qualified.Schema().GetIdentifierName();
+	auto table_name = qualified.Name().GetIdentifierName();
+
+	// Parse the JSON into a GlueTableInfo
+	JsonValue json(json_str);
+	if (!json.WasParseSuccessful()) {
+		throw InvalidInputException("glue_prefetch_table: invalid JSON");
+	}
+	auto root = json.View();
+	if (!root.IsObject()) {
+		throw InvalidInputException("glue_prefetch_table: JSON must be an object");
+	}
+
+	auto result = make_uniq<GluePrefetchTableBindData>();
+	result->catalog_name = qualified.Catalog().GetIdentifierName();
+	result->database_name = database_name;
+	result->table_name = table_name;
+	result->table_info = ParseTableInfoFromJSON(root, database_name, table_name);
+
+	// Pre-populate the transaction cache: the same pattern BulkLoadTableInfo and glue_get_table_response use
+	auto &cache = *GlueTransaction::Get(context, catalog).cache;
+	auto prefetched = make_shared_ptr<const GlueTableInfo>(result->table_info);
+	cache.GetTable(database_name, table_name, [&prefetched]() { return prefetched; });
+
+	names = {"database_name", "table_name", "status"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+void GluePrefetchTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueGetTableResponseState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	auto &bind_data = data.bind_data->Cast<GluePrefetchTableBindData>();
+	output.data[0].Append(Value(bind_data.database_name));
+	output.data[1].Append(Value(bind_data.table_name));
+	output.data[2].Append(Value("prefetched"));
+	output.CheckCardinality(1);
+}
+
+} // namespace
+
+TableFunction GetGluePrefetchTableFunction() {
+	TableFunction function("glue_prefetch_table", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                       GluePrefetchTableScan, GluePrefetchTableBind, GlueGetTableResponseInit);
+	return function;
 }
 
 TableFunction GetGlueGetDatabaseResponseFunction() {

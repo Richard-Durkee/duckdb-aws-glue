@@ -24,6 +24,13 @@ TableFunction GetGlueGetDatabaseResponseFunction();
 //! object as VARIANT.
 TableFunction GetGlueGetPartitionResponseFunction();
 
+//! glue_prefetch_table('<catalog>.<schema>.<table>', '<json>'): populate the metadata cache of an attached Glue
+//! catalog with pre-resolved table metadata, so the next query that references the table skips the GetTable API
+//! call. The JSON object carries the same fields as a glue_get_table_response row: location, serde_library,
+//! columns, partition_keys, parameters, serde_parameters, and optionally input_format, output_format, description,
+//! table_type. The cache entry lives as long as the transaction (or connection, with glue_metadata_cache_scope).
+TableFunction GetGluePrefetchTableFunction();
+
 //! The 'columns' type of the glue_get_*_response functions: LIST(STRUCT(name, type, comment))
 LogicalType GlueColumnsType();
 Value GlueColumnsToValue(const vector<GlueColumn> &columns);

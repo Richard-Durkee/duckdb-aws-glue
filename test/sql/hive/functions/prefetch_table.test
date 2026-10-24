@@ -1,0 +1,107 @@
+# name: test/sql/hive/functions/prefetch_table.test
+# description: glue_prefetch_table populates the metadata cache so a subsequent query skips GetTable
+# group: [functions]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.pft_table;
+
+statement ok
+CREATE TABLE my_datalake.default.pft_table (id INTEGER, name VARCHAR);
+
+statement ok
+INSERT INTO my_datalake.default.pft_table VALUES (1, 'alice'), (2, 'bob');
+
+# fetch the table metadata from Glue once so we have something realistic to prefetch with
+query IIIIII
+SELECT database_name, table_name, location, serde_library, columns, partition_keys
+FROM glue_get_table_response('my_datalake.default.pft_table');
+----
+default	pft_table	(notempty)	(notempty)	(notempty)	[]
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+# a fresh attach with no cache: prefetch the table, then query it
+statement ok
+attach '{GLUE_CATALOG_ID}' as pft_catalog (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+# build the prefetch JSON from the original table's response
+statement ok
+SELECT glue_prefetch_table(
+    'pft_catalog.default.pft_table',
+    (SELECT json_object(
+        'location', location,
+        'serde_library', serde_library,
+        'columns', (SELECT json_group_array(json_object('name', c.name, 'type', c.type, 'comment', c.comment))
+                    FROM (SELECT unnest(columns)) AS c(name, type, comment)),
+        'partition_keys', json('[]'),
+        'parameters', json('{}'),
+        'serde_parameters', json('{}')
+    ) FROM glue_get_table_response('my_datalake.default.pft_table'))
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# this query should NOT call GetTable -- the metadata was prefetched
+query II
+SELECT id, name FROM pft_catalog.default.pft_table ORDER BY id;
+----
+1	alice
+2	bob
+
+# verify: the only Glue call should be GetDatabase for the schema, not GetTable for the table
+query II
+SELECT request.headers['x-amz-target'], count(*)
+FROM duckdb_logs_parsed('HTTP')
+WHERE request.headers['x-amz-target'] IS NOT NULL
+GROUP BY 1 ORDER BY 1;
+----
+AWSGlue.GetDatabase	1
+
+# verify the prefetch function returns the expected confirmation
+query III
+SELECT * FROM glue_prefetch_table(
+    'pft_catalog.default.pft_table',
+    '{"location": "s3://test", "serde_library": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe", "columns": [{"name": "id", "type": "int"}], "partition_keys": [], "parameters": {}, "serde_parameters": {}}'
+);
+----
+default	pft_table	prefetched
+
+# error: invalid JSON
+statement error
+SELECT * FROM glue_prefetch_table('pft_catalog.default.pft_table', 'not json');
+----
+:invalid JSON
+
+# error: JSON is not an object
+statement error
+SELECT * FROM glue_prefetch_table('pft_catalog.default.pft_table', '[1, 2, 3]');
+----
+:JSON must be an object
+
+# error: non-glue catalog
+statement error
+SELECT * FROM glue_prefetch_table('memory.main.test', '{}');
+----
+:only works on tables of a Glue catalog
+
+# cleanup
+statement ok
+DROP TABLE my_datalake.default.pft_table;

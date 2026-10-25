@@ -1,0 +1,79 @@
+# name: test/sql/hive/catalog/lost_write_responses.test
+# description: A write whose response is lost is sent again, and the repeat finding the first attempt's effect succeeds
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# GLUE_FAULT_ENDPOINT loses the first response to a write naming a lost_reply_* database, table or view: the write
+# reaches Glue, the response does not arrive before the timeout, and the AWS SDK sends the request again, which then
+# finds what the first attempt did (AlreadyExists, EntityNotFound)
+statement ok
+attach '{GLUE_CATALOG_ID}' as lossy (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.lost_reply_v;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.lost_reply_t;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.lost_reply_db;
+
+statement ok
+SET http_timeout = 1;
+
+statement ok
+CREATE SCHEMA lossy.lost_reply_db;
+
+statement ok
+CREATE TABLE lossy.default.lost_reply_t (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CREATE VIEW lossy.default.lost_reply_v AS SELECT 42 AS answer;
+
+statement ok
+CALL glue_add_partition('lossy.default.lost_reply_t', {dt: 'a'});
+
+statement ok
+CALL glue_rename_partition('lossy.default.lost_reply_t', {dt: 'a'}, {dt: 'b'});
+
+query I
+SELECT count(*) FROM glue_get_partition_response('my_datalake.default.lost_reply_t', {dt: 'b'});
+----
+1
+
+query I
+CALL glue_drop_partition('lossy.default.lost_reply_t', {dt: 'b'});
+----
+true
+
+statement ok
+DROP VIEW lossy.default.lost_reply_v;
+
+statement ok
+DROP TABLE lossy.default.lost_reply_t;
+
+statement ok
+DROP SCHEMA lossy.lost_reply_db;
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name LIKE 'lost_reply%';
+----
+0

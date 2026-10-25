@@ -8,11 +8,15 @@ the description 'created by another client', a table one more column 'created_by
 which sets the table parameter 'changed_by_another_client', and is then refused with ConcurrentModificationException
 if its VersionId is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is
 forwarded and overwrites the other client's change. A request on a fault_throttled* database is answered with
-ThrottlingException on its first attempt (the SDK's amz-sdk-request header) and forwarded when the SDK retries it."""
+ThrottlingException on its first attempt (the SDK's amz-sdk-request header) and forwarded when the SDK retries it.
+A write naming a lost_reply_* database, table or view reaches moto, but the response to its first attempt is lost:
+the proxy holds it for LOST_REPLY_SECONDS (longer than the client's timeout) and closes the connection, and answers
+the SDK's retry."""
 
 import argparse
 import http.client
 import json
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -27,6 +31,12 @@ THROTTLED_PREFIX = "fault_throttled"
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
+# a write naming an object with this prefix loses the response to its first attempt
+LOST_REPLY_PREFIX = "lost_reply_"
+LOST_REPLY_SECONDS = 3
+LOST_REPLY_WRITES = {"AWSGlue." + operation for operation in ("CreateDatabase", "DeleteDatabase", "CreateTable",
+                                                                "DeleteTable", "CreatePartition", "DeletePartition",
+                                                                "UpdatePartition")}
 NOT_FORWARDED = {"connection", "keep-alive", "transfer-encoding", "te", "trailer", "upgrade", "content-length",
                  "server", "date"}
 
@@ -67,9 +77,21 @@ def as_other_clients_object(target, request):
     return json.dumps(request).encode()
 
 
+def is_first_attempt(sdk_request):
+    """Whether the SDK's amz-sdk-request header names the first attempt of the request, not a retry."""
+    return "attempt=1" in (sdk_request or "").replace(" ", "").split(";")
+
+
 def is_throttled(database, sdk_request):
-    attempts = (sdk_request or "").replace(" ", "").split(";")
-    return database.startswith(THROTTLED_PREFIX) and "attempt=1" in attempts
+    return database.startswith(THROTTLED_PREFIX) and is_first_attempt(sdk_request)
+
+
+def loses_reply(target, request, sdk_request):
+    if target not in LOST_REPLY_WRITES or not is_first_attempt(sdk_request):
+        return False
+    names = [request.get("DatabaseName"), request.get("Name"), request.get("TableName"),
+             request.get("TableInput", {}).get("Name"), request.get("DatabaseInput", {}).get("Name")]
+    return any(isinstance(name, str) and name.startswith(LOST_REPLY_PREFIX) for name in names)
 
 
 def is_raced_update(target, database):
@@ -105,6 +127,10 @@ class Handler(BaseHTTPRequestHandler):
         if raced:
             body = as_other_clients_object(target, request)
         status, headers, data = self.forward(target, body)
+        if loses_reply(target, request, self.headers.get("amz-sdk-request")):
+            time.sleep(LOST_REPLY_SECONDS)
+            self.close_connection = True
+            return
         if raced and status == 200:
             # the object exists now, but as far as this client can tell another client created it first
             self.reply_error("AlreadyExistsException")

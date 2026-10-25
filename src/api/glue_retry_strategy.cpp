@@ -7,21 +7,53 @@
 #include "duckdb/main/client_context.hpp"
 
 #include <aws/core/client/AWSError.h>
+#include <aws/core/client/ClientConfiguration.h>
 #include <aws/core/client/CoreErrors.h>
+#include <aws/core/config/ConfigAndCredentialsCacheManager.h>
+#include <aws/core/platform/Environment.h>
 
 namespace duckdb {
 
-thread_local int64_t GlueLoggingRetryStrategy::last_delay_ms = 0;
+thread_local int64_t GlueRetryStrategy::last_delay_ms = 0;
+thread_local idx_t GlueRetryCounter::retries = 0;
 
-GlueLoggingRetryStrategy::GlueLoggingRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
+std::shared_ptr<Aws::Client::RetryStrategy> CreateGlueRetryStrategy(int64_t glue_max_retries) {
+	std::shared_ptr<Aws::Client::RetryStrategy> strategy;
+	if (glue_max_retries >= 0) {
+		// StandardRetryStrategy counts total attempts: N retries is N + 1 attempts
+		strategy = std::make_shared<Aws::Client::StandardRetryStrategy>(static_cast<long>(glue_max_retries + 1));
+	} else {
+		auto retry_mode = Aws::Environment::GetEnv("AWS_RETRY_MODE");
+		if (retry_mode.empty()) {
+			retry_mode = Aws::Config::GetCachedConfigValue("retry_mode");
+		}
+		if (retry_mode.empty()) {
+			retry_mode = "standard";
+		}
+		strategy = Aws::Client::InitRetryStrategy(retry_mode);
+	}
+	return std::make_shared<GlueRetryStrategy>(std::move(strategy));
+}
+
+GlueRetryCounter::GlueRetryCounter() : start(retries) {
+}
+
+bool GlueRetryCounter::Retried() const {
+	return retries != start;
+}
+
+GlueRetryStrategy::GlueRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
     : strategy(std::move(strategy_p)) {
 }
 
-bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
-                                           long attempted_retries) const {
+bool GlueRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+                                    long attempted_retries) const {
 	auto retry = strategy->ShouldRetry(error, attempted_retries);
 	auto delay_ms = last_delay_ms;
 	last_delay_ms = 0;
+	if (retry) {
+		GlueRetryCounter::retries++;
+	}
 	auto context = GlueHttpClientContextScope::Current();
 	if (retry && context && Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {
 		GlueRetryEvent event;
@@ -42,35 +74,35 @@ bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Clie
 	return retry;
 }
 
-long GlueLoggingRetryStrategy::CalculateDelayBeforeNextRetry(
-    const Aws::Client::AWSError<Aws::Client::CoreErrors> &error, long attempted_retries) const {
+long GlueRetryStrategy::CalculateDelayBeforeNextRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+                                                      long attempted_retries) const {
 	auto delay_ms = strategy->CalculateDelayBeforeNextRetry(error, attempted_retries);
 	last_delay_ms = delay_ms;
 	return delay_ms;
 }
 
-long GlueLoggingRetryStrategy::GetMaxAttempts() const {
+long GlueRetryStrategy::GetMaxAttempts() const {
 	return strategy->GetMaxAttempts();
 }
 
-void GlueLoggingRetryStrategy::GetSendToken() {
+void GlueRetryStrategy::GetSendToken() {
 	strategy->GetSendToken();
 }
 
-bool GlueLoggingRetryStrategy::HasSendToken() {
+bool GlueRetryStrategy::HasSendToken() {
 	return strategy->HasSendToken();
 }
 
-void GlueLoggingRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome) {
+void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome) {
 	strategy->RequestBookkeeping(outcome);
 }
 
-void GlueLoggingRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
-                                                  const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) {
+void GlueRetryStrategy::RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
+                                           const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) {
 	strategy->RequestBookkeeping(outcome, last_error);
 }
 
-const char *GlueLoggingRetryStrategy::GetStrategyName() const {
+const char *GlueRetryStrategy::GetStrategyName() const {
 	return strategy->GetStrategyName();
 }
 

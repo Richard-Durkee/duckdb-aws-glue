@@ -67,7 +67,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("glue_max_retries",
 	                          "Set a custom retry limit for AWS SDK Glue API calls: the number of retries after the "
 	                          "first attempt fails, 0 meaning no retries (single attempt), at most 10. -1, the "
-	                          "default, leaves the SDK's own retry policy in place.",
+	                          "default, uses the retry mode of AWS_RETRY_MODE or the profile's retry_mode, else the "
+	                          "SDK's standard mode (three attempts).",
 	                          LogicalType::BIGINT, Value::BIGINT(-1));
 
 	config.AddExtensionOption("glue_create_bucketed_tables",

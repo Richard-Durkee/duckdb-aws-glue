@@ -11,8 +11,6 @@
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
-#include <aws/core/client/ClientConfiguration.h>
-#include <aws/core/client/RetryStrategy.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
 
 #include <sys/stat.h>
@@ -70,8 +68,8 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	// The HTTP transport is chosen when the SDK client is built, so a changed setting needs a new client
 	auto via_duckdb = GlueNetworkCallsViaDuckDB(DatabaseInstance::GetDatabase(context));
 	auto &endpoint = catalog.options.endpoint;
-	// The glue_max_retries flag: a custom retry limit for Glue API calls. -1 (the default) keeps the SDK's own
-	// retry policy; 0 means no retries (single attempt); 1-10 sets that many retries, capped at 10.
+	// The glue_max_retries flag: a custom retry limit for Glue API calls. -1 (the default) leaves the retry policy to
+	// CreateGlueRetryStrategy; 0 means no retries (single attempt); 1-10 sets that many retries, capped at 10.
 	int64_t glue_max_retries = -1;
 	Value glue_max_retries_setting;
 	if (context.TryGetCurrentSetting("glue_max_retries", glue_max_retries_setting) &&
@@ -113,18 +111,7 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	}
 	auto &db_config = DBConfig::GetConfig(context);
 	config.userAgent = db_config.UserAgent();
-
-	// Override the SDK's default retry policy only when glue_max_retries is set (>= 0); -1 leaves the default in
-	// place. StandardRetryStrategy counts total attempts, so N retries is N + 1 attempts (0 retries = 1 attempt).
-	if (glue_max_retries >= 0) {
-		config.retryStrategy =
-		    std::make_shared<Aws::Client::StandardRetryStrategy>(static_cast<long>(glue_max_retries + 1));
-	}
-	// Null unless glue_max_retries is set: the client would create the default strategy itself
-	if (!config.retryStrategy) {
-		config.retryStrategy = Aws::Client::InitRetryStrategy();
-	}
-	config.retryStrategy = std::make_shared<GlueLoggingRetryStrategy>(std::move(config.retryStrategy));
+	config.retryStrategy = CreateGlueRetryStrategy(glue_max_retries);
 
 	Aws::Auth::AWSCredentials credentials(key_id, secret, session_token);
 	auto provider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(credentials);

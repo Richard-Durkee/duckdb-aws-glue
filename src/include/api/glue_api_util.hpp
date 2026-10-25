@@ -42,6 +42,11 @@ bool IsAccessDenied(const OUTCOME &outcome) {
 }
 
 template <class OUTCOME>
+bool IsConcurrentModification(const OUTCOME &outcome) {
+	return outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::CONCURRENT_MODIFICATION;
+}
+
+template <class OUTCOME>
 bool IsAlreadyExists(const OUTCOME &outcome) {
 	return outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::ALREADY_EXISTS;
 }

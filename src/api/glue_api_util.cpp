@@ -47,6 +47,9 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table) {
 	result.database_name = ToStdString(table.GetDatabaseName());
 	result.glue_table_type = ToStdString(table.GetTableType());
 	result.table_type = GlueTableTypeFromString(result.glue_table_type);
+	if (table.VersionIdHasBeenSet()) {
+		result.version_id = ToStdString(table.GetVersionId());
+	}
 	if (table.ViewOriginalTextHasBeenSet()) {
 		result.view_original_text = ToStdString(table.GetViewOriginalText());
 	}

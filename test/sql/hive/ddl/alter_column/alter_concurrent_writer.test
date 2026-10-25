@@ -1,0 +1,116 @@
+# name: test/sql/hive/ddl/alter_column/alter_concurrent_writer.test
+# description: A table change keeps what another writer changed meanwhile, and fails cleanly if the table keeps changing
+# group: [alter_column]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+# GLUE_FAULT_ENDPOINT checks UpdateTable's VersionId as Glue does. Right before an UpdateTable, another writer adds the
+# column 'racer' to a race_* table that lacks it, and changes a contended_* table every time
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table race_add race_props race_comment race_key_comment race_type contended_alter
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+statement ok
+CREATE TABLE my_datalake.default.race_add (a INTEGER);
+
+statement ok
+ALTER TABLE my_datalake.default.race_add ADD COLUMN b INTEGER;
+
+query I
+SELECT [c.name FOR c IN columns] FROM glue_get_table_response('my_datalake.default.race_add');
+----
+[a, racer, b]
+
+query I
+SELECT column_name FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'race_add' ORDER BY column_index;
+----
+a
+racer
+b
+
+# a change applied to the definition it fetched is sent again
+statement ok
+CREATE TABLE my_datalake.default.race_props (a INTEGER);
+
+statement ok
+ALTER TABLE my_datalake.default.race_props SET ('owner_team' = 'data');
+
+query II
+SELECT [c.name FOR c IN columns], parameters['owner_team'] FROM glue_get_table_response('my_datalake.default.race_props');
+----
+[a, racer]	data
+
+statement ok
+CREATE TABLE my_datalake.default.race_comment (a INTEGER);
+
+statement ok
+COMMENT ON COLUMN my_datalake.default.race_comment.a IS 'the a';
+
+query I
+SELECT columns FROM glue_get_table_response('my_datalake.default.race_comment');
+----
+[{'name': a, 'type': int, 'comment': the a}, {'name': racer, 'type': string, 'comment': NULL}]
+
+statement ok
+CREATE TABLE my_datalake.default.race_key_comment (a INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+COMMENT ON COLUMN my_datalake.default.race_key_comment.dt IS 'the day';
+
+query II
+SELECT [c.name FOR c IN columns], [c.comment FOR c IN partition_keys] FROM glue_get_table_response('my_datalake.default.race_key_comment');
+----
+[a, racer]	[the day]
+
+statement ok
+CREATE TABLE my_datalake.default.race_type (a INTEGER);
+
+statement ok
+ALTER TABLE my_datalake.default.race_type ALTER COLUMN a TYPE BIGINT;
+
+query I
+SELECT [c.name || ' ' || c.type FOR c IN columns] FROM glue_get_table_response('my_datalake.default.race_type');
+----
+[a bigint, racer string]
+
+# a table that changes before every update: the change is given up after a few attempts, not applied over the others
+statement ok
+CREATE TABLE my_datalake.default.contended_alter (a INTEGER);
+
+statement error
+ALTER TABLE my_datalake.default.contended_alter ADD COLUMN b INTEGER;
+----
+Glue table "default.contended_alter" was changed by another writer on each of 5 attempts to alter it; retry the statement
+
+statement error
+ALTER TABLE my_datalake.default.contended_alter SET ('owner_team' = 'data');
+----
+Glue table "default.contended_alter" was changed by another writer on each of 5 attempts to update it; retry the statement
+
+query III
+SELECT [c.name FOR c IN columns], parameters['owner_team'], parameters['contention']::INTEGER >= 10 FROM glue_get_table_response('my_datalake.default.contended_alter');
+----
+[a]	NULL	true
+
+foreach table race_add race_props race_comment race_key_comment race_type contended_alter
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

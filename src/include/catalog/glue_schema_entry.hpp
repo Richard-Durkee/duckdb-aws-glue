@@ -86,6 +86,8 @@ private:
 	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column
 	void SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info);
+	//! Alter, once: throws a GlueTableChangedException if the table changed while the change was derived
+	void AlterOnce(CatalogTransaction transaction, AlterInfo &info);
 	//! COMMENT ON TABLE: Glue stores it as the table's Description
 	void SetTableComment(ClientContext &context, const string &table_name, SetCommentInfo &info);
 

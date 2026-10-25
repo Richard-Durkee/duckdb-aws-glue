@@ -89,6 +89,8 @@ struct GlueTableInfo {
 	unordered_map<string, string> parameters;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
+	//! Glue's VersionId of the definition this was read from (empty if not fetched)
+	string version_id;
 
 public:
 	bool IsView() const {

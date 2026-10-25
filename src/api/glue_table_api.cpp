@@ -248,7 +248,8 @@ static Aws::Glue::Model::TableInput ToViewTableInput(const GlueViewInfo &view) {
 
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
                             const string &database_name, const string &table_name,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify,
+                            const string &expected_version = string());
 
 void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
@@ -286,10 +287,12 @@ void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const Glu
 }
 
 //! UpdateTable replaces the whole definition: fetch the current one, let 'modify' change the TableInput built from
-//! it, and send it back
-static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-                            const string &database_name, const string &table_name,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
+//! it, and send it back with the fetched VersionId. Returns false if Glue refused it because the table changed in
+//! between; throws a GlueTableChangedException if the table is not at a given 'expected_version'.
+static bool TryUpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                               const string &database_name, const string &table_name,
+                               const std::function<void(Aws::Glue::Model::TableInput &)> &modify,
+                               const string &expected_version) {
 	// UpdateTable replaces the whole definition, so start from the current one and change only the columns
 	Aws::Glue::Model::GetTableRequest get_request;
 	SetCatalogId(get_request, catalog);
@@ -304,6 +307,9 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 		ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
 	}
 	auto &table = get_outcome.GetResult().GetTable();
+	if (!expected_version.empty() && ToStdString(table.GetVersionId()) != expected_version) {
+		throw GlueTableChangedException(database_name, table_name);
+	}
 
 	Aws::Glue::Model::TableInput table_input;
 	table_input.SetName(table.GetName());
@@ -347,34 +353,70 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 	SetCatalogId(update_request, catalog);
 	update_request.SetDatabaseName(database_name);
 	update_request.SetTableInput(table_input);
+	if (table.VersionIdHasBeenSet()) {
+		update_request.SetVersionId(table.GetVersionId());
+	}
 	auto update_outcome = client->UpdateTable(update_request);
 	if (!update_outcome.IsSuccess()) {
+		if (IsConcurrentModification(update_outcome)) {
+			return false;
+		}
 		ThrowGlueError(update_outcome, StringUtil::Format("UpdateTable '%s.%s'", database_name, table_name));
 	}
+	return true;
+}
+
+//! How often a table update is attempted when another writer changes the table in between
+static constexpr idx_t GLUE_UPDATE_ATTEMPTS = 5;
+
+//! TryUpdateGlueTable, again on a fresh fetch while another writer changed the table in between. With an
+//! 'expected_version' (the version the caller derived its change from) a refused update throws a
+//! GlueTableChangedException instead, for the caller to derive its change again.
+static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                            const string &database_name, const string &table_name,
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify,
+                            const string &expected_version) {
+	for (idx_t attempt = 0; attempt < GLUE_UPDATE_ATTEMPTS; attempt++) {
+		if (TryUpdateGlueTable(client, catalog, database_name, table_name, modify, expected_version)) {
+			return;
+		}
+		if (!expected_version.empty()) {
+			throw GlueTableChangedException(database_name, table_name);
+		}
+	}
+	throw TransactionException("Glue table \"%s.%s\" was changed by another writer on each of %d attempts to update "
+	                           "it; retry the statement",
+	                           database_name, table_name, GLUE_UPDATE_ATTEMPTS);
 }
 
 void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                 const string &table_name, const vector<GlueColumn> &columns) {
+                                 const string &table_name, const vector<GlueColumn> &columns,
+                                 const string &expected_version) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
-		auto storage_descriptor = table_input.GetStorageDescriptor();
-		storage_descriptor.SetColumns(ToAwsColumns(columns));
-		table_input.SetStorageDescriptor(storage_descriptor);
-	});
+	UpdateGlueTable(
+	    client, catalog, database_name, table_name,
+	    [&](Aws::Glue::Model::TableInput &table_input) {
+		    auto storage_descriptor = table_input.GetStorageDescriptor();
+		    storage_descriptor.SetColumns(ToAwsColumns(columns));
+		    table_input.SetStorageDescriptor(storage_descriptor);
+	    },
+	    expected_version);
 }
 
 void GlueAPI::UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                       const string &table_name, const vector<GlueColumn> &partition_keys) {
+                                       const string &table_name, const vector<GlueColumn> &partition_keys,
+                                       const string &expected_version) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
-		table_input.SetPartitionKeys(ToAwsColumns(partition_keys));
-	});
+	UpdateGlueTable(
+	    client, catalog, database_name, table_name,
+	    [&](Aws::Glue::Model::TableInput &table_input) { table_input.SetPartitionKeys(ToAwsColumns(partition_keys)); },
+	    expected_version);
 }
 
 void GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,

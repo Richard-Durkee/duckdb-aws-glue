@@ -703,6 +703,18 @@ static void CheckNotClustering(const GlueTableInfo &table, const string &table_n
 	}
 }
 
+static void ThrowIfNotHiveTable(const GlueTableInfo &table, const string &table_name) {
+	if (table.IsView()) {
+		throw BinderException("\"%s\" is a view", table_name);
+	}
+	auto format = table.GetFormat();
+	if (!format.IsHive()) {
+		throw NotImplementedException("ALTER TABLE is only supported for Hive tables in a Glue catalog, '%s' is a %s "
+		                              "table",
+		                              table_name, format.Describe(table));
+	}
+}
+
 void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info) {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
 	// Work on the current Glue definition, not the cached one
@@ -711,6 +723,7 @@ void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &tab
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}
+	ThrowIfNotHiveTable(current, table_name);
 	auto &name = info.column_name.GetIdentifierName();
 	auto by_name = [&](const GlueColumn &column) {
 		return StringUtil::CIEquals(column.name, name);
@@ -719,8 +732,8 @@ void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &tab
 	if (partition_key != current.partition_keys.end()) {
 		// NULL removes the comment
 		partition_key->comment = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
-		GlueAPI::UpdateTablePartitionKeys(context, glue_catalog, database_info.name, table_name,
-		                                  current.partition_keys);
+		GlueAPI::UpdateTablePartitionKeys(context, glue_catalog, database_info.name, table_name, current.partition_keys,
+		                                  current.version_id);
 		RefreshTable(context, table_name);
 		return;
 	}
@@ -731,7 +744,7 @@ void GlueSchemaEntry::SetColumnComment(ClientContext &context, const string &tab
 	}
 	// NULL removes the comment
 	column->comment = info.comment_value.IsNull() ? string() : info.comment_value.ToString();
-	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns, current.version_id);
 	RefreshTable(context, table_name);
 }
 
@@ -744,6 +757,24 @@ void GlueSchemaEntry::SetTableComment(ClientContext &context, const string &tabl
 }
 
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
+	// a change derived from a definition another writer changed meanwhile is derived again from the new one
+	static constexpr idx_t ATTEMPTS = 5;
+	for (idx_t attempt = 1;; attempt++) {
+		try {
+			AlterOnce(transaction, info);
+			return;
+		} catch (GlueTableChangedException &) {
+			if (attempt == ATTEMPTS) {
+				throw TransactionException("Glue table \"%s.%s\" was changed by another writer on each of %d attempts "
+				                           "to alter it; retry the statement",
+				                           database_info.name, info.GetQualifiedName().Name().GetIdentifierName(),
+				                           ATTEMPTS);
+			}
+		}
+	}
+}
+
+void GlueSchemaEntry::AlterOnce(CatalogTransaction transaction, AlterInfo &info) {
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
@@ -766,13 +797,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		}
 		throw BinderException("\"%s\" is a view", table_name);
 	}
-	auto &glue_table = entry->Cast<GlueTable>();
-	auto format = glue_table.table_info.GetFormat();
-	if (!format.IsHive()) {
-		throw NotImplementedException("ALTER TABLE is only supported for Hive tables in a Glue catalog, '%s' is a %s "
-		                              "table",
-		                              table_name, format.Describe(glue_table.table_info));
-	}
+	ThrowIfNotHiveTable(entry->Cast<GlueTable>().table_info, table_name);
 	if (info.type == AlterType::SET_COLUMN_COMMENT) {
 		SetColumnComment(context, table_name, info.Cast<SetColumnCommentInfo>());
 		return;
@@ -797,6 +822,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 		                       database_info.name);
 	}
+	ThrowIfNotHiveTable(current, table_name);
 	auto find_column = [](vector<GlueColumn> &columns, const string &name) -> optional_ptr<GlueColumn> {
 		for (auto &column : columns) {
 			if (StringUtil::CIEquals(column.name, name)) {
@@ -922,7 +948,7 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		                              EnumUtil::ToString(alter_table.alter_table_type));
 	}
 
-	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+	GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns, current.version_id);
 	RefreshTable(context, table_name);
 }
 

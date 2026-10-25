@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/exception/transaction_exception.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 
 #include "core/glue_info.hpp"
@@ -25,6 +26,15 @@ public:
 	}
 
 	bool access_denied;
+};
+
+//! An update derived from an earlier version of a Glue table, refused because the table changed since
+class GlueTableChangedException : public TransactionException {
+public:
+	GlueTableChangedException(const string &database_name, const string &table_name)
+	    : TransactionException("Glue table \"%s.%s\" was changed by another writer while it was being altered",
+	                           database_name, table_name) {
+	}
 };
 
 //! Thin wrapper around the AWS SDK Glue client
@@ -65,14 +75,18 @@ public:
 	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW)
 	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
 	//! Replace the (data) columns of a table, keeping everything else of its Glue definition as is. Used for
-	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata.
+	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata. With the
+	//! 'expected_version' (GlueTableInfo::version_id) the columns were derived from, throws a
+	//! GlueTableChangedException if the table is no longer at that version.
 	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                               const string &table_name, const vector<GlueColumn> &columns);
+	                               const string &table_name, const vector<GlueColumn> &columns,
+	                               const string &expected_version = string());
 	//! Replace the partition keys of a table, keeping everything else of its Glue definition as is. Only the names,
 	//! types and comments of the partition keys are overwritten; the StorageDescriptor and registered partitions are
 	//! untouched. Used for COMMENT ON COLUMN on a partition key.
 	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                     const string &table_name, const vector<GlueColumn> &partition_keys);
+	                                     const string &table_name, const vector<GlueColumn> &partition_keys,
+	                                     const string &expected_version = string());
 	//! Replace the description of a table (Glue's Table.Description), keeping everything else of its Glue definition
 	//! as is. An empty description clears it.
 	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,

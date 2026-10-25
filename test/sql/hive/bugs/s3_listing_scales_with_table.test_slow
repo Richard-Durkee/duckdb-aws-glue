@@ -205,9 +205,9 @@ SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
 1	0	1
 
-# Reading ten partitions of two thousand takes TWO root requests, not one: the root listing has passed S3's
-# 1000-key page size, so the request count has started tracking the table's size. Ten narrow listings
-# would have been ten requests over ten keys; this is two requests over two thousand. Extrapolating, 20k partitions is ~20 requests to read the same twenty rows.
+# Reading ten partitions of two thousand: the root listing would page through all two thousand keys one page after
+# another, two requests, while the ten partitions are listed together in one round. So they are listed one by one,
+# ten requests over ten keys, and the request count tracks what the query reads rather than the table's size
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -219,10 +219,9 @@ SELECT count(*) FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2','d3','
 query III
 SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
-2	2	0
+10	0	10
 
-# planning alone fetches only the first page of the root listing: the estimate measures a partition in it, and
-# only the scan continues the listing
+# planning alone lists one of the ten partitions: the estimate measures it, and only the scan lists the rest
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -232,7 +231,7 @@ EXPLAIN SELECT count(*) FROM my_datalake.default.scale2000 WHERE dt IN ('d1','d2
 query III
 SELECT requests, root_scoped, partition_scoped FROM listings();
 ----
-1	1	0
+1	0	1
 
 # still exact at a hundredfold the partition count of the first block
 query II

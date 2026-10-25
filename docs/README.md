@@ -94,10 +94,12 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   are listed (EXPLAIN shows the partitions kept as `Scanning Files`). A filter the partition values decide is
   true of every row the scan then reads, and is dropped from the plan, as for `read_parquet` with hive
   partitioning. When a query reads at least
-  `hive_partition_listing_threshold` (default 10) partitions below the table location, the location is listed once,
-  recursively (one S3 request per 1000 keys), and the files are matched to their partitions by prefix; fewer
-  partitions, and partitions at custom locations, are listed one directory each, 16 at a time on DuckDB's threads
-  (`SET threads`). A directory is listed once per
+  `hive_partition_listing_threshold` (default 10) partitions below the table location, and listing them would take
+  at least as many rounds of requests as listing the location takes pages, the location is listed once,
+  recursively (one S3 request per 1000 keys, one after another), and the files are matched to their partitions by
+  prefix; otherwise, and for partitions at custom locations, each partition is listed on its own, several at the same
+  time. `hive_partition_listing_concurrency` (default 0) sets how many: 0 lists them as tasks on DuckDB's threads, as
+  many at a time as `SET threads`, and a larger value lists that many at a time on threads of their own. A directory is listed once per
   query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
   false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
   cache (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way

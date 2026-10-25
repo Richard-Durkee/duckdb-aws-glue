@@ -17,6 +17,9 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/parallel/task_executor.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/common/atomic.hpp"
+#include "duckdb/common/thread.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -207,9 +210,27 @@ shared_ptr<const vector<idx_t>> HiveMultiFileList::PartitionIndexes() const {
 	return partition_indexes;
 }
 
-//! How many partition directories are listed together, as tasks on DuckDB's threads, when each partition gets its own
-//! listing
-static constexpr idx_t PARTITIONS_LISTED_TOGETHER = 16;
+//! hive_partition_listing_concurrency: how many partition directories are listed at a time on threads of their own,
+//! or 0 to list them as tasks on DuckDB's threads
+static idx_t ListingConcurrency(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_partition_listing_concurrency", setting) && !setting.IsNull()) {
+		return setting.GetValue<idx_t>();
+	}
+	return 0;
+}
+
+//! How many partition directories are listed at the same time when each partition gets its own listing
+static idx_t PartitionsListedTogether(ClientContext &context) {
+	auto concurrency = ListingConcurrency(context);
+	if (concurrency > 0) {
+		return concurrency;
+	}
+	return MaxValue<idx_t>(1, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
+}
+
+//! The keys S3 returns per ListObjectsV2 page
+static constexpr idx_t S3_KEYS_PER_LIST_PAGE = 1000;
 
 void HiveMultiFileList::PlanListings() const {
 	if (planned) {
@@ -241,16 +262,30 @@ void HiveMultiFileList::PlanListings() const {
 	if (client_context.TryGetCurrentSetting("hive_partition_listing_threshold", setting) && !setting.IsNull()) {
 		threshold = setting.GetValue<idx_t>();
 	}
+	// The root's listing pages through every partition below it one page after another, while the partitions read are
+	// listed together: list the root only when that takes no fewer round trips. Each partition holds at least one
+	// file, so the partitions below the root bound its pages from below
+	auto listed_together = PartitionsListedTogether(client_context);
+	idx_t partitions_below_root = 0;
+	for (auto &partition : *partitions) {
+		auto location = partition.location;
+		StringUtil::RTrim(location, "/");
+		if (!root.empty() && location.size() > root.size() + 1 && StringUtil::StartsWith(location, root + "/")) {
+			partitions_below_root++;
+		}
+	}
+	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
+	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
 	vector<idx_t> separately;
-	if (!below_root.empty() && below_root.size() >= threshold) {
+	if (!below_root.empty() && below_root.size() >= threshold && partition_rounds >= root_pages) {
 		listing_jobs.push_back(ListingJob {true, std::move(below_root)});
 	} else {
 		separately = std::move(below_root);
 	}
 	separately.insert(separately.end(), elsewhere.begin(), elsewhere.end());
 	// partitions that need their own listing go in batches, and each batch is listed in parallel
-	for (idx_t start = 0; start < separately.size(); start += PARTITIONS_LISTED_TOGETHER) {
-		auto end = MinValue<idx_t>(start + PARTITIONS_LISTED_TOGETHER, separately.size());
+	for (idx_t start = 0; start < separately.size(); start += listed_together) {
+		auto end = MinValue<idx_t>(start + listed_together, separately.size());
 		listing_jobs.push_back(ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end)});
 	}
 }
@@ -307,17 +342,54 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 		StringUtil::RTrim(location, "/");
 		locations.push_back(std::move(location));
 	}
-	// each listing costs at least one S3 round trip, so they run as tasks on DuckDB's threads rather than one after
-	// another; the first error cancels the listings not yet started and is thrown
+	// each listing costs at least one S3 round trip, so they run at the same time rather than one after another; the
+	// first error stops the listings not yet started and is thrown
 	vector<vector<OpenFileInfo>> listed(locations.size());
 	auto cached = CacheListings(client_context, *scan_info);
-	TaskExecutor executor(client_context);
-	vector<unique_ptr<BaseExecutorTask>> tasks;
-	for (idx_t i = 0; i < locations.size(); i++) {
-		tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
+	auto concurrency = ListingConcurrency(client_context);
+	if (concurrency == 0) {
+		// as tasks on DuckDB's threads
+		TaskExecutor executor(client_context);
+		vector<unique_ptr<BaseExecutorTask>> tasks;
+		for (idx_t i = 0; i < locations.size(); i++) {
+			tasks.push_back(make_uniq<ListPartitionTask>(executor, client_context, cached, locations[i], listed[i]));
+		}
+		executor.ScheduleTasks(std::move(tasks));
+		executor.WorkOnTasks();
+	} else {
+		// on threads of their own: a listing waits on S3 rather than working a CPU, so DuckDB's threads do not bound
+		// how many can be in flight
+		vector<ErrorData> errors(locations.size());
+		atomic<idx_t> next_location {0};
+		atomic<bool> failed {false};
+		auto list_locations = [&]() {
+			while (!failed) {
+				auto i = next_location++;
+				if (i >= locations.size()) {
+					return;
+				}
+				try {
+					ListDataFiles(client_context, cached, locations[i], listed[i]);
+				} catch (std::exception &ex) {
+					errors[i] = ErrorData(ex);
+					failed = true;
+				}
+			}
+		};
+		vector<thread> workers;
+		for (idx_t i = 1; i < MinValue<idx_t>(locations.size(), concurrency); i++) {
+			workers.emplace_back(list_locations);
+		}
+		list_locations();
+		for (auto &worker : workers) {
+			worker.join();
+		}
+		for (auto &error : errors) {
+			if (error.HasError()) {
+				error.Throw();
+			}
+		}
 	}
-	executor.ScheduleTasks(std::move(tasks));
-	executor.WorkOnTasks();
 	BuildPartitionLocations();
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (idx_t i = 0; i < locations.size(); i++) {

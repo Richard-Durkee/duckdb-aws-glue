@@ -1,6 +1,7 @@
 #include "planning/hive_multi_file_reader.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
+#include "core/glue_log_types.hpp"
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -17,6 +18,7 @@
 #include "duckdb/common/type_visitor.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -68,7 +70,12 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 			// unpartitioned, or a hive_scan that was given none
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 		} else {
+			GlueLogTimer timer;
 			partitions = GetTablePartitions(context, *this);
+			GlueScanEvent event(Describe(), "partitions");
+			event.partitions = partitions->size();
+			event.duration_ms = timer.ElapsedMillis();
+			DUCKDB_LOG(context, GlueScanLogType, event);
 		}
 	}
 	return partitions;
@@ -223,6 +230,12 @@ void HiveMultiFileList::PlanListings() const {
 	for (auto partition_index : elsewhere) {
 		listing_jobs.push_back(ListingJob {false, {partition_index}});
 	}
+	GlueScanEvent event(scan_info->Describe(), "plan");
+	event.partitions = partitions->size();
+	event.partitions_read = indexes->size();
+	event.listings = listing_jobs.size();
+	event.detail = listing_jobs.empty() || !listing_jobs[0].root ? "partitions" : "root";
+	DUCKDB_LOG(client_context, GlueScanLogType, event);
 }
 
 void HiveMultiFileList::BuildPartitionLocations() const {
@@ -342,19 +355,31 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		return false;
 	}
 	auto &job = listing_jobs[next_job++];
+	GlueLogTimer timer;
+	auto files_before = expanded_files.size();
+	string mode;
 	if (scan_info->partition_keys.empty()) {
 		if (scan_info->root_location.empty()) {
 			throw InvalidInputException("Hive table '%s' has no location", scan_info->Describe());
 		}
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
 		              expanded_files);
-		return true;
-	}
-	if (job.root) {
+		mode = "table";
+	} else if (job.root) {
 		ListRoot(job.partitions);
+		mode = "root";
 	} else {
 		ListPartition(job.partitions[0]);
+		mode = "partition";
 	}
+	GlueScanEvent event(scan_info->Describe(), "listing");
+	if (!scan_info->partition_keys.empty()) {
+		event.partitions_read = job.partitions.size();
+	}
+	event.files = expanded_files.size() - files_before;
+	event.duration_ms = timer.ElapsedMillis();
+	event.detail = mode;
+	DUCKDB_LOG(client_context, GlueScanLogType, event);
 	return true;
 }
 

@@ -160,14 +160,15 @@ HiveScanFilePartition FilePartition(const PlannedScan &scan, const string &path)
 }
 
 //! The call an engine distributing the scan would send, for every file of the plan under its partition
-string RenderCall(const PlannedScan &scan) {
-	auto call = Call(scan);
-	auto sql = "SELECT * FROM hive_scan(" + Quote(call.root);
-	for (auto &argument : call.arguments) {
+string RenderCall(const LogicalGet &get) {
+	auto call = HiveScanGetCall(get);
+	REQUIRE(call.has_value());
+	auto sql = "SELECT * FROM hive_scan(" + Quote(call->root);
+	for (auto &argument : call->arguments) {
 		sql += ", " + argument.first.GetIdentifierName() + " := " + argument.second.ToSQLString();
 	}
-	auto files = scan.Files();
-	if (call.partition_keys.empty()) {
+	auto files = get.bind_data->Cast<MultiFileBindData>().file_list->GetAllFiles();
+	if (call->partition_keys.empty()) {
 		vector<string> entries;
 		for (auto &file : files) {
 			entries.push_back(file.ToValue().ToSQLString());
@@ -177,26 +178,31 @@ string RenderCall(const PlannedScan &scan) {
 	vector<pair<HiveScanFilePartition, vector<string>>> partitions;
 	unordered_map<string, idx_t> partition_indexes;
 	for (auto &file : files) {
-		auto partition = FilePartition(scan, file.path);
-		auto key = StringUtil::Join(partition.values, "\x1f") + "\x1e" + partition.location;
+		auto partition = HiveScanGetFilePartition(get, file.path);
+		REQUIRE(partition.has_value());
+		auto key = StringUtil::Join(partition->values, "\x1f") + "\x1e" + partition->location;
 		auto entry = partition_indexes.find(key);
 		if (entry == partition_indexes.end()) {
 			entry = partition_indexes.emplace(key, partitions.size()).first;
-			partitions.emplace_back(partition, vector<string>());
+			partitions.emplace_back(*partition, vector<string>());
 		}
 		partitions[entry->second].second.push_back(file.ToValue().ToSQLString());
 	}
 	vector<string> entries;
 	for (auto &partition : partitions) {
 		string entry = "{";
-		for (idx_t k = 0; k < call.partition_keys.size(); k++) {
-			entry += Quote(call.partition_keys[k]) + ": " + Quote(partition.first.values[k]) + ", ";
+		for (idx_t k = 0; k < call->partition_keys.size(); k++) {
+			entry += Quote(call->partition_keys[k]) + ": " + Quote(partition.first.values[k]) + ", ";
 		}
 		entry += "'location': " + Quote(partition.first.location) + ", 'files': [" +
 		         StringUtil::Join(partition.second, ", ") + "]}";
 		entries.push_back(entry);
 	}
 	return sql + ", partitions := [" + StringUtil::Join(entries, ", ") + "])";
+}
+
+string RenderCall(const PlannedScan &scan) {
+	return RenderCall(scan.Get());
 }
 
 string Restate(Connection &con, const string &query) {
@@ -647,4 +653,58 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_scan_call][glue_cata
 	REQUIRE(StringUtil::Contains(call, "format := 'avro'"));
 	REQUIRE(Rows(con, call) == 3);
 	REQUIRE(Differences(con, query, call) == 0);
+}
+
+TEST_CASE("A Hive scan restricted to some of its files reads them with their partition values", "[hive_scan_call]") {
+	DuckDB db(nullptr);
+	Connection con(db);
+	TestDirectory dir("restrict");
+	vector<pair<string, int>> files = {{"a", 1}, {"a", 2}, {"b", 3}, {"c", 4}};
+	for (auto &file : files) {
+		Write(con, "SELECT " + std::to_string(file.second) + " AS id",
+		      dir.path + "/t/dt=" + file.first + "/" + std::to_string(file.second) + ".parquet", "FORMAT parquet");
+	}
+	auto scan = "hive_scan(" + Quote(dir.path + "/t") +
+	            ", schema := {id: 'INTEGER', dt: 'VARCHAR'}, partitions := [{dt: 'a'}, {dt: 'b'}, {dt: 'c'}])";
+	auto file_a2 = OpenFileInfo(dir.path + "/t/dt=a/2.parquet");
+	auto file_b3 = OpenFileInfo(dir.path + "/t/dt=b/3.parquet");
+	auto file_c4 = OpenFileInfo(dir.path + "/t/dt=c/4.parquet");
+	auto rows = [&](const string &call) {
+		return Scalar(con, "SELECT string_agg(dt || ':' || id, ',' ORDER BY id) FROM (" + call + ")").ToString();
+	};
+
+	string restated;
+	{
+		con.BeginTransaction();
+		auto plan = con.context->ExtractPlan("SELECT * FROM " + scan);
+		vector<reference<LogicalGet>> gets;
+		CollectGets(*plan, gets);
+		REQUIRE(gets.size() == 1);
+		auto &bind_data = gets[0].get().bind_data->Cast<MultiFileBindData>();
+		bind_data.file_list = bind_data.file_list->RestrictToFiles({file_c4, file_a2});
+		// a plan handed to another machine is serialized: the copy makes the same round trip
+		auto copy = plan->Copy(*con.context);
+		gets.clear();
+		CollectGets(*copy, gets);
+		REQUIRE(gets.size() == 1);
+		restated = RenderCall(gets[0].get());
+		plan.reset();
+		copy.reset();
+		con.Query("COMMIT");
+	}
+	REQUIRE(rows(restated) == "a:2,c:4");
+
+	// only the files the scan reads: not one of a partition the filter pruned, nor one it never had
+	con.BeginTransaction();
+	auto pruned = con.context->ExtractPlan("SELECT count(*) FROM " + scan + " WHERE dt != 'b'");
+	vector<reference<LogicalGet>> gets;
+	CollectGets(*pruned, gets);
+	REQUIRE(gets.size() == 1);
+	auto &pruned_files = *gets[0].get().bind_data->Cast<MultiFileBindData>().file_list;
+	REQUIRE_THROWS_WITH(pruned_files.RestrictToFiles({file_a2, file_b3}),
+	                    Catch::Contains("dt=b/3.parquet") && Catch::Contains("not one of the files the scan reads"));
+	REQUIRE_THROWS_WITH(pruned_files.RestrictToFiles({OpenFileInfo(dir.path + "/t/dt=a/9.parquet")}),
+	                    Catch::Contains("not one of the files the scan reads"));
+	pruned.reset();
+	con.Query("COMMIT");
 }

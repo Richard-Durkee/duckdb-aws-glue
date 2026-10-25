@@ -397,6 +397,55 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 }
 
+unique_ptr<MultiFileList> HiveMultiFileList::RestrictToFiles(const vector<OpenFileInfo> &files) const {
+	unordered_set<string> requested;
+	for (auto &file : files) {
+		requested.insert(file.path);
+	}
+	// listing every file attributes each to its partition
+	auto listed = GetAllFiles();
+	auto restricted = make_shared_ptr<HiveScanInfo>();
+	restricted->catalog_name = scan_info->catalog_name;
+	restricted->database_name = scan_info->database_name;
+	restricted->table_name = scan_info->table_name;
+	restricted->table = scan_info->table;
+	restricted->root_location = scan_info->root_location;
+	restricted->names = scan_info->names;
+	restricted->types = scan_info->types;
+	restricted->file_format = scan_info->file_format;
+	restricted->csv_options = scan_info->csv_options;
+	restricted->json_options = scan_info->json_options;
+	restricted->partition_keys = scan_info->partition_keys;
+	restricted->format_statistics = scan_info->format_statistics;
+	restricted->format_virtual_columns = scan_info->format_virtual_columns;
+	restricted->explicit_files = true;
+	auto partitions = scan_info->Partitions(client_context);
+	restricted->partition_files.resize(partitions->size());
+	for (auto &file : listed) {
+		if (!requested.erase(file.path)) {
+			continue;
+		}
+		if (scan_info->partition_keys.empty()) {
+			restricted->root_files.push_back(file);
+		} else {
+			restricted->partition_files[scan_info->GetPartitionIndexOfFile(file.path)].push_back(file);
+		}
+	}
+	if (!requested.empty()) {
+		throw InvalidInputException("Cannot restrict the scan of Hive table '%s' to \"%s\": it is not one of the "
+		                            "files the scan reads",
+		                            scan_info->Describe(), *requested.begin());
+	}
+	vector<idx_t> indexes;
+	for (idx_t partition_index = 0; partition_index < restricted->partition_files.size(); partition_index++) {
+		if (!restricted->partition_files[partition_index].empty()) {
+			indexes.push_back(partition_index);
+		}
+	}
+	restricted->SetPartitions(*partitions);
+	return make_uniq<HiveMultiFileList>(client_context, std::move(restricted), std::move(indexes));
+}
+
 bool HiveMultiFileList::ExpandNextPath() const {
 	// called with the list's lock held; runs one listing per call
 	if (scan_info->explicit_files) {

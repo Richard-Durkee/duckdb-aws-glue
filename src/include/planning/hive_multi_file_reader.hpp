@@ -104,6 +104,9 @@ public:
 	vector<OpenFileInfo> ListSampleDirectory() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
+	//! Gives the files to a copy of the scan info under the partitions they were listed in, as hive_scan's files are
+	//! given, so the restricted list keeps their partition values and survives serialization
+	unique_ptr<MultiFileList> RestrictToFiles(const vector<OpenFileInfo> &files) const override;
 
 protected:
 	bool ExpandNextPath() const override;

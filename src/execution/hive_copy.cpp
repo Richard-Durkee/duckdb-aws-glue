@@ -4,8 +4,29 @@
 
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
+#include "planning/hive_multi_file_reader.hpp"
+
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/multi_file/multi_file_list.hpp"
+#include "duckdb/common/string_util.hpp"
 
 namespace duckdb {
+
+//! A CREATE TABLE AS writes only to a location without data files: the files of a dropped table there would read as
+//! rows of the new one. Files a scan skips (_SUCCESS, directory markers, empty files) do not count.
+static void ThrowIfLocationHoldsFiles(ClientContext &context, const GlueTableInfo &table_info, const string &location) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
+	for (auto &file : listing->Files()) {
+		if (!IsHiveDataFile(file, location + "/")) {
+			continue;
+		}
+		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
+		                            "already holds files (e.g. '%s'), such as those of a dropped table, which would "
+		                            "read as rows of the new table. Delete them, or give the table another location",
+		                            table_info.database_name, table_info.name, location, file.path);
+	}
+}
 
 GlueHiveCopy::GlueHiveCopy(PhysicalPlan &physical_plan, vector<LogicalType> types, CopyFunction function,
                            unique_ptr<FunctionData> bind_data, idx_t estimated_cardinality,
@@ -22,6 +43,9 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 		// CREATE TABLE AS
 		annotated_lock_guard<annotated_mutex> guard(create_lock);
 		if (!table_created) {
+			auto location = table_info.location;
+			StringUtil::RTrim(location, "/");
+			ThrowIfLocationHoldsFiles(context, table_info, location);
 			auto &create_schema = *schema.get_mutable();
 			auto &catalog = create_schema.catalog;
 			auto created = create_schema.CreateTableFromInfo(catalog.GetCatalogTransaction(context), *info, table_info);

@@ -131,6 +131,10 @@ static bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
 	return !size.IsValid() || size.GetIndex() > 0;
 }
 
+bool IsHiveDataFile(const OpenFileInfo &file, const string &prefix) {
+	return IsDataFile(file, prefix);
+}
+
 //! Glue tables only: a hive_scan root has no catalog, and no write through the extension clears its listing
 static bool CacheListings(ClientContext &context, const HiveScanInfo &scan_info) {
 	if (scan_info.catalog_name.empty()) {

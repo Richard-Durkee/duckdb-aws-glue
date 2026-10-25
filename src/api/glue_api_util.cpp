@@ -4,6 +4,20 @@
 
 namespace duckdb {
 
+//! The SDK runs a synchronous call and its retries on the calling thread
+static thread_local idx_t glue_retries = 0;
+
+GlueRetryCounter::GlueRetryCounter() : start(glue_retries) {
+}
+
+bool GlueRetryCounter::Retried() const {
+	return glue_retries != start;
+}
+
+void GlueRetryCounter::Increment() {
+	glue_retries++;
+}
+
 string ToStdString(const Aws::String &input) {
 	return string(input.c_str(), input.size());
 }

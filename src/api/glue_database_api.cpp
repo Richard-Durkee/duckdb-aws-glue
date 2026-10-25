@@ -78,9 +78,16 @@ void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const
 	Aws::Glue::Model::CreateDatabaseRequest request;
 	SetCatalogId(request, catalog);
 	request.SetDatabaseInput(input);
+	GlueRetryCounter retries;
 	auto outcome = client->CreateDatabase(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			GlueDatabaseInfo existing;
+			if (retries.Retried() && GetDatabase(context, catalog, database.name, existing) &&
+			    existing.location_uri == database.location_uri) {
+				// the first attempt created it
+				return;
+			}
 			throw CatalogException("Glue database with name \"%s\" already exists", database.name);
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateDatabase '%s'", database.name));
@@ -140,7 +147,8 @@ void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const
 	auto outcome = client->DeleteDatabase(request);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
-			throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
+			// the caller found the database, so it is gone now (see DeleteTable)
+			return;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteDatabase '%s'", database_name));
 	}

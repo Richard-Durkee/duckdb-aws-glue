@@ -113,6 +113,24 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 	return true;
 }
 
+//! Whether the table a repeated CreateTable found is the one its first attempt created: same type, location and view
+//! text as the request
+static bool IsCreatedTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                           const string &database_name, const Aws::Glue::Model::TableInput &input) {
+	Aws::Glue::Model::GetTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetName(input.GetName());
+	auto outcome = client->GetTable(request);
+	if (!outcome.IsSuccess()) {
+		return false;
+	}
+	auto &table = outcome.GetResult().GetTable();
+	return table.GetTableType() == input.GetTableType() &&
+	       table.GetStorageDescriptor().GetLocation() == input.GetStorageDescriptor().GetLocation() &&
+	       table.GetViewOriginalText() == input.GetViewOriginalText();
+}
+
 void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateTable");
@@ -200,9 +218,13 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 	SetCatalogId(request, catalog);
 	request.SetDatabaseName(table.database_name);
 	request.SetTableInput(table_input);
+	GlueRetryCounter retries;
 	auto outcome = client->CreateTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			if (retries.Retried() && IsCreatedTable(client, catalog, table.database_name, table_input)) {
+				return;
+			}
 			throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table.name,
 			                       table.database_name);
 		}
@@ -260,9 +282,13 @@ void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const Glu
 	SetCatalogId(request, catalog);
 	request.SetDatabaseName(view.database_name);
 	request.SetTableInput(ToViewTableInput(view));
+	GlueRetryCounter retries;
 	auto outcome = client->CreateTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			if (retries.Retried() && IsCreatedTable(client, catalog, view.database_name, request.GetTableInput())) {
+				return;
+			}
 			throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view.name,
 			                       view.database_name);
 		}
@@ -442,8 +468,9 @@ void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const st
 	auto outcome = client->DeleteTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
-			throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
-			                       database_name);
+			// the caller found the table, so it is gone now: deleted by an earlier attempt of this call whose response
+			// was lost, or by another client
+			return;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
 	}

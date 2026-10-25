@@ -132,9 +132,17 @@ bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, cons
 	request.SetDatabaseName(database_name);
 	request.SetTableName(table_name);
 	request.SetPartitionInput(input);
+	GlueRetryCounter retries;
 	auto outcome = client->CreatePartition(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			GluePartitionInfo existing;
+			if (retries.Retried() &&
+			    GetPartition(context, catalog, database_name, table_name, partition.values, existing) &&
+			    existing.location == partition.location) {
+				// the first attempt created it
+				return true;
+			}
 			if (if_not_exists) {
 				return false;
 			}
@@ -158,10 +166,12 @@ bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, cons
 	request.SetDatabaseName(database_name);
 	request.SetTableName(table_name);
 	request.SetPartitionValues(ToAwsValues(values));
+	GlueRetryCounter retries;
 	auto outcome = client->DeletePartition(request);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
-			return false;
+			// unless the first attempt deleted it
+			return retries.Retried();
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeletePartition '%s.%s' [%s]", database_name, table_name,
 		                                           PartitionValuesToString(values)));
@@ -220,8 +230,15 @@ void GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, cons
 	request.SetTableName(table_name);
 	request.SetPartitionValueList(ToAwsValues(values));
 	request.SetPartitionInput(input);
+	GlueRetryCounter retries;
 	auto outcome = client->UpdatePartition(request);
 	if (!outcome.IsSuccess()) {
+		GluePartitionInfo renamed;
+		if (IsEntityNotFound(outcome) && retries.Retried() &&
+		    GetPartition(context, catalog, database_name, table_name, new_values, renamed)) {
+			// the first attempt renamed it
+			return;
+		}
 		ThrowGlueError(outcome,
 		               StringUtil::Format("UpdatePartition '%s.%s' [%s] -> [%s]", database_name, table_name,
 		                                  PartitionValuesToString(values), PartitionValuesToString(new_values)));

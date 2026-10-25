@@ -23,6 +23,20 @@ Aws::Vector<Aws::String> ToAwsValues(const vector<string> &values);
 string PartitionValuesToString(const vector<string> &values);
 void CheckWritable(const GlueCatalog &catalog, const string &operation);
 
+//! Whether the AWS SDK sent a Glue call made on this thread while the counter lives more than once. A write whose
+//! response was lost is sent again, and the repeat then sees the effect of the first one (AlreadyExists /
+//! EntityNotFound), which this tells apart from a real conflict.
+class GlueRetryCounter {
+public:
+	GlueRetryCounter();
+	bool Retried() const;
+	//! Called by the client's retry strategy before each retry
+	static void Increment();
+
+private:
+	idx_t start;
+};
+
 template <class OUTCOME>
 [[noreturn]] void ThrowGlueError(const OUTCOME &outcome, const string &operation) {
 	auto &error = outcome.GetError();

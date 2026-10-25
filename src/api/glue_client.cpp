@@ -10,6 +10,9 @@
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/client/RetryStrategy.h>
+#include <aws/core/config/ConfigAndCredentialsCacheManager.h>
+#include <aws/core/platform/Environment.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
 
 #include <sys/stat.h>
@@ -37,6 +40,63 @@ string SelectCURLCertPath() {
 		}
 	}
 	return string();
+}
+
+//! The client's retry strategy, counting the retries for GlueRetryCounter
+class GlueRetryStrategy : public Aws::Client::RetryStrategy {
+public:
+	explicit GlueRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
+	    : strategy(std::move(strategy_p)) {
+	}
+
+	bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+	                 long attempted_retries) const override {
+		auto retry = strategy->ShouldRetry(error, attempted_retries);
+		if (retry) {
+			GlueRetryCounter::Increment();
+		}
+		return retry;
+	}
+	long CalculateDelayBeforeNextRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+	                                   long attempted_retries) const override {
+		return strategy->CalculateDelayBeforeNextRetry(error, attempted_retries);
+	}
+	long GetMaxAttempts() const override {
+		return strategy->GetMaxAttempts();
+	}
+	void GetSendToken() override {
+		strategy->GetSendToken();
+	}
+	bool HasSendToken() override {
+		return strategy->HasSendToken();
+	}
+	void RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome) override {
+		strategy->RequestBookkeeping(outcome);
+	}
+	void RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
+	                        const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) override {
+		strategy->RequestBookkeeping(outcome, last_error);
+	}
+	const char *GetStrategyName() const override {
+		return strategy->GetStrategyName();
+	}
+
+private:
+	std::shared_ptr<Aws::Client::RetryStrategy> strategy;
+};
+
+//! The retry mode set with AWS_RETRY_MODE or the profile's retry_mode; otherwise the SDK's standard mode (exponential
+//! backoff with jitter and a retry quota, three attempts unless AWS_MAX_ATTEMPTS / max_attempts says otherwise) instead
+//! of its legacy default of ten retries without jitter
+std::shared_ptr<Aws::Client::RetryStrategy> CreateRetryStrategy() {
+	auto retry_mode = Aws::Environment::GetEnv("AWS_RETRY_MODE");
+	if (retry_mode.empty()) {
+		retry_mode = Aws::Config::GetCachedConfigValue("retry_mode");
+	}
+	if (retry_mode.empty()) {
+		retry_mode = "standard";
+	}
+	return std::make_shared<GlueRetryStrategy>(Aws::Client::InitRetryStrategy(retry_mode));
 }
 
 const string &GetCURLCertPath() {
@@ -99,6 +159,7 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	}
 	auto &db_config = DBConfig::GetConfig(context);
 	config.userAgent = db_config.UserAgent();
+	config.retryStrategy = CreateRetryStrategy();
 
 	Aws::Auth::AWSCredentials credentials(key_id, secret, session_token);
 	auto provider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(credentials);

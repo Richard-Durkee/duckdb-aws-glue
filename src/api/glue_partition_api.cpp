@@ -9,6 +9,7 @@
 #include "duckdb/parallel/task_executor.hpp"
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
+#include <aws/glue/model/BatchGetPartitionRequest.h>
 #include <aws/glue/model/CreatePartitionRequest.h>
 #include <aws/glue/model/DeletePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
@@ -353,6 +354,113 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 			if (total_segments > 1 && !seen.insert(StringUtil::Join(partition.values, "\x1f")).second) {
 				continue;
 			}
+			result.push_back(std::move(partition));
+		}
+	}
+	return result;
+}
+
+//! The partitions one BatchGetPartition request asks for
+static constexpr idx_t GLUE_BATCH_GET_PARTITION_SIZE = 100;
+//! How often the partitions Glue leaves unprocessed (UnprocessedKeys) are asked for again
+static constexpr idx_t GLUE_BATCH_GET_PARTITION_RETRIES = 5;
+
+//! The partitions among values[offset, offset + count) that exist, appended to 'result'
+static void BatchGetPartitionBatch(Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
+                                   const string &database_name, const string &table_name,
+                                   const vector<vector<string>> &values, idx_t offset, idx_t count,
+                                   vector<GluePartitionInfo> &result) {
+	Aws::Vector<Aws::Glue::Model::PartitionValueList> keys;
+	for (idx_t i = offset; i < offset + count; i++) {
+		Aws::Glue::Model::PartitionValueList key;
+		key.SetValues(ToAwsValues(values[i]));
+		keys.push_back(std::move(key));
+	}
+	for (idx_t attempt = 0; !keys.empty(); attempt++) {
+		if (attempt > GLUE_BATCH_GET_PARTITION_RETRIES) {
+			throw IOException("Glue BatchGetPartition '%s.%s' left %d partitions unprocessed", database_name,
+			                  table_name, keys.size());
+		}
+		Aws::Glue::Model::BatchGetPartitionRequest request;
+		SetCatalogId(request, catalog);
+		request.SetDatabaseName(database_name);
+		request.SetTableName(table_name);
+		request.SetPartitionsToGet(keys);
+		auto outcome = client.BatchGetPartition(request);
+		if (!outcome.IsSuccess()) {
+			ThrowGlueError(outcome, StringUtil::Format("BatchGetPartition '%s.%s'", database_name, table_name));
+		}
+		for (auto &partition : outcome.GetResult().GetPartitions()) {
+			GluePartitionInfo info;
+			for (auto &value : partition.GetValues()) {
+				info.values.push_back(ToStdString(value));
+			}
+			info.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+			result.push_back(std::move(info));
+		}
+		keys = outcome.GetResult().GetUnprocessedKeys();
+	}
+}
+
+class BatchGetPartitionTask : public BaseExecutorTask {
+public:
+	BatchGetPartitionTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
+	                      const GlueCatalog &catalog, const string &database_name, const string &table_name,
+	                      const vector<vector<string>> &values, idx_t offset, idx_t count,
+	                      vector<GluePartitionInfo> &result)
+	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), database_name(database_name),
+	      table_name(table_name), values(values), offset(offset), count(count), result(result) {
+	}
+
+	void ExecuteTask() override {
+		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
+		// connection's HTTP log
+		GlueHttpClientContextScope http_scope(context);
+		BatchGetPartitionBatch(client, catalog, database_name, table_name, values, offset, count, result);
+	}
+	string TaskType() const override {
+		return "BatchGetPartitionTask";
+	}
+
+private:
+	ClientContext &context;
+	Aws::Glue::GlueClient &client;
+	const GlueCatalog &catalog;
+	const string &database_name;
+	const string &table_name;
+	const vector<vector<string>> &values;
+	idx_t offset;
+	idx_t count;
+	vector<GluePartitionInfo> &result;
+};
+
+vector<GluePartitionInfo> GlueAPI::BatchGetPartitions(ClientContext &context, GlueCatalog &catalog,
+                                                      const string &database_name, const string &table_name,
+                                                      const vector<vector<string>> &values) {
+	if (values.empty()) {
+		return vector<GluePartitionInfo>();
+	}
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	auto batch_count = (values.size() + GLUE_BATCH_GET_PARTITION_SIZE - 1) / GLUE_BATCH_GET_PARTITION_SIZE;
+	vector<vector<GluePartitionInfo>> batch_results(batch_count);
+	if (batch_count == 1) {
+		BatchGetPartitionBatch(*client, catalog, database_name, table_name, values, 0, values.size(), batch_results[0]);
+	} else {
+		// the batches do not overlap, so their requests can run at the same time
+		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+		for (idx_t batch = 0; batch < batch_count; batch++) {
+			auto offset = batch * GLUE_BATCH_GET_PARTITION_SIZE;
+			auto count = MinValue<idx_t>(GLUE_BATCH_GET_PARTITION_SIZE, values.size() - offset);
+			executor.ScheduleTask(make_uniq<BatchGetPartitionTask>(executor, context, *client, catalog, database_name,
+			                                                       table_name, values, offset, count,
+			                                                       batch_results[batch]));
+		}
+		executor.WorkOnTasks();
+	}
+	vector<GluePartitionInfo> result;
+	for (auto &batch_result : batch_results) {
+		for (auto &partition : batch_result) {
 			result.push_back(std::move(partition));
 		}
 	}

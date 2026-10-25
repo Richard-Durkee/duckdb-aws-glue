@@ -112,6 +112,11 @@ public:
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
 	                                               const string &database_name, const string &table_name);
+	//! The partitions of a Hive table with exactly these values (BatchGetPartition); values no partition has are left
+	//! out
+	static vector<GluePartitionInfo> BatchGetPartitions(ClientContext &context, GlueCatalog &catalog,
+	                                                    const string &database_name, const string &table_name,
+	                                                    const vector<vector<string>> &values);
 	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<GluePartitionInput> &partitions);

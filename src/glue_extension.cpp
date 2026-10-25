@@ -53,6 +53,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "and show up in the HTTP log. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	config.AddExtensionOption("glue_batch_get_partitions",
+	                          "When the filters of a query pin every partition key of a Hive table to a few values, "
+	                          "look those partitions up in Glue by their values (BatchGetPartition) instead of listing "
+	                          "all partitions of the table. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	config.AddExtensionOption("glue_get_partitions_segments",
 	                          "How many GetPartitions requests to run at the same time when listing the partitions of "
 	                          "a table (Glue's Segment API splits them over non overlapping segments). 0, the "

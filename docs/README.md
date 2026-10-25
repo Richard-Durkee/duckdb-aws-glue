@@ -318,6 +318,16 @@ partition would otherwise repeat, which is not used: only the partition values a
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
 
+When the filters of a scan pin every partition key to a few values (`=` or `IN` with string constants on string keys,
+combined with `AND`, at most 1000 combinations), the partitions are looked up by their values with
+`BatchGetPartition` (100 per request, the requests in parallel) instead of listing all partitions of the table;
+combinations no partition has do not come back, and every filter is still applied to the partitions that do. Scans
+asking for the same values share one lookup, and once all partitions of the table are known (another scan in the
+query, or the metadata cache) no lookup is made. A file found below a partition's location but not directly in it may
+belong to a partition nested there that was not looked up; the scan then fetches all partitions once, so files belong
+to the same partition either way. `EXPLAIN` counts the partitions looked up in `Scanning Files`.
+`SET glue_batch_get_partitions = false` lists all partitions again.
+
 ## Inspecting tables
 
 Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,

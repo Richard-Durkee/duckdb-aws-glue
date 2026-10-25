@@ -17,6 +17,10 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
+# the partitions are listed (GetPartitions), not looked up by their values
+statement ok
+SET glue_batch_get_partitions = false;
+
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.lp_orders;
 

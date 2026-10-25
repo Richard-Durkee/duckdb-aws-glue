@@ -18,6 +18,8 @@ struct GlueTableEntry {
 	shared_ptr<const GlueTableInfo> table_info DUCKDB_GUARDED_BY(lock);
 	//! Null until the first scan of a partitioned table asks Glue for them
 	shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(lock);
+	//! The partitions looked up by their values, per lookup (PinnedPartitionsKey)
+	unordered_map<string, shared_ptr<const vector<GluePartitionInfo>>> pinned_partitions DUCKDB_GUARDED_BY(lock);
 };
 
 //! The sample of a table, measured once per query for every scan of the table
@@ -57,6 +59,12 @@ private:
 
 //! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info);
+//! The partitions of the table of 'info' with exactly these 'values', looked up once per query for every scan asking
+//! for the same ones. When all partitions of the table are known already those are returned instead, and 'pinned'
+//! tells which it is.
+shared_ptr<const vector<GluePartitionInfo>> GetPinnedTablePartitions(ClientContext &context, const HiveScanInfo &info,
+                                                                     const vector<vector<string>> &values,
+                                                                     bool &pinned);
 //! Drop the connection's cached directory listings
 void ClearHiveListingCache(ClientContext &context);
 

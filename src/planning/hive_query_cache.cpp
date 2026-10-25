@@ -132,4 +132,42 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 	return entry->partitions;
 }
 
+//! The cache key of a lookup by values
+static string PinnedPartitionsKey(const vector<vector<string>> &values) {
+	string key;
+	for (auto &partition : values) {
+		key += StringUtil::Join(partition, "\x1f") + "\x1e";
+	}
+	return key;
+}
+
+shared_ptr<const vector<GluePartitionInfo>> GetPinnedTablePartitions(ClientContext &context, const HiveScanInfo &info,
+                                                                     const vector<vector<string>> &values,
+                                                                     bool &pinned) {
+	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
+	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	pinned = false;
+	auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
+	auto cache = GlueTransactionCache::Of(context, catalog);
+	if (!entry->partitions && cache) {
+		entry->partitions = cache->CachedPartitions(info.database_name, info.table_name);
+	}
+	if (entry->partitions) {
+		// all partitions known already: nothing to ask Glue
+		return entry->partitions;
+	}
+	auto key = PinnedPartitionsKey(values);
+	auto &partitions = entry->pinned_partitions[key];
+	if (!partitions) {
+		auto load = [&]() {
+			return make_shared_ptr<const vector<GluePartitionInfo>>(
+			    GlueAPI::BatchGetPartitions(context, catalog, info.database_name, info.table_name, values));
+		};
+		partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load, key) : load();
+	}
+	pinned = true;
+	return partitions;
+}
+
 } // namespace duckdb

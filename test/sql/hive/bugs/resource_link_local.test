@@ -1,6 +1,7 @@
 # name: test/sql/hive/bugs/resource_link_local.test
 # description: A table read through a database resource link, against the local servers
 # group: [bugs]
+
 #
 # moto cannot model a resource link, so scripts/resource_link_proxy.py (GLUE_LINK_PROXY_ENDPOINT) stands in front of
 # it: it answers table requests on link_db with the target's DatabaseName (target_db), as Glue does, shows a DuckDB

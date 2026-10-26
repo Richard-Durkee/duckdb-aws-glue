@@ -1,6 +1,7 @@
 # name: test/sql/hive/bugs/resource_link_refresh.test
 # description: A table read through a database resource link is re-fetched under the link, not the target database
 # group: [bugs]
+
 #
 # Needs a fixture this test cannot create (a resource link needs the Glue API's TargetDatabase):
 #   GLUE_LINK_DATABASE           a database that is a resource link, in GLUE_CATALOG_ID

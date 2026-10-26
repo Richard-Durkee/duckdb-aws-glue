@@ -20,8 +20,11 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -114,7 +117,7 @@ string HiveScanInfo::Describe() const {
 //! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
 //! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
 //! file of any format the reader opens
-static bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
+bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
 	if (!StringUtil::StartsWith(file.path, prefix)) {
 		return false;
 	}
@@ -651,6 +654,28 @@ static bool HasBinaryColumn(const HiveScanInfo &scan_info) {
 	return false;
 }
 
+static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data,
+                                          vector<unique_ptr<Expression>> &filters) {
+	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
+	auto &scan_info = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	if (scan_info.format_pushdown_complex_filter) {
+		scan_info.format_pushdown_complex_filter(context, get, bind_data, filters);
+	}
+	// Occupy table_filters with an always-true filter: FilterPushdown then keeps every filter in the plan instead
+	// of converting it into table filters the text readers cannot apply (see InitializeReader). The join filters
+	// are unaffected: they attach to the scan at run time and prune the file list through the partition values.
+	if (!filters.empty() && !get.table_filters.HasFilters() && !get.GetColumnIds().empty()) {
+		auto &type = get.GetColumnType(get.GetColumnIds()[0]);
+		auto always_true = make_uniq<BoundConjunctionExpression>(
+		    ExpressionType::CONJUNCTION_OR,
+		    ExpressionFilter::CreateNullCheckExpression(make_uniq<BoundReferenceExpression>(type, 0ULL),
+		                                                ExpressionType::OPERATOR_IS_NULL),
+		    ExpressionFilter::CreateNullCheckExpression(make_uniq<BoundReferenceExpression>(type, 0ULL),
+		                                                ExpressionType::OPERATOR_IS_NOT_NULL));
+		get.table_filters.PushFilter(ProjectionIndex(0), make_uniq<ExpressionFilter>(std::move(always_true)));
+	}
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -738,6 +763,14 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.get_table_entry = HiveScanGetTableEntry;
 	scan_info->format_virtual_columns = scan_function.get_virtual_columns;
 	scan_function.get_virtual_columns = HiveScanGetVirtualColumns;
+	if (IsTextFileFormat(scan_info->file_format)) {
+		// join filters prune partitions; every other filter stays in the plan (HiveTextComplexFilterPushdown), and
+		// the text readers never evaluate table filters (see InitializeReader)
+		scan_info->format_pushdown_complex_filter = scan_function.pushdown_complex_filter;
+		scan_function.pushdown_complex_filter = HiveTextComplexFilterPushdown;
+		scan_function.filter_pushdown = true;
+		scan_function.filter_prune = false;
+	}
 
 	vector<LogicalType> return_types;
 	vector<Identifier> names;
@@ -1164,12 +1197,38 @@ static void DecodeBlobAsText(ClientContext &context, unique_ptr<Expression> &exp
 	expr = function_binder.BindScalarFunction(DEFAULT_SCHEMA, "decode", std::move(children));
 }
 
+//! Make the cast of a field's text to BOOLEAN lower(text) = 'true', as OpenCSVSerde reads a boolean
+static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &expr) {
+	if (!expr || !BoundCastExpression::IsCast(*expr) || expr->GetReturnType().id() != LogicalTypeId::BOOLEAN) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	if (BoundCastExpression::Child(cast).GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(BoundCastExpression::ChildMutable(cast)));
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto lower = function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier("lower"),
+	                                                std::move(children), error);
+	if (!lower) {
+		error.Throw();
+	}
+	expr = BoundComparisonExpression::Create(ExpressionType::COMPARE_EQUAL, std::move(lower),
+	                                         make_uniq<BoundConstantExpression>(Value("true")));
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
                                                            const vector<ColumnIndex> &global_column_ids,
                                                            optional_ptr<TableFilterSet> table_filters,
                                                            ClientContext &context, MultiFileGlobalState &gstate) {
+	if (IsTextFileFormat(ScanInfo().file_format)) {
+		// partition-column filters were applied by pruning the file list; nothing reaches read_csv/read_json
+		table_filters = nullptr;
+	}
 	auto result = MultiFileReader::InitializeReader(reader_data, bind_data, global_columns, global_column_ids,
 	                                                table_filters, context, gstate);
 	if (ScanInfo().file_format == HiveFileFormat::PARQUET) {
@@ -1191,11 +1250,14 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 	if (!reader_data.reader->expression_map.empty()) {
 		throw InternalException("Hive text table '%s': a filter was pushed into read_csv", ScanInfo().Describe());
 	}
-	if (!ScanInfo().csv_options.null_for_invalid_data) {
-		return result;
-	}
+	auto &csv_options = ScanInfo().csv_options;
 	for (auto &expr : reader_data.expressions) {
-		MakeTryCast(context, expr);
+		if (csv_options.false_unless_true) {
+			MakeFalseUnlessTrue(context, expr);
+		}
+		if (csv_options.null_for_invalid_data) {
+			MakeTryCast(context, expr);
+		}
 	}
 	return result;
 }

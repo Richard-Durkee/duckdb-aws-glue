@@ -1,5 +1,9 @@
 #include "planning/glue_hive_insert.hpp"
 
+#include "api/glue_api_util.hpp"
+
+#include "duckdb/common/file_system.hpp"
+#include "duckdb/common/error_data.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -142,7 +146,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	}
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
-	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.database_name, table_info.name);
+	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
@@ -281,7 +285,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		if (header_lines > 1) {
 			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: its files start with %d "
 			                              "header lines, DuckDB writes at most one",
-			                              table_info.database_name, table_info.name, header_lines);
+			                              table_info.schema_name, table_info.name, header_lines);
 		}
 		auto delimiter = table_info.GetFieldDelimiter();
 		auto quoted = table_info.GetSerDe() == HiveSerDe::OPEN_CSV;
@@ -289,7 +293,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		if (delimiter.size() > 1) {
 			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: DuckDB writes single-byte "
 			                              "field delimiters only, the table's is '%s'",
-			                              table_info.database_name, table_info.name, delimiter);
+			                              table_info.schema_name, table_info.name, delimiter);
 		}
 		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
 		copy_options[Identifier("delimiter")] = {Value(delimiter)};
@@ -311,11 +315,10 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		for (idx_t i = 0; i < names.size(); i++) {
 			unique_ptr<Expression> column = make_uniq<BoundReferenceExpression>(types[i], i);
 			if (std::find(partition_columns.begin(), partition_columns.end(), i) == partition_columns.end()) {
-				auto message =
-				    StringUtil::Format("Writing to Hive table '%s.%s' failed: a value of column '%s' %s, "
-				                       "which the table's %s files can not hold in a field",
-				                       table_info.database_name, table_info.name, names[i].GetIdentifierName(), reason,
-				                       quoted ? "OpenCSVSerde" : "LazySimpleSerDe");
+				auto message = StringUtil::Format("Writing to Hive table '%s.%s' failed: a value of column '%s' %s, "
+				                                  "which the table's %s files can not hold in a field",
+				                                  table_info.schema_name, table_info.name, names[i].GetIdentifierName(),
+				                                  reason, quoted ? "OpenCSVSerde" : "LazySimpleSerDe");
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
@@ -592,7 +595,24 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	for (auto &entry : partitions) {
 		to_register.push_back(entry.second);
 	}
-	GlueAPI::BatchCreatePartitions(context, catalog, table_info.database_name, table_info.name, to_register);
+	try {
+		GlueAPI::BatchCreatePartitions(context, catalog, table_info.schema_name, table_info.name, to_register);
+	} catch (std::exception &ex) {
+		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
+		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.
+		ErrorData error(ex);
+		try {
+			FileSystem::GetFileSystem(context).RemoveFiles(state.written_files);
+		} catch (std::exception &remove_ex) {
+			throw IOException("INSERT into Hive table '%s.%s' failed: %s. Deleting the %llu files it wrote failed too "
+			                  "(%s); remove them before running it again",
+			                  table_info.schema_name, table_info.name, error.RawMessage(), state.written_files.size(),
+			                  ErrorData(remove_ex).RawMessage());
+		}
+		throw IOException("INSERT into Hive table '%s.%s' was rolled back: %s. The files it wrote were deleted, so it "
+		                  "can be run again",
+		                  table_info.schema_name, table_info.name, error.RawMessage());
+	}
 	return SinkFinalizeType::READY;
 }
 

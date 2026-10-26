@@ -226,13 +226,13 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 			                              "projection.* parameters and ignores the ones registered in Glue, so a scan "
 			                              "of the registered ones would read no rows or the wrong ones. Set "
 			                              "projection.enabled to false and register the partitions to read it",
-			                              table_info.database_name, table_info.name);
+			                              table_info.schema_name, table_info.name);
 		}
 		return GetHiveScanFunction(context, bind_data, table_info);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
 		                              "glue_get_table_response() to inspect its definition",
-		                              table_info.database_name, table_info.name, format.Describe(table_info));
+		                              table_info.schema_name, table_info.name, format.Describe(table_info));
 	}
 }
 
@@ -245,7 +245,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	// decides the file format (throws for unsupported SerDes).
 	auto scan_info = make_shared_ptr<HiveScanInfo>();
 	scan_info->catalog_name = catalog.GetName().GetIdentifierName();
-	scan_info->database_name = latest_info.database_name;
+	scan_info->database_name = latest_info.schema_name;
 	scan_info->table_name = latest_info.name;
 	scan_info->table = this;
 	scan_info->root_location = latest_info.location;
@@ -260,7 +260,7 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 		scan_info->json_options = latest_info.GetJSONOptions();
 		for (auto &property : scan_info->json_options.unsupported_properties) {
 			DUCKDB_LOG_WARNING(context, "Glue table '%s.%s': SerDe property '%s' is not applied when reading",
-			                   latest_info.database_name, latest_info.name, property);
+			                   latest_info.schema_name, latest_info.name, property);
 		}
 	}
 	for (auto &column : GetColumns().Logical()) {

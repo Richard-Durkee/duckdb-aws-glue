@@ -61,7 +61,10 @@ GlueTableType GlueTableTypeFromString(const string &type);
 //! A Glue "Table"
 struct GlueTableInfo {
 	string name;
-	string database_name;
+	//! The schema name of the table in the attached Glue catalog
+	string schema_name;
+	//! Table.DatabaseName as Glue returned it: through a resource link, the link's target database
+	string glue_database_name;
 	//! The Glue TableType as written (EXTERNAL_TABLE, VIRTUAL_VIEW, ...), not the open table format
 	string glue_table_type;
 	GlueTableType table_type = GlueTableType::OTHER;
@@ -162,7 +165,7 @@ struct GlueViewInfo {
 	string sql;
 	//! ViewExpandedText: tables as <db>.<table>, of other Glue catalogs by catalog id (executed)
 	string expanded_sql;
-	//! The bound output columns; empty for a view created with DEFER_BINDING
+	//! The bound output columns
 	vector<GlueColumn> columns;
 	bool secure = false;
 };

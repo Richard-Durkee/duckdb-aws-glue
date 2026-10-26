@@ -274,6 +274,30 @@ SELECT * FROM hive_scan('s3://bucket/warehouse/orders',
   `partitions := []` with `partition_keys` reads no rows.
 - A root or partition without data files scans as zero rows.
 
+## Reading a scan's files with a standard reader (C++)
+
+An engine that hands some of a Hive scan's files to machines without this extension (and without Glue access) can
+read them there with a standard reader. `functions/hive_reader_call.hpp` gives what that read needs from a bound scan,
+of a Glue table or of a `hive_scan()` call, using only core DuckDB types:
+
+- `HiveScanGetReaderCall(get)`: the reader (`read_parquet`, `read_csv`, `read_json` or `read_avro`), its named
+  parameters and the scan's data columns as expressions over the reader's columns. The parameters are those the scan
+  bound the reader with (a text table's dialect, header lines and NULL spelling, `hive_csv_parallel` as the planning
+  session had it), plus the data columns as `schema` for Parquet and Avro and `hive_partitioning := false`. A column
+  of a SerDe text table is the field read as text and converted with `TRY_CAST` (`CAST` without
+  `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde boolean), of the
+  field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into `read_csv`,
+  which would convert the text itself and strictly.
+- `HiveScanGetFilePartitionValues(get, path)`: the values of the partition a listed file belongs to, as constants of
+  the partition columns' types.
+
+The caller reads a set of the scan's files as `SELECT <columns>, <partition values> FROM <reader>([<files>],
+<parameters>)`, one such read per partition, `UNION ALL`ed. Neither function calls Glue or needs a `ClientContext`.
+Both return nothing for a scan they do not recognize, and `HiveScanGetReaderCall` also for a Parquet table with a
+`binary` column, whose string columns are decoded file by file, and for a csv or json scan the optimizer pushed a
+type into that the reader parses itself. Both only work when the caller and this extension are linked into the same
+binary.
+
 ## Partitions
 
 DuckDB has no `ALTER TABLE ... PARTITION` syntax, so the Hive partition statements are table functions. The

@@ -3,6 +3,8 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/named_parameter_map.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/open_file_info.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -48,11 +50,15 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! stay in the plan while filter_pushdown stays enabled for the join filters that prune partitions. Null when the
 	//! reader has none.
 	table_function_pushdown_complex_filter_t format_pushdown_complex_filter = nullptr;
+	//! The named parameters BindHiveScan bound the file format reader with, which read any of the data files
+	named_argument_map_t reader_parameters;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
 	//! The partition (index into 'partitions') the file at 'path' belongs to
 	idx_t GetPartitionIndexOfFile(const string &path) const;
+	//! The same, or nothing when the file list has not listed 'path'
+	optional_idx FindPartitionIndexOfFile(const string &path) const;
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
 	//! A description of the table for error messages
 	string Describe() const;

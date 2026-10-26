@@ -26,9 +26,6 @@ public:
 	//! None: the files of a Hive table have no row identifier
 	vector<column_t> GetRowIdColumns() const override;
 
-	//! Re-fetch the table definition from Glue
-	GlueTableInfo RefreshTableInfo(ClientContext &context) const;
-
 	//! Called by duckdb_tables().sql / ToSQL(). On a Hive table we can round-trip, the sql column
 	//! renders as a full CREATE TABLE ... WITH (...). Otherwise it renders the "Not supported:
 	//! ..." reason inline, so a bulk catalog scan never breaks on a single bad table.

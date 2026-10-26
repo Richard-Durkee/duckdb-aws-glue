@@ -95,6 +95,21 @@ static string BucketingOptionFor(const string &key) {
 	return string();
 }
 
+//! How a table is given what another engine's CREATE TABLE option asks for, empty if the key is none of them. Stored as
+//! a table parameter, as other unknown options are, these would leave the table without it and say nothing.
+static string OtherEngineOptionFor(const string &key) {
+	static const pair<const char *, const char *> SPELLINGS[] = {{"partitioned_by", "a PARTITIONED BY (...) clause"},
+	                                                             {"partitioning", "a PARTITIONED BY (...) clause"},
+	                                                             {"external_location", "option 'location'"},
+	                                                             {"field_delimiter", "option 'delimiter'"}};
+	for (auto &spelling : SPELLINGS) {
+		if (StringUtil::CIEquals(key, spelling.first)) {
+			return spelling.second;
+		}
+	}
+	return string();
+}
+
 static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
 	Value enabled;
 	if (context.TryGetCurrentSetting("glue_create_bucketed_tables", enabled) && !enabled.IsNull() &&
@@ -301,6 +316,9 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			// stored as a table parameter this would silently leave the table unbucketed
 			throw BinderException("Unknown CREATE TABLE option '%s', a bucketed Glue table is created with option '%s'",
 			                      key, BucketingOptionFor(key));
+		} else if (!OtherEngineOptionFor(key).empty()) {
+			throw BinderException("Unknown CREATE TABLE option '%s', a Glue table is given this with %s", key,
+			                      OtherEngineOptionFor(key));
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;

@@ -464,9 +464,9 @@ TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
 
 `.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
 their timings (5 runs each) in two jobs of about three minutes, so it runs only a few join-heavy TPC-H and TPC-DS
-queries. The parquet job runs `benchmark/*.benchmark`, `benchmark/pushdown/`, the parquet benchmarks of
+queries. The parquet job runs `benchmark/*.benchmark`, the parquet benchmarks of `benchmark/pushdown/` and
 `benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
-`benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
+`benchmark/pushdown/` and `benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
 other queries and the json and avro TPC benchmarks only run locally.
 
 ## Building

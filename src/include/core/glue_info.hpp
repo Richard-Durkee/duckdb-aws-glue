@@ -156,7 +156,7 @@ struct GlueViewInfo {
 	string sql;
 	//! ViewExpandedText: tables as <db>.<table>, of other Glue catalogs by catalog id (executed)
 	string expanded_sql;
-	//! The bound output columns; empty for a view created with DEFER_BINDING
+	//! The bound output columns
 	vector<GlueColumn> columns;
 	bool secure = false;
 };

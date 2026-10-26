@@ -38,7 +38,7 @@ statement ok
 DROP VIEW IF EXISTS writer_cat.default.an_view_other_path;
 
 statement ok
-DROP VIEW IF EXISTS writer_cat.default.an_view_defer;
+DROP VIEW IF EXISTS writer_cat.default.an_view_noprobe;
 
 statement ok
 DROP VIEW IF EXISTS writer_cat.default.an_view;
@@ -445,20 +445,20 @@ SELECT id FROM reader_noprobe.default.an_view ORDER BY id;
 statement ok
 DETACH reader_noprobe;
 
-# a DEFER_BINDING view of a missing table goes to the view's own catalog
+# with VERIFY_CONNECTION false a ':' catalog writes its own tables as db.t too: no catalog id is needed
 statement ok
 attach ':' as cat_noprobe (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}', VERIFY_CONNECTION false);
 
 statement ok
-CREATE VIEW cat_noprobe.default.an_view_defer WITH (DEFER_BINDING) AS SELECT id FROM an_later;
+CREATE VIEW cat_noprobe.default.an_view_noprobe AS SELECT id FROM an_orders;
 
 query I
-SELECT response.ViewExpandedText FROM glue_get_table_response('cat_noprobe.default.an_view_defer');
+SELECT response.ViewExpandedText FROM glue_get_table_response('cat_noprobe.default.an_view_noprobe');
 ----
-SELECT id FROM "default".an_later
+SELECT id FROM "default".an_orders
 
 statement ok
-DROP VIEW cat_noprobe.default.an_view_defer;
+DROP VIEW cat_noprobe.default.an_view_noprobe;
 
 statement ok
 DETACH cat_noprobe;

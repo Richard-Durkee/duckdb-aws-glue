@@ -528,6 +528,9 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 			break;
 		}
 	}
+	if (info.binding_mode == CreateViewBindingMode::SKIP_BINDING) {
+		throw NotImplementedException("Glue views can not be created WITH (DEFER_BINDING) yet");
+	}
 
 	GlueViewInfo view;
 	view.database_name = database_info.name;
@@ -535,25 +538,22 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	// a DuckDB view's ViewOriginalText: the user's SQL; ViewExpandedText: tables of this catalog as db.t, of other
 	// catalogs by their Glue catalog id or "external:<type>:<alias>"
 	view.sql = GlueView::RenderViewSql(info);
-	auto defer_binding = info.binding_mode == CreateViewBindingMode::SKIP_BINDING;
 	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
-	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node, defer_binding);
+	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node);
 	view.expanded_sql = expanded->ToString();
-	if (!defer_binding) {
-		// names were resolved by lookups, not the binder: check they bind to the same column types (not names:
-		// an unaliased expression is named after its text, which the rewrite changes)
-		auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
-		auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
-		GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
-		GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
-		vector<LogicalType> types;
-		vector<Identifier> names;
-		Binder::BindView(context, *check, catalog.GetName(), name, nullptr, info.aliases, types, names);
-		if (types != info.types) {
-			throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the "
-			                      "view query:\n%s",
-			                      view_name, view.expanded_sql);
-		}
+	// names were resolved by lookups, not the binder: check they bind to the same column types (not names: an
+	// unaliased expression is named after its text, which the rewrite changes)
+	auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
+	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
+	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
+	GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
+	vector<LogicalType> types;
+	vector<Identifier> names;
+	Binder::BindView(context, *check, catalog.GetName(), name, nullptr, info.aliases, types, names);
+	if (types != info.types) {
+		throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the view "
+		                      "query:\n%s",
+		                      view_name, view.expanded_sql);
 	}
 	for (auto &text : {view.sql, view.expanded_sql}) {
 		try {

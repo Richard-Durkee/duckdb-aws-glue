@@ -132,6 +132,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
 	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());
+	loader.RegisterFunction(GetGlueRefreshFunction());
 	loader.RegisterFunction(GetGlueGetPartitionResponseFunction());
 	loader.RegisterFunction(GetGluePartitionsFunction());
 	loader.RegisterFunction(GetGlueAddPartitionFunction());

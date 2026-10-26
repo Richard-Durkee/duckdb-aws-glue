@@ -24,6 +24,8 @@ public:
 	//! Insert a (new) schema entry into the set, replacing any existing entry with the same name
 	optional_ptr<CatalogEntry> CreateEntry(unique_ptr<GlueSchemaEntry> entry);
 	void RemoveEntry(const string &name);
+	//! Forget every cached database, with the tables each caches, and the listing (glue_refresh)
+	void Refresh();
 
 	//! Build a schema catalog entry from a Glue database definition
 	unique_ptr<GlueSchemaEntry> CreateSchemaEntry(const GlueDatabaseInfo &database);

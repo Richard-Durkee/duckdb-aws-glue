@@ -67,6 +67,21 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 		return;
 	}
 	auto tables = GlueAPI::GetTables(context, catalog, schema.database_info.name);
+	// The listing is what Glue holds now: drop entries of tables it no longer has, which a lookup by name may have
+	// cached before another client dropped them
+	case_insensitive_set_t listed;
+	for (auto &table : tables) {
+		listed.insert(table.name);
+	}
+	vector<string> gone;
+	for (auto &entry : entries) {
+		if (listed.find(entry.first) == listed.end()) {
+			gone.push_back(entry.first);
+		}
+	}
+	for (auto &name : gone) {
+		RetireEntry(name);
+	}
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	for (auto &table : tables) {
 		if (cache) {

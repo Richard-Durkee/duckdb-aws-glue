@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/function/function_set.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/qualified_name.hpp"
 
@@ -19,6 +20,9 @@ TableFunction GetGlueGetTableResponseFunction();
 //! attached Glue catalog (an unqualified name is resolved like in a query). One row with the description, location and
 //! parameters as columns and the complete Glue Database object as VARIANT.
 TableFunction GetGlueGetDatabaseResponseFunction();
+//! glue_refresh(['<catalog>' | '<catalog>.<database>']): forget the cached metadata of a database, of a Glue catalog,
+//! or of every attached Glue catalog, so tables created or dropped by another client become visible
+TableFunctionSet GetGlueRefreshFunction();
 //! glue_get_partition_response(table, {key: value, ...}): the Glue GetPartition response for one partition of a Hive
 //! table. One row with the values, location, SerDe, columns and parameters as columns and the complete Glue Partition
 //! object as VARIANT.

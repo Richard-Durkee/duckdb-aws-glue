@@ -64,6 +64,9 @@ public:
 	optional_ptr<SchemaCatalogEntry> LookupSchema(CatalogTransaction transaction, const EntryLookupInfo &schema_lookup,
 	                                              OnEntryNotFound if_not_found) override;
 	GlueSchemaSet &GetSchemas();
+	//! Forget the cached metadata of one database, or of every database when 'database_name' is empty, so the next
+	//! lookup or listing reads Glue again: objects created or dropped by another client become visible (glue_refresh)
+	void Refresh(ClientContext &context, const string &database_name);
 	//! The S3 location a new database gets: <default_location>/<database>, or none when there is no DEFAULT_LOCATION
 	string GetDatabaseLocation(const string &database_name) const;
 	//! The S3 location a new table gets when none is given: <default_location>/<database>/<table> when the catalog

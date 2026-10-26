@@ -5,6 +5,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/connection_manager.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/parsed_data/alter_schema_info.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
@@ -99,6 +100,30 @@ optional<Identifier> GlueCatalog::GetDefaultSchema() const {
 //===--------------------------------------------------------------------===//
 GlueSchemaSet &GlueCatalog::GetSchemas() {
 	return schemas;
+}
+
+void GlueCatalog::Refresh(ClientContext &context, const string &database_name) {
+	if (database_name.empty()) {
+		schemas.Refresh();
+	} else {
+		// a fresh entry for the database, with its definition read again and none of its tables cached
+		GlueDatabaseInfo database;
+		if (!GlueAPI::GetDatabase(context, *this, database_name, database)) {
+			schemas.RemoveEntry(database_name);
+			throw CatalogException("Database '%s' does not exist in Glue catalog '%s'", database_name,
+			                       GetName().GetIdentifierName());
+		}
+		schemas.CreateEntry(schemas.CreateSchemaEntry(database));
+	}
+	GlueTransactionCache::Invalidate(context, *this);
+	// A connection-scoped metadata cache of another connection would put what it still holds back into the entries
+	// all connections share
+	for (auto &connection : ConnectionManager::Get(GetDatabase()).GetConnectionList()) {
+		auto state = connection->registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+		if (state) {
+			state->ClearAll();
+		}
+	}
 }
 
 optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {

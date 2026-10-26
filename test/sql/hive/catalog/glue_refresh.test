@@ -1,0 +1,253 @@
+# name: test/sql/hive/catalog/glue_refresh.test
+# description: glue_refresh forgets the cached tables and listings of a Glue catalog or database, so tables another
+# group: [catalog]
+
+#              client created or dropped become visible. A second attach of the same Glue catalog stands in for the
+#              other client: it has caches of its own.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as other (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# a run that failed half way can leave both databases behind
+statement ok
+DROP SCHEMA IF EXISTS lake.refresh_db CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS lake.refresh_db_new CASCADE;
+
+statement ok
+DROP SCHEMA IF EXISTS lake.refresh_db_gone CASCADE;
+
+statement ok
+CREATE SCHEMA lake.refresh_db;
+
+statement ok
+CREATE TABLE lake.refresh_db.kept (id INTEGER);
+
+statement ok
+CREATE TABLE lake.refresh_db.dropped (id INTEGER);
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 'refresh_db' ORDER BY ALL;
+----
+dropped
+kept
+
+# the other client creates one table and drops another
+statement ok
+CREATE TABLE other.refresh_db.created (id INTEGER);
+
+statement ok
+DROP TABLE other.refresh_db.dropped;
+
+# the cached listing still shows the old set
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 'refresh_db' ORDER BY ALL;
+----
+dropped
+kept
+
+# refreshing the database reads the listing again
+query TT
+CALL glue_refresh('lake.refresh_db');
+----
+lake	refresh_db
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 'refresh_db' ORDER BY ALL;
+----
+created
+kept
+
+statement error
+SELECT * FROM lake.refresh_db.dropped;
+----
+<REGEX>:.*does not exist.*
+
+# a database another client creates shows up after refreshing the catalog
+query T
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'refresh_db_new';
+----
+0
+
+statement ok
+CREATE SCHEMA other.refresh_db_new;
+
+query T
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'refresh_db_new';
+----
+0
+
+query TT
+CALL glue_refresh('lake');
+----
+lake	NULL
+
+query T
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'refresh_db_new';
+----
+1
+
+# without an argument every attached Glue catalog is refreshed
+query TT
+SELECT * FROM glue_refresh() ORDER BY ALL;
+----
+lake	NULL
+other	NULL
+
+# the refresh happens when the function runs, not when it is bound
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 'refresh_db' ORDER BY ALL;
+----
+created
+kept
+
+statement ok
+CREATE TABLE other.refresh_db.later (id INTEGER);
+
+statement ok
+EXPLAIN SELECT * FROM glue_refresh('lake.refresh_db');
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 'refresh_db' ORDER BY ALL;
+----
+created
+kept
+
+# a table a lookup by name cached before another client dropped it is gone from the listing after a refresh, also
+# when another connection still holds it in a connection-scoped metadata cache
+statement ok
+CREATE TABLE lake.refresh_db.looked_up (id INTEGER);
+
+statement ok con2
+SET glue_metadata_cache_scope = 'connection';
+
+query I con2
+SELECT count(*) FROM lake.refresh_db.looked_up;
+----
+0
+
+statement ok
+DROP TABLE other.refresh_db.looked_up;
+
+statement ok
+CALL glue_refresh('lake.refresh_db');
+
+statement error con2
+SELECT count(*) FROM lake.refresh_db.looked_up;
+----
+<REGEX>:.*does not exist.*
+
+query T
+SELECT table_name FROM duckdb_tables() WHERE database_name = 'lake' AND schema_name = 'refresh_db' ORDER BY ALL;
+----
+created
+kept
+later
+
+# refreshing inside a transaction
+statement ok
+BEGIN;
+
+query TT
+CALL glue_refresh('lake.refresh_db');
+----
+lake	refresh_db
+
+statement ok
+COMMIT;
+
+# a database another client dropped: refreshing it says so, and it is no longer listed
+statement ok
+CREATE SCHEMA lake.refresh_db_gone;
+
+query T
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'refresh_db_gone';
+----
+1
+
+statement ok
+DROP SCHEMA other.refresh_db_gone;
+
+statement error
+CALL glue_refresh('lake.refresh_db_gone');
+----
+<REGEX>:.*Database 'refresh_db_gone' does not exist in Glue catalog 'lake'.*
+
+query T
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'lake' AND schema_name = 'refresh_db_gone';
+----
+0
+
+# the catalog is resolved again when a prepared statement runs: it may have been replaced in between
+statement ok
+PREPARE refresh_lake AS SELECT * FROM glue_refresh('other');
+
+statement ok
+DETACH other;
+
+statement ok
+ATTACH ':memory:' AS other;
+
+statement error
+EXECUTE refresh_lake;
+----
+<REGEX>:.*glue_refresh only works on a Glue catalog, 'other' is a duckdb catalog.*
+
+statement ok
+DETACH other;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as other (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+CALL glue_refresh(NULL);
+----
+<REGEX>:.*glue_refresh expects a Glue catalog '<catalog>' or a database '<catalog>.<database>', got NULL.*
+
+statement error
+CALL glue_refresh('memory');
+----
+<REGEX>:.*glue_refresh only works on a Glue catalog, 'memory' is a duckdb catalog.*
+
+statement error
+CALL glue_refresh('nope');
+----
+<REGEX>:.*Catalog 'nope' does not exist.*
+
+statement error
+CALL glue_refresh('lake.no_such_database');
+----
+<REGEX>:.*Database 'no_such_database' does not exist in Glue catalog 'lake'.*
+
+statement error
+CALL glue_refresh('lake.refresh_db.kept');
+----
+<REGEX>:.*glue_refresh expects a Glue catalog.*
+
+statement ok
+DROP SCHEMA lake.refresh_db CASCADE;
+
+statement ok
+DROP SCHEMA other.refresh_db_new CASCADE;

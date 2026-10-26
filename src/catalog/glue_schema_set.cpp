@@ -26,6 +26,20 @@ void GlueSchemaSet::LoadEntries(ClientContext &context) {
 		return;
 	}
 	auto databases = GlueAPI::GetDatabases(context, catalog);
+	// The listing is what Glue holds now: drop entries of databases it no longer has
+	case_insensitive_set_t listed;
+	for (auto &database : databases) {
+		listed.insert(database.name);
+	}
+	vector<string> gone;
+	for (auto &entry : entries) {
+		if (listed.find(entry.first) == listed.end()) {
+			gone.push_back(entry.first);
+		}
+	}
+	for (auto &name : gone) {
+		RetireEntry(name);
+	}
 	for (auto &database : databases) {
 		if (entries.find(database.name) != entries.end()) {
 			// already loaded through a direct lookup
@@ -77,6 +91,18 @@ optional_ptr<CatalogEntry> GlueSchemaSet::CreateEntry(unique_ptr<GlueSchemaEntry
 void GlueSchemaSet::RemoveEntry(const string &name) {
 	lock_guard<mutex> guard(entry_lock);
 	RetireEntry(name);
+}
+
+void GlueSchemaSet::Refresh() {
+	lock_guard<mutex> guard(entry_lock);
+	vector<string> names;
+	for (auto &entry : entries) {
+		names.push_back(entry.first);
+	}
+	for (auto &name : names) {
+		RetireEntry(name);
+	}
+	is_loaded = false;
 }
 
 void GlueSchemaSet::RetireEntry(const string &name) {

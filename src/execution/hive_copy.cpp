@@ -24,7 +24,7 @@ static void ThrowIfLocationHoldsFiles(ClientContext &context, const GlueTableInf
 		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
 		                            "already holds files (e.g. '%s'), such as those of a dropped table, which would "
 		                            "read as rows of the new table. Delete them, or give the table another location",
-		                            table_info.database_name, table_info.name, location, file.path);
+		                            table_info.schema_name, table_info.name, location, file.path);
 	}
 }
 

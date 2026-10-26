@@ -40,6 +40,8 @@ A parquet `BYTE_ARRAY` column without a `STRING` annotation (as Impala and older
 UTF-8 text when Glue declares the column `string` (bytes that are not UTF-8 are an error), and as bytes when it
 declares it `binary`, whatever the session's `binary_as_string`. In a table that declares a `binary` column (or field),
 such bytes inside an `array`, `struct` or `map` column keep the escaped form the reader gives a BLOB.
+A `float` or `double` column may hold NaN wherever the file does not count its NaN values (`nan_count`, which most
+writers leave out): such a column's min/max never skip a row group for a filter that NaN could match.
 Text tables are read the way their SerDe reads them:
 
 - LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127

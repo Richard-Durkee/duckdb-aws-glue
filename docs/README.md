@@ -162,7 +162,10 @@ their codec themselves.
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
   into a partition whose location is not below the table location fails; the rows of other partitions can still be
-  inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
+  inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
+  still refuses a partition, the write is rolled back by deleting the files it wrote (the partitions it registered
+  stay, empty), so the statement can be run again without adding its
+  rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
   (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
@@ -465,9 +468,9 @@ TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
 
 `.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
 their timings (5 runs each) in two jobs of about three minutes, so it runs only a few join-heavy TPC-H and TPC-DS
-queries. The parquet job runs `benchmark/*.benchmark`, `benchmark/pushdown/`, the parquet benchmarks of
+queries. The parquet job runs `benchmark/*.benchmark`, the parquet benchmarks of `benchmark/pushdown/` and
 `benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
-`benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
+`benchmark/pushdown/` and `benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
 other queries and the json and avro TPC benchmarks only run locally.
 
 ## Building

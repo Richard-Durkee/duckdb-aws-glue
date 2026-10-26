@@ -126,7 +126,8 @@ void AddHiveTableProperties(CreateTableInfo &info, const GlueTableInfo &table_in
 	if (!table_info.bucket_columns.empty()) {
 		info.options["BucketColumns"] = StringListExpr(table_info.bucket_columns);
 		if (table_info.number_of_buckets > 0) {
-			info.options["NumberOfBuckets"] = ConstantExpression::FromValue(Value::INTEGER(table_info.number_of_buckets));
+			info.options["NumberOfBuckets"] =
+			    ConstantExpression::FromValue(Value::INTEGER(table_info.number_of_buckets));
 		}
 		if (!table_info.sort_columns.empty()) {
 			info.options["SortColumns"] = SortColumnsExpr(table_info.sort_columns);

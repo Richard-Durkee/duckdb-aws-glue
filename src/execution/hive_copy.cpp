@@ -18,7 +18,7 @@ static void ThrowIfLocationHoldsFiles(ClientContext &context, const GlueTableInf
 	auto &fs = FileSystem::GetFileSystem(context);
 	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
 	for (auto &file : listing->Files()) {
-		if (!IsHiveDataFile(file, location + "/")) {
+		if (!IsDataFile(file, location + "/")) {
 			continue;
 		}
 		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "

@@ -114,7 +114,7 @@ string HiveScanInfo::Describe() const {
 //! files and directories; EMR and S3 tools mark a directory with a <name>_$folder$ object next to it (an object, never
 //! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
 //! file of any format the reader opens
-static bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
+bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
 	if (!StringUtil::StartsWith(file.path, prefix)) {
 		return false;
 	}
@@ -129,10 +129,6 @@ static bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
 	}
 	auto size = ListedFileSize(file);
 	return !size.IsValid() || size.GetIndex() > 0;
-}
-
-bool IsHiveDataFile(const OpenFileInfo &file, const string &prefix) {
-	return IsDataFile(file, prefix);
 }
 
 //! Glue tables only: a hive_scan root has no catalog, and no write through the extension clears its listing

@@ -65,7 +65,7 @@ private:
 
 //! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
 //! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
-bool IsHiveDataFile(const OpenFileInfo &file, const string &prefix);
+bool IsDataFile(const OpenFileInfo &file, const string &prefix);
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so

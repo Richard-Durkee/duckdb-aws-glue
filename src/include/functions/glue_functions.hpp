@@ -24,6 +24,10 @@ TableFunction GetGlueGetDatabaseResponseFunction();
 //! object as VARIANT.
 TableFunction GetGlueGetPartitionResponseFunction();
 
+//! glue_prefetch_table('<catalog>.<database>.<table>', '<json>'): put a table definition the caller already has into
+//! the metadata cache, so the table's next lookup makes no GetTable call
+TableFunction GetGluePrefetchTableFunction();
+
 //! The 'columns' type of the glue_get_*_response functions: LIST(STRUCT(name, type, comment))
 LogicalType GlueColumnsType();
 Value GlueColumnsToValue(const vector<GlueColumn> &columns);

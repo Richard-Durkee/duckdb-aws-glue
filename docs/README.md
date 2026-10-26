@@ -347,6 +347,32 @@ FROM glue_get_partition_response('my_datalake.default.some_table', {dt: '2024-01
 description, location and parameters as columns and the complete Glue `Database` object in `response`. An unqualified
 `'<database>'` is resolved like in a query, through the search path.
 
+## Prefetching table metadata
+
+An engine that already fetched a table's definition from Glue can hand it to the extension, so the table's lookup
+makes no `GetTable` call:
+
+```sql
+SET glue_metadata_cache_scope = 'connection';
+CALL glue_prefetch_table('my_datalake.default.some_table', '{
+    "location": "s3://bucket/some_table",
+    "serde_library": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+    "columns": [{"name": "id", "type": "int"}, {"name": "name", "type": "string"}]
+}');
+```
+
+The JSON object takes the fields of a `glue_get_table_response` row (`glue_table_type`, `location`, `serde_library`,
+`serde_parameters`, `columns`, `partition_keys`, `parameters`; its other columns are ignored) and the rest of the
+storage descriptor: `input_format`, `output_format`, `description`, `bucket_columns`, `number_of_buckets` and
+`sort_columns` (`[{"name": ..., "sort_order": "ASC"}]`). `location`, `serde_library` and `columns` are required, an
+unknown field is an error, and views can not be prefetched. The table has to be fully qualified, since resolving a
+partial name asks Glue for the table.
+
+The definition goes into the metadata cache, so it lasts as long as the cache: the rest of the connection with
+`glue_metadata_cache_scope = 'connection'`, or the rest of the transaction otherwise, where the call fails outside
+`BEGIN ... COMMIT`. A table that is already cached keeps its definition, and the call returns `already cached` instead
+of `prefetched`. Nothing is checked against Glue, so a wrong definition reads the table wrongly.
+
 ## HTTP transport and logging
 
 The AWS SDK's Glue calls are routed through DuckDB's HTTP layer (httpfs), so they honor DuckDB's proxy and

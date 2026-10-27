@@ -106,8 +106,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "hive_partition_listing_concurrency",
 	    "How many partition directories are listed at the same time when a scan lists its partitions one directory "
 	    "each. 0 (default) lists them as tasks on DuckDB's threads, as many at a time as there are threads; a larger "
-	    "value lists that many at a time on threads of their own.",
+	    "value lists that many at a time on the extension's listing threads (hive_listing_threads).",
 	    LogicalType::UBIGINT, Value::UBIGINT(0));
+	config.AddExtensionOption("hive_listing_threads",
+	                          "How many threads the extension keeps for listings when hive_partition_listing_concurrency "
+	                          "is not 0. The threads are shared by every database of the process and only ever added. "
+	                          "Default 64.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(64));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

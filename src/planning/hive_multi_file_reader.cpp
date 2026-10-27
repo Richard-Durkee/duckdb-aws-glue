@@ -15,13 +15,19 @@
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/type_visitor.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/function_binder.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/expression/bound_between_expression.hpp"
 #include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -83,6 +89,34 @@ void HiveScanInfo::SetPartitions(vector<GluePartitionInfo> partitions_p) {
 	annotated_lock_guard<annotated_mutex> guard(partitions_lock);
 	D_ASSERT(!partitions);
 	partitions = make_shared_ptr<const vector<GluePartitionInfo>>(std::move(partitions_p));
+}
+
+shared_ptr<HiveScanInfo> HiveScanInfo::WithPartitions(shared_ptr<const vector<GluePartitionInfo>> partitions_p,
+                                                      bool subset) const {
+	auto result = make_shared_ptr<HiveScanInfo>();
+	result->catalog_name = catalog_name;
+	result->database_name = database_name;
+	result->table_name = table_name;
+	result->table = table;
+	result->root_location = root_location;
+	result->names = names;
+	result->types = types;
+	result->file_format = file_format;
+	result->csv_options = csv_options;
+	result->json_options = json_options;
+	result->partition_keys = partition_keys;
+	result->format_statistics = format_statistics;
+	result->format_virtual_columns = format_virtual_columns;
+	result->partitions = std::move(partitions_p);
+	result->partitions_subset = subset;
+	return result;
+}
+
+shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::AllPartitions(ClientContext &context) const {
+	if (!partitions_subset) {
+		return Partitions(context);
+	}
+	return GetTablePartitions(context, *this);
 }
 
 idx_t HiveScanInfo::GetPartitionIndexOfFile(const string &path) const {
@@ -230,6 +264,7 @@ void HiveMultiFileList::BuildPartitionLocations() const {
 		return;
 	}
 	partition_locations_built = true;
+	all_partition_locations = !scan_info->PartitionsSubset();
 	auto partitions = scan_info->Partitions(client_context);
 	for (idx_t i = 0; i < partitions->size(); i++) {
 		auto location = (*partitions)[i].location;
@@ -262,6 +297,54 @@ optional_idx HiveMultiFileList::OwningPartition(const string &file_path, idx_t m
 	return optional_idx();
 }
 
+//! partition_by_location's entry for a partition this scan did not fetch
+static constexpr idx_t UNFETCHED_PARTITION = DConstants::INVALID_INDEX - 1;
+
+void HiveMultiFileList::ResolveNestedLocations(const vector<OpenFileInfo> &files, idx_t min_directory_size) const {
+	if (all_partition_locations) {
+		return;
+	}
+	auto partitions = scan_info->Partitions(client_context);
+	optional_idx nested;
+	for (idx_t i = 0; i < files.size(); i++) {
+		auto owner = OwningPartition(files[i].path, min_directory_size);
+		if (!owner.IsValid() || owner.GetIndex() == UNFETCHED_PARTITION) {
+			continue;
+		}
+		auto location = (*partitions)[owner.GetIndex()].location;
+		StringUtil::RTrim(location, "/");
+		if (files[i].path.find('/', location.size() + 1) != string::npos) {
+			nested = i;
+			break;
+		}
+	}
+	if (!nested.IsValid()) {
+		return;
+	}
+	// Glue can not be asked which partitions are registered at a location: a writer's subdirectory looks the same
+	DUCKDB_LOG_INFO(client_context,
+	                "Hive scan of '%s': the data file '%s' is in a subdirectory of a partition's location, where a "
+	                "partition the scan did not fetch may be registered: fetching all partitions of the table",
+	                scan_info->Describe(), files[nested.GetIndex()].path);
+	// the same order and rules as BuildPartitionLocations, over all partitions; those not fetched are not read
+	unordered_map<string, idx_t> fetched;
+	for (idx_t i = 0; i < partitions->size(); i++) {
+		fetched.emplace(PartitionValuesKey((*partitions)[i].values), i);
+	}
+	unordered_map<string, idx_t> locations;
+	for (auto &partition : *scan_info->AllPartitions(client_context)) {
+		auto location = partition.location;
+		StringUtil::RTrim(location, "/");
+		if (location.empty()) {
+			continue;
+		}
+		auto entry = fetched.find(PartitionValuesKey(partition.values));
+		locations.emplace(std::move(location), entry == fetched.end() ? UNFETCHED_PARTITION : entry->second);
+	}
+	partition_by_location = std::move(locations);
+	all_partition_locations = true;
+}
+
 void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 	auto partitions = scan_info->Partitions(client_context);
 	auto &partition = (*partitions)[partition_index];
@@ -276,6 +359,7 @@ void HiveMultiFileList::ListPartition(idx_t partition_index) const {
 	vector<OpenFileInfo> partition_files;
 	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, partition_files);
 	BuildPartitionLocations();
+	ResolveNestedLocations(partition_files, location.size());
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : partition_files) {
 		// skip files of another partition registered at a location nested inside this one
@@ -322,11 +406,15 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 	BuildPartitionLocations();
 	auto root_prefix = root + "/";
-	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	vector<OpenFileInfo> data_files;
 	for (auto &file : files) {
-		if (!IsDataFile(file, root_prefix)) {
-			continue;
+		if (IsDataFile(file, root_prefix)) {
+			data_files.push_back(std::move(file));
 		}
+	}
+	ResolveNestedLocations(data_files, root.size() + 1);
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto &file : data_files) {
 		auto partition_index = OwningPartition(file.path, root.size() + 1);
 		if (!partition_index.IsValid() || !reading.count(partition_index.GetIndex())) {
 			continue;
@@ -418,6 +506,7 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	ListDataFiles(client_context, CacheListings(client_context, *scan_info), location, listed);
 	// as ListPartition keeps them: not the files of a partition registered at a location nested inside this one
 	BuildPartitionLocations();
+	ResolveNestedLocations(listed, location.size());
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : listed) {
 		auto owner = OwningPartition(file.path, location.size());
@@ -472,8 +561,17 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			break;
 		}
 		auto owner = OwningPartition(file.path, root_prefix.size());
-		if (!owner.IsValid()) {
+		if (!owner.IsValid() || owner.GetIndex() == UNFETCHED_PARTITION) {
 			continue;
+		}
+		if (!all_partition_locations) {
+			// only some partitions fetched leave out the locations of the others: a file below a partition's
+			// directory may belong to one nested there, so the sample keeps to the files directly in it
+			auto location = (*scan_info->Partitions(client_context))[owner.GetIndex()].location;
+			StringUtil::RTrim(location, "/");
+			if (file.path.find('/', location.size() + 1) != string::npos) {
+				continue;
+			}
 		}
 		if (owner != last_partition) {
 			last_partition = owner;
@@ -936,15 +1034,219 @@ static void AddPruningFiltersToExtraInfo(ExtraOperatorInfo &extra_info, const ve
 	}
 }
 
+//===--------------------------------------------------------------------===//
+// Partitions looked up by their values
+//===--------------------------------------------------------------------===//
+//! The most partitions looked up by their values (BatchGetPartition) instead of listing the table's partitions
+static constexpr idx_t GLUE_MAX_PINNED_PARTITIONS = 1000;
+
+//! The string partition key a column reference of the scan stands for, if the expression is one
+static optional_idx StringPartitionKeyOf(const Expression &expr, TableIndex table_index,
+                                         const vector<PartitionKeyProjection> &projections) {
+	if (expr.GetExpressionType() != ExpressionType::BOUND_COLUMN_REF ||
+	    expr.GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return optional_idx();
+	}
+	auto &colref = expr.Cast<BoundColumnRefExpression>();
+	if (colref.Binding().table_index != table_index) {
+		return optional_idx();
+	}
+	for (auto &projection : projections) {
+		if (projection.projected_column_index == colref.Binding().column_index.GetIndex()) {
+			return projection.partition_key_index;
+		}
+	}
+	return optional_idx();
+}
+
+//! A non-NULL string constant: a string partition key equals it when Glue stores exactly these bytes
+static bool TryStringConstant(const Expression &expr, string &result) {
+	if (expr.GetExpressionType() != ExpressionType::VALUE_CONSTANT) {
+		return false;
+	}
+	auto &value = expr.Cast<BoundConstantExpression>().GetValue();
+	if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
+		return false;
+	}
+	result = StringValue::Get(value);
+	return true;
+}
+
+//! The longest partition value Glue accepts in a lookup (PartitionValueList), in characters
+static constexpr idx_t GLUE_MAX_PARTITION_VALUE_LENGTH = 1024;
+
+//! Whether a lookup by value can ask Glue for 'value': the AWS SDK cuts a string at a NUL byte, in a request as in a
+//! response, and Glue refuses a longer value than it stores (in bytes here, which are at least as many as characters)
+static bool IsLookupValue(const string &value) {
+	return value.find('\0') == string::npos && value.size() <= GLUE_MAX_PARTITION_VALUE_LENGTH;
+}
+
+//! Whether every combination of these values of the partition keys can be looked up by value: Glue refuses the whole
+//! request (InvalidInputException) when the values of one partition it asks for total more than
+//! GlueAPI::MAX_LOOKUP_PARTITION_BYTES, which the longest value of each key together tells
+static bool FitsPartitionLookup(const vector<set<string>> &pinned) {
+	idx_t bytes = 0;
+	for (auto &values : pinned) {
+		idx_t longest = 0;
+		for (auto &value : values) {
+			longest = MaxValue<idx_t>(longest, value.size());
+		}
+		bytes += longest;
+	}
+	return bytes <= GlueAPI::MAX_LOOKUP_PARTITION_BYTES;
+}
+
+//! The values 'filter' pins a string partition key to: key = 'a' or key IN ('a', 'b', ...)
+static bool TryPinnedValues(const Expression &filter, TableIndex table_index,
+                            const vector<PartitionKeyProjection> &projections, idx_t &key_index,
+                            vector<string> &values) {
+	if (filter.GetExpressionType() == ExpressionType::COMPARE_IN) {
+		auto &children = filter.Cast<BoundOperatorExpression>().GetChildren();
+		auto key = StringPartitionKeyOf(*children[0], table_index, projections);
+		if (!key.IsValid()) {
+			return false;
+		}
+		for (idx_t i = 1; i < children.size(); i++) {
+			string value;
+			if (!TryStringConstant(*children[i], value) || !IsLookupValue(value)) {
+				return false;
+			}
+			values.push_back(std::move(value));
+		}
+		key_index = key.GetIndex();
+		return true;
+	}
+	if (filter.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+		return false;
+	}
+	auto &comparison = filter.Cast<BoundFunctionExpression>();
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
+	string value;
+	auto key = StringPartitionKeyOf(left, table_index, projections);
+	if (!key.IsValid() || !TryStringConstant(right, value)) {
+		key = StringPartitionKeyOf(right, table_index, projections);
+		if (!key.IsValid() || !TryStringConstant(left, value)) {
+			return false;
+		}
+	}
+	if (!IsLookupValue(value)) {
+		return false;
+	}
+	key_index = key.GetIndex();
+	values.push_back(std::move(value));
+	return true;
+}
+
+//! The partition values the filters allow when they pin every partition key to a few values (at most
+//! GLUE_MAX_PINNED_PARTITIONS combinations): false otherwise. 'pinning_filters' gets the indexes of the filters used.
+static bool PinnedPartitionValues(const HiveScanInfo &info, TableIndex table_index,
+                                  const vector<PartitionKeyProjection> &projections,
+                                  const vector<unique_ptr<Expression>> &filters, unordered_set<idx_t> &pinning_filters,
+                                  vector<vector<string>> &result) {
+	vector<bool> is_pinned(info.partition_keys.size(), false);
+	vector<set<string>> pinned(info.partition_keys.size());
+	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
+		idx_t key_index;
+		vector<string> values;
+		if (!TryPinnedValues(*filters[filter_index], table_index, projections, key_index, values)) {
+			continue;
+		}
+		set<string> allowed(values.begin(), values.end());
+		if (is_pinned[key_index]) {
+			// pinned twice: both must hold
+			set<string> both;
+			for (auto &value : pinned[key_index]) {
+				if (allowed.count(value)) {
+					both.insert(value);
+				}
+			}
+			allowed = std::move(both);
+		}
+		is_pinned[key_index] = true;
+		pinned[key_index] = std::move(allowed);
+		pinning_filters.insert(filter_index);
+	}
+	idx_t combinations = 1;
+	for (idx_t key_index = 0; key_index < pinned.size(); key_index++) {
+		if (!is_pinned[key_index]) {
+			return false;
+		}
+		combinations *= pinned[key_index].size();
+		if (combinations > GLUE_MAX_PINNED_PARTITIONS) {
+			return false;
+		}
+	}
+	if (combinations == 0) {
+		return true;
+	}
+	if (!FitsPartitionLookup(pinned)) {
+		return false;
+	}
+	// every combination, the last key varying fastest
+	vector<set<string>::const_iterator> positions;
+	for (auto &values : pinned) {
+		positions.push_back(values.begin());
+	}
+	while (true) {
+		vector<string> partition;
+		for (auto &position : positions) {
+			partition.push_back(*position);
+		}
+		result.push_back(std::move(partition));
+		idx_t key_index = positions.size();
+		while (key_index > 0) {
+			key_index--;
+			if (++positions[key_index] != pinned[key_index].end()) {
+				break;
+			}
+			positions[key_index] = pinned[key_index].begin();
+			if (key_index == 0) {
+				return true;
+			}
+		}
+	}
+}
+
+static bool GlueBatchGetPartitionsEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_batch_get_partitions", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return true;
+}
+
+//! The partitions of the table the filters select, looked up in Glue for this scan alone; null when no lookup applies.
+//! 'subset' tells whether they are only some of the table's partitions (or all, known already or fetched when the
+//! lookup could not be used), and 'subset_filters' gets the filters whose pruning the lookup did.
+static shared_ptr<const vector<GluePartitionInfo>>
+LookUpPartitionSubset(ClientContext &context, const HiveScanInfo &info, TableIndex table_index,
+                      const vector<PartitionKeyProjection> &projections, const vector<unique_ptr<Expression>> &filters,
+                      unordered_set<idx_t> &subset_filters, bool &subset) {
+	if (!GlueBatchGetPartitionsEnabled(context)) {
+		return nullptr;
+	}
+	// every partition key pinned to a few values: look the partitions up by their values
+	unordered_set<idx_t> pinning_filters;
+	vector<vector<string>> values;
+	if (!PinnedPartitionValues(info, table_index, projections, filters, pinning_filters, values)) {
+		return nullptr;
+	}
+	auto result = GetPinnedTablePartitions(context, info, values, subset);
+	if (subset) {
+		subset_filters = std::move(pinning_filters);
+	}
+	return result;
+}
+
 unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
                                                                      const MultiFileOptions &options,
                                                                      MultiFilePushdownInfo &pushdown_info,
                                                                      vector<unique_ptr<Expression>> &filters) {
-	auto &info = ScanInfo();
-	if (info.partition_keys.empty() || filters.empty()) {
+	if (ScanInfo().partition_keys.empty() || filters.empty()) {
 		return nullptr;
 	}
-	auto projections = PartitionKeyProjections(info, pushdown_info.column_ids, pushdown_info.column_names);
+	auto projections = PartitionKeyProjections(ScanInfo(), pushdown_info.column_ids, pushdown_info.column_names);
 	if (projections.empty()) {
 		return nullptr;
 	}
@@ -952,11 +1254,30 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// before its directory is listed. Such a filter is then true of every row read and is removed, as DuckDB's own
 	// hive partitioning does: kept, the optimizer would cost it a second time (a range filter keeps a fifth of the
 	// rows the pruning already narrowed down).
-	// first use of the partitions: loaded here, with the filters known
-	auto &hive_list = files.Cast<HiveMultiFileList>();
+	// first use of the partitions: loaded here, with the filters known, so that Glue can be asked for only the
+	// partitions they select
+	unique_ptr<HiveMultiFileList> fetched_list;
+	unordered_set<idx_t> pruning_filters;
+	if (!ScanInfo().PartitionsLoaded() && !ScanInfo().catalog_name.empty()) {
+		unordered_set<idx_t> subset_filters;
+		bool subset = false;
+		auto fetched = LookUpPartitionSubset(context, ScanInfo(), pushdown_info.table_index, projections, filters,
+		                                     subset_filters, subset);
+		if (fetched) {
+			if (subset) {
+				// they pruned partitions as much as the filters applied here do
+				pruning_filters = std::move(subset_filters);
+			}
+			// this scan's own scan info: copies of the scan made before this point keep the shared one, which may be
+			// given other filters
+			scan_info = ScanInfo().WithPartitions(std::move(fetched), subset);
+			fetched_list = make_uniq<HiveMultiFileList>(context, scan_info);
+		}
+	}
+	auto &info = ScanInfo();
+	auto &hive_list = fetched_list ? *fetched_list : files.Cast<HiveMultiFileList>();
 	auto candidates = hive_list.PartitionIndexes();
 	auto partitions = info.Partitions(context);
-	unordered_set<idx_t> pruning_filters;
 	unordered_set<idx_t> decided_filters;
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters, decided_filters);
@@ -972,7 +1293,7 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	pushdown_info.extra_info.total_files = candidates->size();
 	pushdown_info.extra_info.filtered_files = kept.size();
 	if (kept.size() == candidates->size()) {
-		return nullptr;
+		return std::move(fetched_list);
 	}
 	return make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
 }

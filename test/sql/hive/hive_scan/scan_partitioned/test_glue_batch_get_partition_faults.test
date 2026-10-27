@@ -1,0 +1,427 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_glue_batch_get_partition_faults.test
+# description: A lookup of partitions by their values that Glue refuses, throttles or fails, or whose keys it leaves
+# group: [scan_partitioned]
+
+#              unprocessed, lists all partitions instead; keys left unprocessed are asked for again after a back-off
+#              first. The connection does not ask again what will not change soon, the query what may.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the same catalog through scripts/glue_fault_proxy.py, which answers by the table's name
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table fault_refuse_gbp fault_unprocessed_gbp fault_halve_gbp fault_batch_denied_gbp fault_throttle_gbp fault_unavailable_gbp fault_expired_gbp fault_forbidden_gbp fault_validation_gbp
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+statement ok
+CREATE TABLE my_datalake.default.{table} (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+# registered in descending order
+statement ok
+INSERT INTO my_datalake.default.{table} VALUES (4, 'd');
+
+statement ok
+INSERT INTO my_datalake.default.{table} VALUES (3, 'c');
+
+statement ok
+INSERT INTO my_datalake.default.{table} VALUES (2, 'b');
+
+statement ok
+INSERT INTO my_datalake.default.{table} VALUES (1, 'a');
+
+endloop
+
+statement ok
+CREATE MACRO glue_calls() AS TABLE
+    SELECT regexp_extract(request.headers['x-amz-target'], 'AWSGlue\.(\w+)', 1) AS api, count(*) AS n
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.headers['x-amz-target'] IS NOT NULL
+    GROUP BY 1 ORDER BY 1;
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage='memory');
+
+statement ok
+SET http_retries = 2;
+
+statement ok
+SET http_retry_wait_ms = 10;
+
+#---------------------------------------------------------------------------
+# refused: all partitions are listed (or found another way Glue refuses too), and the lookup is not asked again in
+# the connection
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_refuse_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+BatchGetPartition	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_refuse_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+#---------------------------------------------------------------------------
+# ValidationException (Glue's answer to a request for more than 1000 keys) is a refusal too
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_validation_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+BatchGetPartition	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_validation_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+#---------------------------------------------------------------------------
+# every key left unprocessed: asked again http_retries times, then all partitions are listed
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_unprocessed_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	3
+GetPartitions	1
+
+# Glue is busy: the table is not looked up by value again in the connection, for other values or the same ones, so
+# the back-offs are not waited for again
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_unprocessed_gbp WHERE dt = 'b';
+----
+[2]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_unprocessed_gbp WHERE dt IN ('c', 'a');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+#---------------------------------------------------------------------------
+# half the keys left unprocessed each time: asking again for those gets them all
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_halve_gbp WHERE dt IN ('a', 'b', 'c', 'd');
+----
+[1, 2, 3, 4]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	3
+
+# the partitions are in the order of the values asked for, not of Glue's answers or of their registration: a single
+# thread reads their files in that order
+statement ok
+SET threads = 1;
+
+query I
+SELECT id FROM fault_lake.default.fault_halve_gbp WHERE dt IN ('d', 'b', 'a', 'c');
+----
+1
+2
+3
+4
+
+statement ok
+RESET threads;
+
+#---------------------------------------------------------------------------
+# access denied (a principal allowed glue:GetPartitions but not glue:BatchGetPartition): all partitions are listed,
+# and the table is not looked up by value again in the connection, whatever the values
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_batch_denied_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	1
+GetPartitions	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_batch_denied_gbp WHERE dt = 'b';
+----
+[2]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+# attached again under the same name to the same Glue: still known
+statement ok
+DETACH fault_lake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_batch_denied_gbp WHERE dt = 'd';
+----
+[4]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+# under the same name to another Glue (another endpoint), which is asked
+statement ok
+DETACH fault_lake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_batch_denied_gbp WHERE dt = 'd';
+----
+[4]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	1
+
+# through the fault proxy again
+statement ok
+DETACH fault_lake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_lake (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+#---------------------------------------------------------------------------
+# throttled: the SDK retries a lookup twice, not ten times over 25 seconds, then all partitions are listed rather than
+# the query failing, and the table is not looked up by value again in the connection, whatever the values
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_throttle_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+BatchGetPartition	3
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_throttle_gbp WHERE dt = 'b';
+----
+[2]
+
+query I
+SELECT count(*) FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+0
+
+#---------------------------------------------------------------------------
+# failed on Glue's side (InternalServiceException, a 500): the same
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_unavailable_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query I
+SELECT count(*) > 0 FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_unavailable_gbp WHERE dt = 'b';
+----
+[2]
+
+query I
+SELECT count(*) FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+0
+
+#---------------------------------------------------------------------------
+# failed for a reason that may pass (an expired token): all partitions are listed for the query, whose other scans do
+# not look the table up by value again, but the next query does
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT (SELECT list(id) FROM fault_lake.default.fault_expired_gbp WHERE dt = 'a'),
+       (SELECT list(id) FROM fault_lake.default.fault_expired_gbp WHERE dt = 'b');
+----
+[1]	[2]
+
+query II
+FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+BatchGetPartition	1
+
+foreach query 1 2
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_expired_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+BatchGetPartition	1
+
+endloop
+
+#---------------------------------------------------------------------------
+# a plain 403 (no Glue error) is a denial, as AccessDeniedException is: not looked up by value again in the connection
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_forbidden_gbp WHERE dt IN ('a', 'c');
+----
+[1, 3]
+
+query II
+FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+BatchGetPartition	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM fault_lake.default.fault_forbidden_gbp WHERE dt = 'b';
+----
+[2]
+
+query I
+SELECT count(*) FROM glue_calls() WHERE api = 'BatchGetPartition';
+----
+0
+
+foreach table fault_refuse_gbp fault_unprocessed_gbp fault_halve_gbp fault_batch_denied_gbp fault_throttle_gbp fault_unavailable_gbp fault_expired_gbp fault_forbidden_gbp fault_validation_gbp
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

@@ -6,6 +6,7 @@
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/to_string.hpp"
 
 namespace duckdb {
 
@@ -16,6 +17,14 @@ string GlueTableInfo::GetParameter(const string &key) const {
 		}
 	}
 	return string();
+}
+
+string PartitionValuesKey(const vector<string> &values) {
+	string key;
+	for (auto &value : values) {
+		key += to_string(value.size()) + ":" + value;
+	}
+	return key;
 }
 
 string HiveFileFormatToString(HiveFileFormat format) {

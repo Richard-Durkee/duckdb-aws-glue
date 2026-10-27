@@ -3,12 +3,20 @@
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/atomic.hpp"
+#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/thread.hpp"
 #include "duckdb/common/unordered_set.hpp"
+#include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/http/http_retry_budget.hpp"
+#include "duckdb/main/http/http_util.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
+#include <aws/glue/model/BatchGetPartitionRequest.h>
 #include <aws/glue/model/CreatePartitionRequest.h>
 #include <aws/glue/model/DeletePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
@@ -350,13 +358,190 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 		for (auto &partition : segment_result) {
 			// A Glue compatible server that ignores Segment answers every segment with the whole table: the values
 			// identify the partition, so what was seen already is dropped here
-			if (total_segments > 1 && !seen.insert(StringUtil::Join(partition.values, "\x1f")).second) {
+			if (total_segments > 1 && !seen.insert(PartitionValuesKey(partition.values)).second) {
 				continue;
 			}
 			result.push_back(std::move(partition));
 		}
 	}
 	return result;
+}
+
+//! The partitions one BatchGetPartition request asks for: Glue takes up to 1000, but answers a smaller request sooner,
+//! and the requests run in parallel. Against a Glue mock that answers in 50 ms plus 100 ms per 1000 partitions, 250 was
+//! as fast as 100 for 200 and 1000 partitions with less than half the requests, and 1000 slower for 1000.
+static constexpr idx_t GLUE_BATCH_GET_PARTITION_SIZE = 250;
+
+//! The partitions among values[offset, offset + count) that exist, appended to 'result'. The keys Glue leaves
+//! unprocessed (UnprocessedKeys, how it throttles the request) are asked for again after a back-off, as DuckDB retries
+//! an HTTP request (http_retries, http_retry_wait_ms, http_retry_backoff, with jitter), which an interrupt ends: false
+//! when some are still left after that, or when Glue throttles the request or fails it on its side, which the SDK
+//! retries only GlueLookupRetryScope::LOOKUP_RETRIES times. A request Glue refuses throws an InvalidInputException for
+//! a value it does not accept, a PermissionException when it denies the principal (IsClientRefusal), which refuses
+//! every lookup by value of the table, and the Glue error otherwise.
+static bool BatchGetPartitionBatch(ClientContext &context, Aws::Glue::GlueClient &client, const GlueCatalog &catalog,
+                                   const string &database_name, const string &table_name,
+                                   const vector<vector<string>> &values, idx_t offset, idx_t count,
+                                   vector<GluePartitionInfo> &result) {
+	Aws::Vector<Aws::Glue::Model::PartitionValueList> keys;
+	for (idx_t i = offset; i < offset + count; i++) {
+		Aws::Glue::Model::PartitionValueList key;
+		key.SetValues(ToAwsValues(values[i]));
+		keys.push_back(std::move(key));
+	}
+	auto params = HTTPUtil::Get(*context.db).InitializeParameters(context, string());
+	RandomEngine random;
+	GlueLookupRetryScope lookup_retries;
+	for (uint64_t retry = 0;; retry++) {
+		Aws::Glue::Model::BatchGetPartitionRequest request;
+		SetCatalogId(request, catalog);
+		request.SetDatabaseName(database_name);
+		request.SetTableName(table_name);
+		request.SetPartitionsToGet(keys);
+		auto outcome = client.BatchGetPartition(request);
+		if (!outcome.IsSuccess()) {
+			auto error_type = outcome.GetError().GetErrorType();
+			auto message = ToStdString(outcome.GetError().GetMessage());
+			if (error_type == Aws::Glue::GlueErrors::INVALID_INPUT || error_type == Aws::Glue::GlueErrors::VALIDATION) {
+				throw InvalidInputException("Glue BatchGetPartition '%s.%s' refused the partition values: %s",
+				                            database_name, table_name, message);
+			}
+			if (IsClientRefusal(outcome)) {
+				throw PermissionException("Glue BatchGetPartition '%s.%s' refused: %s (%s)", database_name, table_name,
+				                          message, ToStdString(outcome.GetError().GetExceptionName()));
+			}
+			if (IsUnavailable(outcome)) {
+				// not answered, as when keys are left unprocessed: listing all partitions answers the scan
+				DUCKDB_LOG_INFO(context, "Glue BatchGetPartition '%s.%s' failed after the retries: %s (%s)",
+				                database_name, table_name, message, ToStdString(outcome.GetError().GetExceptionName()));
+				return false;
+			}
+			ThrowGlueError(outcome, StringUtil::Format("BatchGetPartition '%s.%s'", database_name, table_name));
+		}
+		for (auto &partition : outcome.GetResult().GetPartitions()) {
+			GluePartitionInfo info;
+			for (auto &value : partition.GetValues()) {
+				info.values.push_back(ToStdString(value));
+			}
+			info.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+			result.push_back(std::move(info));
+		}
+		keys = outcome.GetResult().GetUnprocessedKeys();
+		if (keys.empty()) {
+			return true;
+		}
+		if (retry >= params->retries) {
+			break;
+		}
+		// not as throttled: that would wait for several more, longer, back-offs, where listing all partitions
+		// instead answers the scan
+		ThreadUtil::SleepMs(HTTPRetryBudget::BackoffMs(params->retry_wait_ms, params->retry_backoff, retry + 1, 0,
+		                                               random.NextRandomInteger64()),
+		                    &context);
+	}
+	DUCKDB_LOG_INFO(context, "Glue BatchGetPartition '%s.%s' left %d of %d partitions unprocessed after %d retries",
+	                database_name, table_name, keys.size(), count, params->retries);
+	return false;
+}
+
+class BatchGetPartitionTask : public BaseExecutorTask {
+public:
+	BatchGetPartitionTask(TaskExecutor &executor, ClientContext &context, Aws::Glue::GlueClient &client,
+	                      const GlueCatalog &catalog, const string &database_name, const string &table_name,
+	                      const vector<vector<string>> &values, idx_t offset, idx_t count,
+	                      vector<GluePartitionInfo> &result, atomic<bool> &complete)
+	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), database_name(database_name),
+	      table_name(table_name), values(values), offset(offset), count(count), result(result), complete(complete) {
+	}
+
+	void ExecuteTask() override {
+		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
+		// connection's HTTP log
+		GlueHttpClientContextScope http_scope(context);
+		if (!BatchGetPartitionBatch(context, client, catalog, database_name, table_name, values, offset, count,
+		                            result)) {
+			complete = false;
+		}
+	}
+	string TaskType() const override {
+		return "BatchGetPartitionTask";
+	}
+
+private:
+	ClientContext &context;
+	Aws::Glue::GlueClient &client;
+	const GlueCatalog &catalog;
+	const string &database_name;
+	const string &table_name;
+	const vector<vector<string>> &values;
+	idx_t offset;
+	idx_t count;
+	vector<GluePartitionInfo> &result;
+	atomic<bool> &complete;
+};
+
+bool GlueAPI::BatchGetPartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                 const string &table_name, const vector<vector<string>> &values,
+                                 vector<GluePartitionInfo> &result) {
+	result.clear();
+	if (values.empty()) {
+		return true;
+	}
+	for (auto &partition_values : values) {
+		idx_t bytes = 0;
+		for (auto &value : partition_values) {
+			bytes += value.size();
+		}
+		if (bytes > MAX_LOOKUP_PARTITION_BYTES) {
+			throw InvalidInputException("Glue BatchGetPartition '%s.%s' refuses the values of a partition that total "
+			                            "%d bytes, more than %d",
+			                            database_name, table_name, bytes, idx_t(MAX_LOOKUP_PARTITION_BYTES));
+		}
+	}
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	auto batch_count = (values.size() + GLUE_BATCH_GET_PARTITION_SIZE - 1) / GLUE_BATCH_GET_PARTITION_SIZE;
+	vector<vector<GluePartitionInfo>> batch_results(batch_count);
+	atomic<bool> complete(true);
+	if (batch_count == 1) {
+		complete = BatchGetPartitionBatch(context, *client, catalog, database_name, table_name, values, 0,
+		                                  values.size(), batch_results[0]);
+	} else {
+		// the batches do not overlap, so their requests can run at the same time
+		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+		for (idx_t batch = 0; batch < batch_count; batch++) {
+			auto offset = batch * GLUE_BATCH_GET_PARTITION_SIZE;
+			auto count = MinValue<idx_t>(GLUE_BATCH_GET_PARTITION_SIZE, values.size() - offset);
+			executor.ScheduleTask(make_uniq<BatchGetPartitionTask>(executor, context, *client, catalog, database_name,
+			                                                       table_name, values, offset, count,
+			                                                       batch_results[batch], complete));
+		}
+		executor.WorkOnTasks();
+	}
+	if (!complete) {
+		return false;
+	}
+	// in the order the values were asked for, as Glue answers in any order: the partitions of a scan, and with them
+	// the order its files are listed in, do not change from one query to the next
+	unordered_map<string, idx_t> requested;
+	for (idx_t i = 0; i < values.size(); i++) {
+		requested.emplace(PartitionValuesKey(values[i]), i);
+	}
+	vector<pair<idx_t, GluePartitionInfo>> found;
+	for (auto &batch_result : batch_results) {
+		for (auto &partition : batch_result) {
+			auto entry = requested.find(PartitionValuesKey(partition.values));
+			found.emplace_back(entry == requested.end() ? values.size() : entry->second, std::move(partition));
+		}
+	}
+	std::stable_sort(found.begin(), found.end(),
+	                 [](const pair<idx_t, GluePartitionInfo> &a, const pair<idx_t, GluePartitionInfo> &b) {
+		                 return a.first < b.first;
+	                 });
+	for (auto &partition : found) {
+		result.push_back(std::move(partition.second));
+	}
+	return true;
 }
 
 void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,

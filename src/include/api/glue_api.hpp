@@ -115,6 +115,19 @@ public:
 	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<GluePartitionInput> &partitions);
+	//! The partitions of a Hive table with exactly these values (BatchGetPartition) into 'result', in the order of
+	//! 'values'; values no partition has are left out (Glue leaves them out of its answer, which comes in any order).
+	//! Glue compares the values as they are, case sensitive: a value matches only a partition value with the same
+	//! bytes. False when Glue left some unprocessed (throttling) after
+	//! the retries, or throttled a request or failed it on its side; an InvalidInputException when Glue refuses a
+	//! value, a PermissionException when it denies the principal the request (access denied, a plain 403), and the
+	//! Glue error otherwise.
+	static bool BatchGetPartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                               const string &table_name, const vector<vector<string>> &values,
+	                               vector<GluePartitionInfo> &result);
+	//! The most UTF-8 bytes the values of one partition BatchGetPartition asks for may total: Glue refuses the whole
+	//! request (InvalidInputException) for more, which BatchGetPartitions does without asking
+	static constexpr idx_t MAX_LOOKUP_PARTITION_BYTES = 1023;
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);

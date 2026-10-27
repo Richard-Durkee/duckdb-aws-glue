@@ -174,6 +174,10 @@ struct GluePartitionInfo {
 	string location;
 };
 
+//! A key telling lists of values apart (partition values, names): each value after its length, so that no value can
+//! pass for a separator
+string PartitionValuesKey(const vector<string> &values);
+
 //! A partition as GetPartition returns it: also its storage descriptor and parameters
 struct GluePartitionDetails : public GluePartitionInfo {
 	string serde_library;

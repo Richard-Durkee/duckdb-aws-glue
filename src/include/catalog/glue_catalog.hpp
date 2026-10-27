@@ -93,6 +93,8 @@ public:
 
 	//! the CatalogId Glue reports in the response of GetDatabases call (during attach probe or first usage)
 	string FetchCatalogId(ClientContext &context);
+	//! Which Glue catalog this is (catalog id, endpoint and region), the same for every ATTACH of it whatever its alias
+	string AttachIdentity() const;
 
 	//! The cached Glue client (managed by GlueAPI): rebuilt whenever the credentials it was built with change
 	mutex client_lock;

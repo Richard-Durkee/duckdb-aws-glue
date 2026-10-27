@@ -318,6 +318,49 @@ partition would otherwise repeat, which is not used: only the partition values a
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
 
+A scan whose filters let it ask Glue for only some partitions of the table shares the lookup with every scan of the
+table in the query asking for the same ones, and makes none once all partitions of the table are known (another scan in
+the query, or the metadata cache). It fetches all partitions instead when Glue refuses the lookup or does not answer it,
+and when a partition it found is not stored in the directory its values name below the table location
+(`<key>=<value>/...`, the value as it is or escaped) or shares its location with another. A directory name with an
+escape is also the directory of the value spelled as it is (`k=a%3Ab` names `a:b` and `a%3Ab`): the partitions with
+the other spellings are looked up as well, with a lookup by value in the same requests and otherwise with one more, and
+all partitions are fetched when one of them is registered at the same location or Glue can not be asked. They are
+also fetched instead of that one more when it would take several requests one after another (an expression holds
+2048 bytes): the one listing a scan without a lookup makes answers it too. A lookup is
+retried at most twice rather than as often as the SDK's retry strategy allows, so that one Glue throttles falls back
+soon. The connection remembers per Glue catalog (catalog id, endpoint and region, so a catalog attached again under the
+same name to another Glue starts afresh) what will not change soon, and does not ask again: not a lookup Glue refuses
+(a value or an expression it does not accept), not a kind of lookup of a table that Glue denies the principal
+(`AccessDeniedException` or a plain 403), throttles, fails on its side (a 5xx) or leaves unprocessed, no lookup of
+a table whose locations do not tell its partitions apart, and no lookup of a kind (by value or by expression) whose
+other spellings of a table's escaped directories could not be asked for (one an expression can not hold, or Glue
+refused, denied or throttled asking). Any other Glue error of a lookup (an expired token, a table
+that is gone, a timeout) fetches all partitions for that query alone. The files of a location belong
+to the first partition registered with it, and a partition the scan did not look up could be registered there
+too. A partition the scan did not look up is assumed not to be registered at exactly the directory of one it did. A data
+file in a subdirectory of a partition's location could belong to a partition registered there, which Glue can not be
+asked about by location: the scan then fetches all partitions once (logged at `INFO`), so the files belong to the same
+partitions either way. In `EXPLAIN`, `Scanning Files` counts the partitions looked up (kept/looked up rather than
+kept/all partitions of the table).
+
+When the filters of a scan pin every partition key to a few values (`=` or `IN` with string constants on string keys,
+combined with `AND`, at most 1000 combinations), the partitions are looked up by their values with
+`BatchGetPartition` (250 per request, the requests in parallel) instead of listing all partitions of the table;
+combinations no partition has do not come back, and every filter is still applied to the partitions that do. The
+lookup relies on Glue matching a value exactly, byte for byte and case sensitive, as `=` on a string does in DuckDB.
+A value with a NUL byte or longer than 1024 bytes, which the lookup can not ask for, lists all partitions instead,
+as do values of a partition that together are longer than 1023 bytes, for which Glue refuses the whole request.
+Glue leaves the values no partition has out of its answer, which comes in any order: the partitions found are
+matched to the values asked for. The
+keys Glue leaves unprocessed (its throttling) are asked for again after the back-off of `http_retries`,
+`http_retry_wait_ms` and `http_retry_backoff` (which an interrupt cuts short), and all partitions are listed when some
+are still left, or when Glue throttles the request or fails it on its side; the connection then does not look the
+table's partitions up by value again. A lookup Glue refuses lists all partitions as well: a value it does not accept
+for that lookup, and access denied to a principal allowed `glue:GetPartitions` but not `glue:BatchGetPartition`, for
+every lookup of the table in the connection. The partitions found are kept in the order of the values asked for.
+`SET glue_batch_get_partitions = false` lists all partitions again.
+
 ## Inspecting tables
 
 Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,
@@ -375,7 +418,11 @@ A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_END
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
-GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it.
+GetTables on a database named `fault_*` with a Glue error, refuses the partition lookups of a table named
+`fault_refuse_*`, and leaves the keys of a BatchGetPartition unprocessed for a table named `fault_unprocessed_*` (all)
+or `fault_halve_*` (half of them), and fails the partition lookups of a table named `fault_throttle_*`,
+`fault_unavailable_*`, `fault_expired_*` or `fault_forbidden_*` with throttling, a 500, an expired token or a plain 403;
+tests that need it are skipped without it.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)

@@ -60,6 +60,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ENDPOINT. At most 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(0));
 
+	config.AddExtensionOption("glue_batch_get_partitions",
+	                          "When the filters of a query pin every partition key of a Hive table to a few values, "
+	                          "look those partitions up in Glue by their values (BatchGetPartition) instead of listing "
+	                          "all partitions of the table. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+
 	config.AddExtensionOption("glue_create_bucketed_tables",
 	                          "Allow CREATE TABLE ... WITH (BucketColumns = [...], NumberOfBuckets = n, SortColumns = "
 	                          "[...]) to create a bucketed (clustered) Hive table. DuckDB reads such a table but does "

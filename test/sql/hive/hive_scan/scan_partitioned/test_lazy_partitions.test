@@ -10,6 +10,10 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+# the partitions are listed (GetPartitions), not looked up by their values
+statement ok
+SET glue_batch_get_partitions = false;
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,

@@ -309,6 +309,12 @@ static bool StartsWithAccountId(const string &path) {
 	return path.size() == num_digits_in_aws_account_id || path[num_digits_in_aws_account_id] == ':';
 }
 
+string GlueCatalog::AttachIdentity() const {
+	// without a catalog id the ATTACH path names the account's default catalog
+	return PartitionValuesKey(
+	    {options.catalog_id.empty() ? options.path : options.catalog_id, options.endpoint, options.region});
+}
+
 string GlueCatalog::KnownCatalogId() {
 	{
 		lock_guard<mutex> guard(reported_id_lock);

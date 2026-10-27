@@ -10,6 +10,10 @@
 
 #include <aws/core/auth/AWSCredentials.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
+#include <aws/core/client/AWSError.h>
+#include <aws/core/client/CoreErrors.h>
+#include <aws/core/client/DefaultRetryStrategy.h>
+#include <aws/core/client/RetryStrategy.h>
 #include <aws/glue/model/GetDatabasesRequest.h>
 
 #include <sys/stat.h>
@@ -44,7 +48,63 @@ const string &GetCURLCertPath() {
 	return cert_path;
 }
 
+thread_local bool lookup_retry_scope_active = false;
+
+//! The SDK's retry strategy, which retries a request sent in an active GlueLookupRetryScope at most
+//! GlueLookupRetryScope::LOOKUP_RETRIES times
+class GlueRetryStrategy : public Aws::Client::RetryStrategy {
+public:
+	explicit GlueRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> inner_p) : inner(std::move(inner_p)) {
+	}
+
+	bool ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+	                 long attempted_retries) const override {
+		if (lookup_retry_scope_active && attempted_retries >= GlueLookupRetryScope::LOOKUP_RETRIES) {
+			return false;
+		}
+		return inner->ShouldRetry(error, attempted_retries);
+	}
+	long CalculateDelayBeforeNextRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
+	                                   long attempted_retries) const override {
+		return inner->CalculateDelayBeforeNextRetry(error, attempted_retries);
+	}
+	long GetMaxAttempts() const override {
+		return inner->GetMaxAttempts();
+	}
+	void GetSendToken() override {
+		inner->GetSendToken();
+	}
+	bool HasSendToken() override {
+		return inner->HasSendToken();
+	}
+	void RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome) override {
+		inner->RequestBookkeeping(outcome);
+	}
+	void RequestBookkeeping(const Aws::Client::HttpResponseOutcome &outcome,
+	                        const Aws::Client::AWSError<Aws::Client::CoreErrors> &last_error) override {
+		inner->RequestBookkeeping(outcome, last_error);
+	}
+	const char *GetStrategyName() const override {
+		return inner->GetStrategyName();
+	}
+
+private:
+	std::shared_ptr<Aws::Client::RetryStrategy> inner;
+};
+
 } // namespace
+
+GlueLookupRetryScope::GlueLookupRetryScope(bool active) : previous(lookup_retry_scope_active) {
+	lookup_retry_scope_active = previous || active;
+}
+
+GlueLookupRetryScope::~GlueLookupRetryScope() {
+	lookup_retry_scope_active = previous;
+}
+
+bool GlueLookupRetryScope::Active() {
+	return lookup_retry_scope_active;
+}
 
 std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context, GlueCatalog &catalog) {
 	// Take the credentials from the DuckDB secret. The secret is looked up on every call so a refreshed
@@ -99,6 +159,12 @@ std::shared_ptr<Aws::Glue::GlueClient> GlueAPI::GetClient(ClientContext &context
 	}
 	auto &db_config = DBConfig::GetConfig(context);
 	config.userAgent = db_config.UserAgent();
+	// the strategy the configuration chose (AWS_RETRY_MODE, the profile), retrying lookups less
+	auto retry_strategy = config.retryStrategy;
+	if (!retry_strategy) {
+		retry_strategy = std::make_shared<Aws::Client::DefaultRetryStrategy>();
+	}
+	config.retryStrategy = std::make_shared<GlueRetryStrategy>(std::move(retry_strategy));
 
 	Aws::Auth::AWSCredentials credentials(key_id, secret, session_token);
 	auto provider = std::make_shared<Aws::Auth::SimpleAWSCredentialsProvider>(credentials);

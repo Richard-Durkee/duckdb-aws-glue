@@ -46,20 +46,49 @@ public:
 		}
 		return Resolve(*entry, load);
 	}
+	//! With a 'subset_key': the partitions a lookup of only some of them found (GetTablePartitionSubset), cached per
+	//! key
 	shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(const string &database_name, const string &table_name,
-	              const std::function<shared_ptr<const vector<GluePartitionInfo>>()> &load) {
+	              const std::function<shared_ptr<const vector<GluePartitionInfo>>()> &load,
+	              const string &subset_key = string()) {
 		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(partitions, database_name + "\n" + table_name);
+			if (subset_key.empty()) {
+				entry = FindEntry(partitions, database_name + "\n" + table_name);
+			} else {
+				// the key is not folded: the partition values in it are case sensitive
+				auto &slot =
+				    partition_subsets[StringUtil::Lower(database_name + "\n" + table_name) + "\n" + subset_key];
+				if (!slot) {
+					slot = make_shared_ptr<CacheEntry<vector<GluePartitionInfo>>>();
+				}
+				entry = slot;
+			}
 		}
 		return Resolve(*entry, load);
+	}
+	//! All partitions of the table if they are cached, without loading them
+	shared_ptr<const vector<GluePartitionInfo>> CachedPartitions(const string &database_name,
+	                                                             const string &table_name) {
+		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			auto found = partitions.find(StringUtil::Lower(database_name + "\n" + table_name));
+			if (found == partitions.end()) {
+				return nullptr;
+			}
+			entry = found->second;
+		}
+		annotated_lock_guard<annotated_mutex> guard(entry->load_lock);
+		return entry->value;
 	}
 	void Clear() {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
+		partition_subsets.clear();
 	}
 	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
 	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
@@ -104,6 +133,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
+	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partition_subsets DUCKDB_GUARDED_BY(lock);
 	const idx_t id = NextId();
 };
 

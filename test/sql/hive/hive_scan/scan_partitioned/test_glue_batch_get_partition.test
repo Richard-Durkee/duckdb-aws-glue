@@ -1,0 +1,629 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_glue_batch_get_partition.test
+# description: When the filters pin every partition key to a few values, the partitions are looked up by their values
+# group: [scan_partitioned]
+
+#              (BatchGetPartition) instead of listing all partitions of the table. Counted through the HTTP log.
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_orders (id INTEGER, dt VARCHAR, region VARCHAR) PARTITIONED BY (dt, region);
+
+# six partitions
+statement ok
+INSERT INTO my_datalake.default.gbp_orders VALUES
+    (1, '2024-01-01', 'eu'), (2, '2024-01-01', 'us'), (3, '2024-01-02', 'eu'),
+    (4, '2024-01-02', 'us'), (5, '2024-01-03', 'eu'), (6, '2024-01-03', 'us');
+
+# The Glue API calls since the last truncate_duckdb_logs(), by operation
+statement ok
+CREATE MACRO glue_calls() AS TABLE
+    SELECT regexp_extract(request.headers['x-amz-target'], 'AWSGlue\.(\w+)', 1) AS api, count(*) AS n
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.headers['x-amz-target'] IS NOT NULL
+    GROUP BY 1 ORDER BY 1;
+
+# the Glue operation is in the x-amz-target header, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage='memory');
+
+#---------------------------------------------------------------------------
+# every key pinned: looked up by value
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt IN ('2024-01-01', '2024-01-03') AND region = 'eu';
+----
+[1, 5]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	1
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gbp_orders WHERE dt IN ('2024-01-01', '2024-01-03') AND region = 'eu';
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/2.*
+
+# combinations no partition has do not come back
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt IN ('2024-01-02', '2023-12-31') AND region IN ('us', 'asia');
+----
+[4]
+
+# values are case sensitive, as the partition values are compared
+query I
+SELECT count(*) FROM my_datalake.default.gbp_orders WHERE dt = '2024-01-02' AND region = 'EU';
+----
+0
+
+# a key pinned twice: both hold
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt IN ('2024-01-01', '2024-01-02') AND dt IN ('2024-01-02', '2024-01-03') AND region = 'us';
+----
+[4]
+
+# with a filter on a data column and one on a function of a key, which are applied to what comes back
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt IN ('2024-01-01', '2024-01-02') AND region IN ('eu', 'us') AND id > 1 AND right(dt, 1) = '2';
+----
+[3, 4]
+
+# scans of the table with different filters in one query each get the partitions of their own filters
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT a.id, b.id FROM my_datalake.default.gbp_orders a JOIN my_datalake.default.gbp_orders b ON a.dt = b.dt
+WHERE a.dt IN ('2024-01-01', '2024-01-02') AND a.region = 'eu' AND b.dt IN ('2024-01-02', '2024-01-03') AND b.region = 'us'
+ORDER BY a.id;
+----
+3	4
+
+query II
+SELECT (SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt = '2024-01-01' AND region = 'eu'),
+       (SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE region = 'us');
+----
+[1]	[2, 4, 6]
+
+#---------------------------------------------------------------------------
+# not every key pinned, or too many combinations: all partitions are listed
+#---------------------------------------------------------------------------
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt = '2024-01-02';
+----
+[3, 4]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt = '2024-01-02' OR region = 'eu';
+----
+[1, 3, 4, 5]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+# a value with a NUL byte, which the AWS SDK cuts short in a request
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_orders WHERE dt = '2024-01-01' || chr(0) AND region = 'us';
+----
+0
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+# 40 x 30 combinations
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_orders WHERE dt IN ('d00', 'd01', 'd02', 'd03', 'd04', 'd05', 'd06', 'd07', 'd08', 'd09', 'd10', 'd11', 'd12', 'd13', 'd14', 'd15', 'd16', 'd17', 'd18', 'd19', 'd20', 'd21', 'd22', 'd23', 'd24', 'd25', 'd26', 'd27', 'd28', 'd29', 'd30', 'd31', 'd32', 'd33', 'd34', 'd35', 'd36', 'd37', 'd38', 'd39') AND region IN ('r00', 'r01', 'r02', 'r03', 'r04', 'r05', 'r06', 'r07', 'r08', 'r09', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15', 'r16', 'r17', 'r18', 'r19', 'r20', 'r21', 'r22', 'r23', 'r24', 'r25', 'r26', 'r27', 'r28', 'r29');
+----
+0
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+# switched off
+statement ok
+SET glue_batch_get_partitions = false;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt = '2024-01-01' AND region = 'us';
+----
+[2]
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+statement ok
+RESET glue_batch_get_partitions;
+
+# an integer key: its values are not looked up as written
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_numbers;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_numbers (id INTEGER, n INTEGER) PARTITIONED BY (n);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_numbers VALUES (1, 1), (2, 2);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT id FROM my_datalake.default.gbp_numbers WHERE n = 2;
+----
+2
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+statement ok
+DROP TABLE my_datalake.default.gbp_numbers;
+
+#---------------------------------------------------------------------------
+# a NULL partition value: never equal to a constant
+#---------------------------------------------------------------------------
+statement ok
+INSERT INTO my_datalake.default.gbp_orders VALUES (7, NULL, 'eu');
+
+query I
+SELECT list(id ORDER BY id) FROM my_datalake.default.gbp_orders WHERE dt IN ('2024-01-01', '__HIVE_DEFAULT_PARTITION__') AND region = 'eu';
+----
+[1]
+
+statement ok
+DROP TABLE my_datalake.default.gbp_orders;
+
+#---------------------------------------------------------------------------
+# a partition registered inside another's directory: only the one the filter names is looked up, and the files of
+# the other are still not counted as its own
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_nested;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_nested (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_nested VALUES (1, 'outer');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gbp_nested', {dt: 'inner'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_nested/dt=outer/inner');
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_nested/dt=outer/inner/data.parquet';
+
+# both listing paths: each partition on its own, and the table root
+foreach threshold 1000 1
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT id, dt FROM my_datalake.default.gbp_nested WHERE dt = 'outer';
+----
+1	outer
+
+query II
+SELECT id, dt FROM my_datalake.default.gbp_nested WHERE dt = 'inner';
+----
+2	inner
+
+query II
+SELECT id, dt FROM my_datalake.default.gbp_nested ORDER BY id;
+----
+1	outer
+2	inner
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+statement ok
+DROP TABLE my_datalake.default.gbp_nested;
+
+#---------------------------------------------------------------------------
+# a value longer than Glue accepts in a lookup: all partitions are listed
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_long;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_long (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_long VALUES (1, 'a'), (2, 'b');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_long WHERE dt = repeat('x', 1025);
+----
+0
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+statement ok
+DROP TABLE my_datalake.default.gbp_long;
+
+# the values of a partition longer than 1023 bytes together, for which Glue refuses the whole request: not looked up
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_long2;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_long2 (id INTEGER, a VARCHAR, b VARCHAR) PARTITIONED BY (a, b);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_long2 VALUES (1, 'a', 'b');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_long2 WHERE a = repeat('x', 600) AND b IN (repeat('y', 424), 'b');
+----
+0
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	1
+
+# 1023 bytes are
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_long2 WHERE a = repeat('x', 600) AND b IN (repeat('y', 423), 'b');
+----
+0
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	1
+
+statement ok
+DROP TABLE my_datalake.default.gbp_long2;
+
+#---------------------------------------------------------------------------
+# two partitions on one location: its files belong to the partition registered with it first, whichever the filters
+# look up
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_shared;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_shared (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_shared VALUES (1, 'a'), (2, 'b');
+
+# registered after 'a', on the directory of 'a'
+statement ok
+CALL glue_add_partition('my_datalake.default.gbp_shared', {dt: 'c'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_shared/dt=a');
+
+foreach setting true false
+
+statement ok
+SET glue_batch_get_partitions = {setting};
+
+query II
+SELECT id, dt FROM my_datalake.default.gbp_shared WHERE dt = 'c';
+----
+
+query II
+SELECT id, dt FROM my_datalake.default.gbp_shared WHERE dt IN ('a', 'c') ORDER BY id;
+----
+1	a
+
+query II
+SELECT id, dt FROM my_datalake.default.gbp_shared WHERE dt = 'a';
+----
+1	a
+
+endloop
+
+statement ok
+RESET glue_batch_get_partitions;
+
+# 'c' is not stored in the directory its value names, which the connection found above: all partitions are listed
+# for it, and for 'a' too
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SELECT id, dt FROM my_datalake.default.gbp_shared WHERE dt = 'c';
+
+statement ok
+SELECT id, dt FROM my_datalake.default.gbp_shared WHERE dt = 'a';
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+GetPartitions	2
+
+statement ok
+DROP TABLE my_datalake.default.gbp_shared;
+
+#---------------------------------------------------------------------------
+# an escaped directory name is also the directory of the value spelled as it is: 'a b' stored at 'k=a%20b', where
+# 'a%20b' is registered first, does not own its files, as when all partitions are fetched
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_pct;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_pct (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_pct VALUES (1, 'c');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gbp_pct', {k: 'a%20b'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_pct/k=a%20b');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gbp_pct', {k: 'a b'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_pct/k=a%20b');
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_pct/k=a%20b/part-0.parquet';
+
+foreach setting true false
+
+statement ok
+SET glue_batch_get_partitions = {setting};
+
+query II
+SELECT id, k FROM my_datalake.default.gbp_pct WHERE k = 'a b';
+----
+
+query II
+SELECT id, k FROM my_datalake.default.gbp_pct WHERE k = 'a%20b';
+----
+2	a%20b
+
+endloop
+
+statement ok
+RESET glue_batch_get_partitions;
+
+statement ok
+DROP TABLE my_datalake.default.gbp_pct;
+
+#---------------------------------------------------------------------------
+# a directory name with an escape, as the writer gives a timestamp ('ts=2024-01-01%2000%3A00%3A00'): the partitions
+# with the other spellings of the name are asked for in the same request, and as none is registered, the lookup's
+# partitions are kept
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_ts;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_ts (id INTEGER, ts VARCHAR) PARTITIONED BY (ts);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_ts VALUES (1, '2024-01-01 00:00:00'), (2, '2024-01-01 01:00:00'), (3, 'a:b');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, ts FROM my_datalake.default.gbp_ts WHERE ts = '2024-01-01 00:00:00';
+----
+1	2024-01-01 00:00:00
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	1
+
+query II
+EXPLAIN SELECT * FROM my_datalake.default.gbp_ts WHERE ts IN ('2024-01-01 01:00:00', 'a:b');
+----
+physical_plan	<REGEX>:.*Scanning Files: 2/2.*
+
+# a spelling the request did not ask for ('%3a', lower case) is looked up with one more
+statement ok
+CALL glue_add_partition('my_datalake.default.gbp_ts', {ts: 'c:d'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_ts/ts=c%3ad');
+
+statement ok
+COPY (SELECT 4 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_ts/ts=c%3ad/part-0.parquet';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, ts FROM my_datalake.default.gbp_ts WHERE ts = 'c:d';
+----
+4	c:d
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	2
+
+# 'e%3ae', registered first at that spelling's directory, owns its files, as when all partitions are fetched
+statement ok
+CALL glue_add_partition('my_datalake.default.gbp_ts', {ts: 'e%3ae'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_ts/ts=e%3ae');
+
+statement ok
+CALL glue_add_partition('my_datalake.default.gbp_ts', {ts: 'e:e'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_ts/ts=e%3ae');
+
+statement ok
+COPY (SELECT 5 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_ts/ts=e%3ae/part-0.parquet';
+
+query II
+SELECT id, ts FROM my_datalake.default.gbp_ts WHERE ts = 'e:e';
+----
+
+query II
+SELECT id, ts FROM my_datalake.default.gbp_ts WHERE ts = 'e%3ae';
+----
+5	e%3ae
+
+statement ok
+DROP TABLE my_datalake.default.gbp_ts;
+
+#---------------------------------------------------------------------------
+# a writer's subdirectory in a partition: its files are the partition's, found once all partitions are fetched (Glue
+# can not be asked whether a partition is registered there)
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_subdir;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_subdir (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_subdir VALUES (1, 'a'), (2, 'b');
+
+statement ok
+COPY (SELECT 3 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/gbp_subdir/dt=a/writer-0/part-0.parquet';
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT id, dt FROM my_datalake.default.gbp_subdir WHERE dt = 'a' ORDER BY id;
+----
+1	a
+3	a
+
+query II
+FROM glue_calls() WHERE api LIKE '%Partition%';
+----
+BatchGetPartition	1
+GetPartitions	1
+
+statement ok
+DROP TABLE my_datalake.default.gbp_subdir;
+
+#---------------------------------------------------------------------------
+# a value holding a byte a list of values could be joined with is not taken for that list, in each cache scope
+#---------------------------------------------------------------------------
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gbp_sep;
+
+statement ok
+CREATE TABLE my_datalake.default.gbp_sep (id INTEGER, k VARCHAR) PARTITIONED BY (k);
+
+statement ok
+INSERT INTO my_datalake.default.gbp_sep VALUES (1, 'a'), (2, 'b');
+
+# the query's own cache
+query II
+SELECT 'q1', count(*) FROM my_datalake.default.gbp_sep WHERE k IN ('a' || chr(30) || 'b')
+UNION ALL
+SELECT 'q2', count(*) FROM my_datalake.default.gbp_sep WHERE k IN ('a', 'b')
+ORDER BY 1;
+----
+q1	0
+q2	2
+
+# the transaction's
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_sep WHERE k = 'a' || chr(30) || 'b';
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_sep WHERE k IN ('a', 'b');
+----
+2
+
+statement ok
+COMMIT;
+
+# the connection's
+statement ok
+SET glue_metadata_cache_scope = 'connection';
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_sep WHERE k = 'b' || chr(30) || 'a';
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_sep WHERE k IN ('b', 'a');
+----
+2
+
+statement ok
+RESET glue_metadata_cache_scope;
+
+# filters no value satisfies look nothing up, and are not taken for all partitions of the table
+statement ok
+BEGIN;
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_sep WHERE k IN ('a', 'x') AND k IN ('b', 'y');
+----
+0
+
+query I
+SELECT count(*) FROM my_datalake.default.gbp_sep;
+----
+2
+
+statement ok
+COMMIT;
+
+statement ok
+DROP TABLE my_datalake.default.gbp_sep;

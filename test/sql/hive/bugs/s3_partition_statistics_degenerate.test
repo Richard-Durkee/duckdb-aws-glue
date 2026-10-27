@@ -8,6 +8,10 @@ require glue
 
 require-env GLUE_CATALOG_ID
 
+# pruning on the partition values DuckDB does itself: Glue lists all partitions
+statement ok
+SET glue_batch_get_partitions = false;
+
 statement ok
 attach '{GLUE_CATALOG_ID}' as my_datalake (
     TYPE glue,

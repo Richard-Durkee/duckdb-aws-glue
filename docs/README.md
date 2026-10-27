@@ -289,14 +289,15 @@ of a Glue table or of a `hive_scan()` call, using only core DuckDB types:
   field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into `read_csv`,
   which would convert the text itself and strictly.
 - `HiveScanGetFilePartitionValues(get, path)`: the values of the partition a listed file belongs to, as constants of
-  the partition columns' types.
+  the partition columns' types. The path is the file's as the scan listed it, or another spelling of it that DuckDB's
+  `Path` normalizes to it (`s3://b//x` or `s3://b/./x` for `s3://b/x`).
 
 The caller reads a set of the scan's files as `SELECT <columns>, <partition values> FROM <reader>([<files>],
 <parameters>)`, one such read per partition, `UNION ALL`ed. Neither function calls Glue or needs a `ClientContext`.
-Both return nothing for a scan they do not recognize, and `HiveScanGetReaderCall` also for a Parquet table with a
-`binary` column, whose string columns are decoded file by file, and for a csv or json scan the optimizer pushed a
-type into that the reader parses itself. Both only work when the caller and this extension are linked into the same
-binary.
+Both return nothing for a scan they do not recognize or that reads a column, a partition key included, as another
+type than the table declares (a type the optimizer pushed into the scan), and `HiveScanGetReaderCall` also for a
+Parquet table with a `binary` column, whose string columns are decoded file by file. Both only work when the caller
+and this extension are linked into the same binary.
 
 ## Partitions
 

@@ -1,10 +1,10 @@
 #include "catch.hpp"
 #include "duckdb.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
+#include "duckdb/common/sql_identifier.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
-#include "duckdb/parser/keyword_helper.hpp"
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "functions/hive_reader_call.hpp"
@@ -134,6 +134,17 @@ public:
 	vector<OpenFileInfo> Files() const {
 		return get->bind_data->Cast<MultiFileBindData>().file_list->GetAllFiles();
 	}
+	//! Read 'column' as 'type', as the optimizer's type pushdown leaves a scan whose column a cast was pushed into
+	void Retype(const string &column, const LogicalType &type) {
+		auto &bind_data = get->bind_data->Cast<MultiFileBindData>();
+		for (idx_t i = 0; i < bind_data.names.size(); i++) {
+			if (bind_data.names[i].GetIdentifierName() == column) {
+				bind_data.types[i] = type;
+				return;
+			}
+		}
+		FAIL("the scan has no column " + column);
+	}
 
 private:
 	Connection &con;
@@ -176,13 +187,26 @@ string SelectItem(const ParsedExpression &expression) {
 	if (expression.GetAlias().empty()) {
 		return sql;
 	}
-	return sql + " AS " + KeywordHelper::WriteOptionallyQuoted(expression.GetAlias().GetIdentifierName());
+	return sql + " AS " + SQLIdentifier::ToString(expression.GetAlias());
+}
+
+//! The partition values of the file at 'path' as SQL, or "none"
+string PartitionValuesSQL(const PlannedScan &scan, const string &path) {
+	auto values = HiveScanGetFilePartitionValues(scan.Get(), path);
+	if (!values) {
+		return "none";
+	}
+	vector<string> items;
+	for (auto &value : *values) {
+		items.push_back(SelectItem(*value));
+	}
+	return StringUtil::Join(items, ", ");
 }
 
 string ReaderCallSQL(const HiveReaderCall &call, const vector<string> &files) {
 	auto sql = call.function + "([" + StringUtil::Join(files, ", ") + "]";
 	for (auto &parameter : call.parameters) {
-		sql += ", " + KeywordHelper::WriteOptionallyQuoted(parameter.first.GetIdentifierName()) +
+		sql += ", " + SQLIdentifier::ToString(parameter.first) +
 		       " := " + ConstantExpression::FromValue(parameter.second)->ToString();
 	}
 	return sql + ")";
@@ -259,6 +283,13 @@ TEST_CASE("A Parquet scan is restated as read_parquet over its files", "[hive_re
 		REQUIRE(null_partition);
 		REQUIRE(typed_partition);
 		REQUIRE(!HiveScanGetFilePartitionValues(scan.Get(), dir.path + "/part/not_listed.parquet").has_value());
+		// another spelling of a listed file's path is the same file
+		for (auto &file : scan.Files()) {
+			auto respelled = StringUtil::Replace(file.path, dir.path, dir.path + "/.//");
+			REQUIRE(respelled != file.path);
+			REQUIRE(PartitionValuesSQL(scan, respelled) == PartitionValuesSQL(scan, file.path));
+		}
+		REQUIRE(PartitionValuesSQL(scan, dir.path + "/.//part/not_listed.parquet") == "none");
 	}
 	auto read = Restate(con, query);
 	REQUIRE(Rows(con, read) == 40);
@@ -312,12 +343,13 @@ TEST_CASE("A csv scan is restated as read_csv with the options it was bound with
 	auto read = Restate(con, query);
 	REQUIRE(Rows(con, read) == 4);
 	REQUIRE(Differences(con, query, read) == 0);
-	// a cast right above the scan has the optimizer push its type into read_csv and take the cast out of the plan,
-	// which no reader call says: of a data column, and of a partition key, whose values would be cast from Glue's text
-	for (string cast : {"TRY_CAST(name AS INTEGER)", "CAST(dt AS VARCHAR)"}) {
-		PlannedScan scan(con, "SELECT " + cast + " AS c FROM (" + query + ")");
+	// a column the scan reads as another type than the table's, which no reader call says: of a data column, and of a
+	// partition key, whose values would be cast from Glue's text
+	for (auto &column : {"name", "dt"}) {
+		PlannedScan scan(con, query);
+		scan.Retype(column, LogicalType::INTEGER);
 		REQUIRE(!HiveScanGetReaderCall(scan.Get()).has_value());
-		bool retypes_key = StringUtil::Contains(cast, "dt");
+		auto retypes_key = string(column) == "dt";
 		for (auto &file : scan.Files()) {
 			REQUIRE(HiveScanGetFilePartitionValues(scan.Get(), file.path).has_value() != retypes_key);
 		}
@@ -441,6 +473,15 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	auto read = Restate(con, query);
 	REQUIRE(Rows(con, read) == 4);
 	REQUIRE(Differences(con, query, read) == 0);
+	{
+		PlannedScan scan(con, query);
+		for (auto &file : scan.Files()) {
+			auto respelled = StringUtil::Replace(file.path, location, location + "//./");
+			REQUIRE(respelled != file.path);
+			REQUIRE(PartitionValuesSQL(scan, file.path) != "none");
+			REQUIRE(PartitionValuesSQL(scan, respelled) == PartitionValuesSQL(scan, file.path));
+		}
+	}
 	auto pruned = query + " WHERE k IS NULL OR k = 2";
 	REQUIRE(Differences(con, pruned, Restate(con, pruned)) == 0);
 	// LazySimpleSerDe: '|', NULL is 'NA', two header lines, short rows padded, extra fields ignored, invalid fields
@@ -467,10 +508,10 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	read = Restate(con, query);
 	REQUIRE(Rows(con, read) == 5);
 	REQUIRE(Differences(con, query, read) == 0);
-	// a cast the optimizer pushed into the scan is gone from the plan: the column mapping's TRY_CAST to the pushed type
-	// would read as NULL a name the CAST fails on
+	// a field read as another type than the table's: its conversion to that type would TRY_CAST a field a CAST fails on
 	{
-		PlannedScan scan(con, "SELECT CAST(name AS INTEGER) AS n FROM lake.default." + lazy);
+		PlannedScan scan(con, query);
+		scan.Retype("name", LogicalType::INTEGER);
 		REQUIRE(!HiveScanGetReaderCall(scan.Get()).has_value());
 	}
 	// OpenCSVSerde: quoted, one header line, no NULL, and a value that does not parse fails the query

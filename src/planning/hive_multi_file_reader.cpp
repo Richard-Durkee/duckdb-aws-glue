@@ -10,6 +10,7 @@
 #include "duckdb/common/multi_file/multi_file_function.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/multi_file/table_function_multi_file.hpp"
+#include "duckdb/common/path.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "duckdb/common/serializer/serializer.hpp"
@@ -691,6 +692,21 @@ static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &ge
 	}
 }
 
+//! The standard reader of a file format, which BindHiveScan wraps and HiveScanGetReaderCall names
+static string ReaderFunctionName(HiveFileFormat format) {
+	switch (format) {
+	case HiveFileFormat::PARQUET:
+		return "read_parquet";
+	case HiveFileFormat::CSV:
+		return "read_csv";
+	case HiveFileFormat::JSON:
+		return "read_json";
+	case HiveFileFormat::AVRO:
+		return "read_avro";
+	}
+	throw InternalException("Unknown Hive file format");
+}
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -703,10 +719,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		}
 	}
 	named_argument_map_t param_map;
-	string function_name;
+	auto function_name = ReaderFunctionName(scan_info->file_format);
 	switch (scan_info->file_format) {
 	case HiveFileFormat::PARQUET:
-		function_name = "read_parquet";
 		// the Glue type decides how a BYTE_ARRAY column without a STRING annotation reads, not the session setting.
 		// A table without a binary column has the reader read such a column as text (it verifies the UTF-8); with a
 		// binary column the reader keeps the bytes, and InitializeReader decodes the ones Glue declares string
@@ -715,7 +730,6 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table
 		// describes - there is nothing left for the sniffer to find, so every file is opened without sniffing
-		function_name = "read_csv";
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["auto_detect"] = Value::BOOLEAN(false);
 		param_map["header"] = Value::BOOLEAN(false);
@@ -743,7 +757,6 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	case HiveFileFormat::JSON:
 		// one JSON object per line, keys matched to the columns by name
 		ExtensionHelper::AutoLoadExtension(context, "json");
-		function_name = "read_json";
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["format"] = Value("newline_delimited");
 		if (scan_info->json_options.ignore_errors) {
@@ -753,7 +766,6 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	case HiveFileFormat::AVRO:
 		// the files carry their schema, columns are matched by name like parquet
 		ExtensionHelper::AutoLoadExtension(context, "avro");
-		function_name = "read_avro";
 		break;
 	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
@@ -1268,11 +1280,19 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 	}
 	auto &csv_options = ScanInfo().csv_options;
 	for (auto &expr : reader_data.expressions) {
-		if (csv_options.false_unless_true) {
-			MakeFalseUnlessTrue(context, expr);
+		if (!expr) {
+			continue;
 		}
-		if (csv_options.null_for_invalid_data) {
+		switch (csv_options.FieldConversion(expr->GetReturnType())) {
+		case HiveFieldConversion::NONE:
+		case HiveFieldConversion::CAST:
+			break;
+		case HiveFieldConversion::TRY_CAST:
 			MakeTryCast(context, expr);
+			break;
+		case HiveFieldConversion::FALSE_UNLESS_TRUE:
+			MakeFalseUnlessTrue(context, expr);
+			break;
 		}
 	}
 	return result;
@@ -1295,19 +1315,6 @@ static optional_ptr<const HiveScanInfo> BoundHiveScanInfo(const LogicalGet &get)
 		return nullptr;
 	}
 	return &reader->ScanInfo();
-}
-
-static string ReaderFunctionName(HiveFileFormat format) {
-	switch (format) {
-	case HiveFileFormat::CSV:
-		return "read_csv";
-	case HiveFileFormat::JSON:
-		return "read_json";
-	case HiveFileFormat::AVRO:
-		return "read_avro";
-	default:
-		return "read_parquet";
-	}
 }
 
 //! The `schema` option over the data columns, keyed by name: every file is mapped onto them by name, a column a file
@@ -1346,28 +1353,39 @@ static bool ScanTypeIsTableType(const HiveScanInfo &info, const MultiFileBindDat
 	return false;
 }
 
-//! A data column of the scan, of the table's type, as an expression over the reader's column: what InitializeReader
-//! makes of the column mapping's cast of a csv field read as text. The field is barred (__internal_barrier) so that the
-//! caller's optimizer does not push the cast into read_csv (type_pushdown), which would convert the text itself, and
-//! strictly
-static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const Identifier &name,
-                                                 const LogicalType &type) {
-	bool serde_fields = info.file_format == HiveFileFormat::CSV && info.csv_options.serde_fields;
-	if (!serde_fields || type == LogicalType::VARCHAR) {
-		return make_uniq<ColumnRefExpression>(name);
-	}
+//! A csv field read as text, barred (__internal_barrier) so that the caller's optimizer does not push its conversion
+//! into read_csv (type_pushdown), which would convert the text itself, and strictly
+static unique_ptr<ParsedExpression> BarredField(const Identifier &name) {
 	vector<unique_ptr<ParsedExpression>> field;
 	field.push_back(make_uniq<ColumnRefExpression>(name));
-	auto barred = make_uniq<FunctionExpression>(Identifier("__internal_barrier"), std::move(field));
+	return make_uniq<FunctionExpression>(Identifier("__internal_barrier"), std::move(field));
+}
+
+//! A data column of the scan, of the table's type, as an expression over the reader's column: the conversion of a field
+//! read as text that InitializeReader gives the scan (HiveCSVOptions::FieldConversion)
+static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const Identifier &name,
+                                                 const LogicalType &type) {
+	if (info.file_format != HiveFileFormat::CSV || !info.csv_options.serde_fields) {
+		return make_uniq<ColumnRefExpression>(name);
+	}
 	unique_ptr<ParsedExpression> column;
-	if (info.csv_options.false_unless_true && type.id() == LogicalTypeId::BOOLEAN) {
+	switch (info.csv_options.FieldConversion(type)) {
+	case HiveFieldConversion::NONE:
+		return make_uniq<ColumnRefExpression>(name);
+	case HiveFieldConversion::CAST:
+		column = make_uniq<CastExpression>(type, BarredField(name), false);
+		break;
+	case HiveFieldConversion::TRY_CAST:
+		column = make_uniq<CastExpression>(type, BarredField(name), true);
+		break;
+	case HiveFieldConversion::FALSE_UNLESS_TRUE: {
 		vector<unique_ptr<ParsedExpression>> lower;
-		lower.push_back(std::move(barred));
+		lower.push_back(BarredField(name));
 		column = make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL,
 		                                         make_uniq<FunctionExpression>(Identifier("lower"), std::move(lower)),
 		                                         ConstantExpression::FromValue(Value("true")));
-	} else {
-		column = make_uniq<CastExpression>(type, std::move(barred), info.csv_options.null_for_invalid_data);
+		break;
+	}
 	}
 	column->SetAlias(name);
 	return column;
@@ -1403,10 +1421,18 @@ optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get) {
 optional<vector<unique_ptr<ParsedExpression>>> HiveScanGetFilePartitionValues(const LogicalGet &get,
                                                                               const string &path) {
 	auto info = BoundHiveScanInfo(get);
-	if (!info || info->partition_keys.empty() || !info->FindPartitionIndexOfFile(path).IsValid()) {
+	if (!info || info->partition_keys.empty()) {
 		return nullopt;
 	}
-	auto &partition = info->GetPartitionOfFile(path);
+	// the listing spells a path as the file system does; the caller may spell it another way (s3://b//x for s3://b/x)
+	auto listed_path = path;
+	if (!info->FindPartitionIndexOfFile(listed_path).IsValid()) {
+		listed_path = Path::Normalize(path);
+		if (!info->FindPartitionIndexOfFile(listed_path).IsValid()) {
+			return nullopt;
+		}
+	}
+	auto &partition = info->GetPartitionOfFile(listed_path);
 	auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
 	vector<unique_ptr<ParsedExpression>> values;
 	for (idx_t key = 0; key < info->partition_keys.size() && key < partition.values.size(); key++) {

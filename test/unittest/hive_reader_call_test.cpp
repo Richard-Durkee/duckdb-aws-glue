@@ -266,8 +266,10 @@ TEST_CASE("A Parquet scan is restated as read_parquet over its files", "[hive_re
 		PlannedScan scan(con, query);
 		auto call = Call(scan);
 		REQUIRE(call.function == "read_parquet");
-		REQUIRE(ParameterNames(call) == std::set<string> {"binary_as_string", "hive_partitioning", "schema"});
+		REQUIRE(ParameterNames(call) ==
+		        std::set<string> {"binary_as_string", "can_have_nan", "hive_partitioning", "schema"});
 		REQUIRE(Parameter(call, "binary_as_string") == "true");
+		REQUIRE(Parameter(call, "can_have_nan") == "true");
 		REQUIRE(Parameter(call, "hive_partitioning") == "false");
 		REQUIRE(Columns(call) == vector<string> {"i", "v"});
 		bool null_partition = false;

@@ -78,19 +78,9 @@ void AddHiveTableProperties(CreateTableInfo &info, const GlueTableInfo &table_in
 		throw NotImplementedException("Not supported: SerDe '%s' for Hive tables", table_info.serde_library);
 	}
 
-	// SerDe parameters check: CREATE path writes these 5 SerDe parameters.
-	// Throw error for unknown SerDe parameter.
-	static const char *SAFE_SERDE_KEYS[] = {"field.delim", "separatorChar", "quoteChar", "escapeChar",
-	                                        "serialization.format"};
+	// SerDe parameters check: only those the CREATE path writes (core/serde_policy.json create_option)
 	for (auto &param : table_info.serde_parameters) {
-		bool is_safe = false;
-		for (auto &safe_key : SAFE_SERDE_KEYS) {
-			if (StringUtil::CIEquals(param.first, safe_key)) {
-				is_safe = true;
-				break;
-			}
-		}
-		if (!is_safe) {
+		if (!IsCreatedSerDeParameter(param.first)) {
 			throw NotImplementedException("Not supported: SerDe parameter '%s' for Hive tables", param.first);
 		}
 	}
@@ -108,14 +98,15 @@ void AddHiveTableProperties(CreateTableInfo &info, const GlueTableInfo &table_in
 
 	// CSV properties — pulled from SerDe parameters.
 	if (file_format == HiveFileFormat::CSV) {
-		auto delimiter = table_info.GetFieldDelimiter();
+		auto properties = table_info.ResolveSerDeProperties(SerDeDirection::READ, false);
+		auto &delimiter = properties.Get(SerDeOption::DELIMITER);
 		if (!delimiter.empty() && delimiter != ",") {
 			info.options["delimiter"] = ConstantExpression::FromValue(Value(delimiter));
 		}
-		// quote/escape only exist on OpenCSVSerde.
-		if (StringUtil::Contains(StringUtil::Lower(table_info.serde_library), "opencsvserde")) {
-			info.options["quote"] = ConstantExpression::FromValue(Value(table_info.GetQuoteCharacter()));
-			info.options["escape"] = ConstantExpression::FromValue(Value(table_info.GetEscapeCharacter()));
+		// quote/escape only exist on quoting SerDes (OpenCSVSerde).
+		if (GetSerDeDefinition(properties.serde).quoted) {
+			info.options["quote"] = ConstantExpression::FromValue(Value(properties.Get(SerDeOption::QUOTE)));
+			info.options["escape"] = ConstantExpression::FromValue(Value(properties.Get(SerDeOption::ESCAPE)));
 		}
 		if (table_info.GetParameter("skip.header.line.count") == "1") {
 			info.options["header"] = ConstantExpression::Boolean(true);
@@ -251,14 +242,13 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->root_location = latest_info.location;
 	scan_info->file_format = latest_info.GetFileFormat();
 	if (IsTextFileFormat(scan_info->file_format)) {
-		latest_info.CheckTextSerdeSupported(scan_info->file_format);
-	}
-	if (scan_info->file_format == HiveFileFormat::CSV) {
-		scan_info->csv_options = latest_info.GetCSVOptions();
-	}
-	if (scan_info->file_format == HiveFileFormat::JSON) {
-		scan_info->json_options = latest_info.GetJSONOptions();
-		for (auto &property : scan_info->json_options.unsupported_properties) {
+		auto properties = latest_info.ResolveSerDeProperties(SerDeDirection::READ);
+		if (scan_info->file_format == HiveFileFormat::CSV) {
+			scan_info->csv_options = HiveCSVOptions::FromSerDeProperties(properties);
+		} else {
+			scan_info->json_options = HiveJSONOptions::FromSerDeProperties(properties);
+		}
+		for (auto &property : properties.not_applied) {
 			DUCKDB_LOG_WARNING(context, "Glue table '%s.%s': SerDe property '%s' is not applied when reading",
 			                   latest_info.schema_name, latest_info.name, property);
 		}

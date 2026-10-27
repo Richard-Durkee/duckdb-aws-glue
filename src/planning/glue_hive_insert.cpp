@@ -251,8 +251,13 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	// For INSERT, the table's SerDe determines the format.
 	// For CTAS the table is freshly created and has no SerDe yet, so use the option from the CREATE TABLE statement.
 	auto file_format = creating_table ? table_info.file_format : table_info.GetFileFormat();
+	// a CTAS table has the SerDe CREATE TABLE gives the format (a csv one the SerDe BuildTableInfo chose)
+	auto serde = creating_table && table_info.serde_library.empty()
+	                 ? GetSerDeDefinitionForFormat(file_format).serde
+	                 : table_info.GetSerDe();
+	SerDeProperties serde_properties;
 	if (IsTextFileFormat(file_format)) {
-		table_info.CheckTextSerdeSupported(file_format);
+		serde_properties = ResolveSerDeProperties(table_info, serde, SerDeDirection::WRITE, true);
 	}
 	auto format_name = HiveFileFormatToString(file_format);
 	// the operator feeding the copy and the columns it produces
@@ -281,24 +286,15 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		break;
 	case HiveFileFormat::CSV: {
 		// Hive CSV files: the table's dialect and NULL string, a header line only when the table says so
-		auto header_lines = table_info.GetHeaderLineCount();
-		if (header_lines > 1) {
-			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: its files start with %d "
-			                              "header lines, DuckDB writes at most one",
-			                              table_info.schema_name, table_info.name, header_lines);
-		}
-		auto delimiter = table_info.GetFieldDelimiter();
-		auto quoted = table_info.GetSerDe() == HiveSerDe::OPEN_CSV;
-		auto null_string = table_info.GetNullFormat();
-		if (delimiter.size() > 1) {
-			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: DuckDB writes single-byte "
-			                              "field delimiters only, the table's is '%s'",
-			                              table_info.schema_name, table_info.name, delimiter);
-		}
+		// the SerDe policy refused more than one header line and multi-byte delimiters
+		auto header_lines = serde_properties.GetCount(SerDeOption::HEADER_LINES);
+		auto delimiter = serde_properties.Get(SerDeOption::DELIMITER);
+		auto quoted = GetSerDeDefinition(serde).quoted;
+		auto null_string = serde_properties.Get(SerDeOption::NULL_STRING);
 		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
 		copy_options[Identifier("delimiter")] = {Value(delimiter)};
-		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
-		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		copy_options[Identifier("quote")] = {Value(serde_properties.Get(SerDeOption::QUOTE))};
+		copy_options[Identifier("escape")] = {Value(serde_properties.Get(SerDeOption::ESCAPE))};
 		copy_options[Identifier("nullstr")] = {Value(null_string)};
 		if (quoted) {
 			// as Hive writes OpenCSVSerde files, so that an escape character in a value is escaped too

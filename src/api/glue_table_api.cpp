@@ -127,40 +127,29 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 	Aws::Glue::Model::SerDeInfo serde_info;
 	Aws::Glue::Model::StorageDescriptor storage_descriptor;
 	auto parameters = ToAwsMap(table.parameters);
-	switch (table.file_format) {
-	case HiveFileFormat::PARQUET:
-		serde_info.SetSerializationLibrary("org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe");
-		serde_info.AddParameters("serialization.format", "1");
-		storage_descriptor.SetInputFormat("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat");
-		storage_descriptor.SetOutputFormat("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat");
-		parameters.emplace("classification", "parquet");
-		break;
-	case HiveFileFormat::CSV:
-		// the SerDe GlueSchemaEntry::BuildTableInfo chose
-		serde_info.SetSerializationLibrary(table.serde_library);
-		for (auto &parameter : table.serde_parameters) {
-			serde_info.AddParameters(parameter.first, parameter.second);
+	// the SerDe the policy table gives the format; for csv the one GlueSchemaEntry::BuildTableInfo chose, with the
+	// SerDe parameters it wrote
+	auto &serde = table.file_format == HiveFileFormat::CSV ? GetSerDeDefinition(table.GetSerDe())
+	                                                       : GetSerDeDefinitionForFormat(table.file_format);
+	serde_info.SetSerializationLibrary(serde.library);
+	for (auto &parameter : GetSerDeCreateParameters(serde.serde)) {
+		if (parameter.value) {
+			serde_info.AddParameters(parameter.key, parameter.value);
 		}
-		storage_descriptor.SetInputFormat("org.apache.hadoop.mapred.TextInputFormat");
-		storage_descriptor.SetOutputFormat("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat");
-		parameters.emplace("classification", "csv");
-		parameters.emplace("delimiter", table.serde_parameters.at(
-		                                    table.GetSerDe() == HiveSerDe::OPEN_CSV ? "separatorChar" : "field.delim"));
-		break;
-	case HiveFileFormat::JSON:
-		// one JSON object per line
-		serde_info.SetSerializationLibrary("org.apache.hive.hcatalog.data.JsonSerDe");
-		storage_descriptor.SetInputFormat("org.apache.hadoop.mapred.TextInputFormat");
-		storage_descriptor.SetOutputFormat("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat");
-		parameters.emplace("classification", "json");
-		break;
-	case HiveFileFormat::AVRO:
-		// Avro container files, the schema travels in the files
-		serde_info.SetSerializationLibrary("org.apache.hadoop.hive.serde2.avro.AvroSerDe");
-		storage_descriptor.SetInputFormat("org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat");
-		storage_descriptor.SetOutputFormat("org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat");
-		parameters.emplace("classification", "avro");
-		break;
+	}
+	for (auto &parameter : table.serde_parameters) {
+		serde_info.AddParameters(parameter.first, parameter.second);
+	}
+	storage_descriptor.SetInputFormat(serde.input_format);
+	storage_descriptor.SetOutputFormat(serde.output_format);
+	parameters.emplace("classification", HiveFileFormatToString(table.file_format));
+	if (table.file_format == HiveFileFormat::CSV) {
+		for (auto &parameter : GetSerDeCreateParameters(serde.serde)) {
+			if (parameter.create_option && string(parameter.create_option) == "delimiter") {
+				parameters.emplace("delimiter", table.serde_parameters.at(parameter.key));
+				break;
+			}
+		}
 	}
 	storage_descriptor.SetLocation(table.location);
 	storage_descriptor.SetColumns(ToAwsColumns(table.columns));

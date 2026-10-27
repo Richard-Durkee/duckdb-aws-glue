@@ -7,6 +7,7 @@ namespace duckdb {
 
 class Serializer;
 class Deserializer;
+struct SerDeProperties;
 
 //! How the files of a csv table are read
 struct HiveCSVOptions {
@@ -24,6 +25,8 @@ struct HiveCSVOptions {
 	bool false_unless_true = false;
 
 public:
+	//! The options a csv table's resolved SerDe properties give its reader
+	static HiveCSVOptions FromSerDeProperties(const SerDeProperties &properties);
 	void Serialize(Serializer &serializer) const;
 	static HiveCSVOptions Deserialize(Deserializer &deserializer);
 };

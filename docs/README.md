@@ -42,42 +42,19 @@ declares it `binary`, whatever the session's `binary_as_string`. In a table that
 such bytes inside an `array`, `struct` or `map` column keep the escaped form the reader gives a BLOB.
 A `float` or `double` column may hold NaN wherever the file does not count its NaN values (`nan_count`, which most
 writers leave out): such a column's min/max never skip a row group for a filter that NaN could match.
-Text tables are read the way their SerDe reads them:
+Text tables are read and written the way their SerDe does. Which SerDe property does what (the reader or writer
+option it sets, ignored, not applied and logged, or refused), with its default, is in the generated table
+[SerDes and SerDe properties](serde_properties.md). Beyond what that table says:
 
-- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
-  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
-  quoted.
-- OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (the quote character, which reads the
-  doubled quotes Hive writes). An empty field is an empty string; there is no NULL. A line break inside a quoted field
-  fails a scan of at most twice `threads` files, which reads each file with several threads (`The parallel scanner
-  does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
-  file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
-  file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
-  broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
-  case and false otherwise.
-- Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
-  NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
-  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
-  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
-  (Hive: a row of NULLs).
-- `skip.header.line.count` lines are skipped at the start of every file.
-- OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
-  `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
-  its column is NULL; either property enables both. Other JsonSerDe properties that change how the files are read
-  (OpenX `mapping.*`, `dots.in.keys` and `case.insensitive=true`, Hive `timestamp.formats`) are not applied: the read
-  succeeds and a warning is logged (`CALL enable_logging(level := 'warning')`).
-- JSON keys are matched to the columns exactly, as with OpenX `case.insensitive=false`; both SerDes match them
-  ignoring case by default, so a key `userId` does not fill the column `userid`.
-- Writes produce files Hive reads back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
-  delimiter or a line break, or equal the NULL string; OpenCSVSerde values are all quoted and refused if they hold a
-  line break.
-- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
-  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
-  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
-  NULL string. Writes need a single-byte delimiter.
-- As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
-  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe properties, not
-  their own. `hive_scan()` uses plain `read_csv` rules.
+- OpenCSVSerde: a line break inside a quoted field fails a scan of at most twice `threads` files, which reads each
+  file with several threads (`The parallel scanner does not support null_padding in conjunction with quoted new
+  lines`); with more files DuckDB reads one thread per file and the field is read as one value, as CSV defines it.
+  `SET hive_csv_parallel = false` reads one thread per file in every scan. Hive splits the record at the line break
+  first (TextInputFormat) and returns two broken rows, a difference this extension does not reproduce.
+- Short rows are padded with NULL and extra fields are ignored. Fields are converted with `TRY_CAST` (`CAST` in
+  OpenCSVSerde tables without `use.null.for.invalid.data`), which differs from Hive in details: surrounding spaces
+  are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped (Hive: a row of NULLs).
+- Line counts and byte codes are DuckDB integer casts (`'1.5'` is 2). `hive_scan()` uses plain `read_csv` rules.
 
 Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader`) with these read semantics:
 

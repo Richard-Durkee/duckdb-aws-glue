@@ -1,0 +1,360 @@
+{
+  "description": "How the extension handles each Hive SerDe and each SerDe property it knows. Source of the generated C++ table (src/include/core/serde_policy_table.hpp), the documentation (docs/serde_properties.md) and the tests (test/sql/hive/dml/formats/serde_policy/). Regenerate with: python3 scripts/generate_serde_policy.py",
+  "options": {
+    "delimiter": {"type": "text", "reader": "read_csv delim", "writer": "COPY delimiter"},
+    "quote": {"type": "text", "reader": "read_csv quote", "writer": "COPY quote"},
+    "escape": {"type": "text", "reader": "read_csv escape", "writer": "COPY escape"},
+    "null_string": {"type": "text", "reader": "read_csv nullstr", "writer": "COPY nullstr"},
+    "header_lines": {"type": "count", "reader": "read_csv skip", "writer": "COPY header (at most one line)"},
+    "null_for_invalid_data": {"type": "boolean", "reader": "TRY_CAST instead of CAST of each field", "writer": "-"},
+    "false_unless_true": {"type": "boolean", "reader": "boolean field is lower(field) = 'true'", "writer": "-"},
+    "ignore_errors": {"type": "boolean", "reader": "read_json ignore_errors", "writer": "-"}
+  },
+  "transforms": {
+    "byte_code": "LazySimpleSerDe byte: a number from -128 to 127 is a byte code ('9' is a tab), else the first character; empty is '\\001'",
+    "character": "the first character; empty is the default",
+    "text": "the value as is",
+    "count": "a non-negative integer; empty is 0",
+    "boolean": "true when the value is 'true' in any case"
+  },
+  "serdes": [
+    {
+      "id": "PARQUET", "name": "ParquetHiveSerDe", "match": "parquet", "format": "PARQUET",
+      "library": "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+      "input_format": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat",
+      "output_format": "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat",
+      "create_parameters": {"serialization.format": "1"}, "creates_format": true,
+      "reader": "read_parquet (columns by name)", "writable": true,
+      "test_table": {"create": "format = 'parquet'", "columns": "id INTEGER, name VARCHAR"}
+    },
+    {
+      "id": "LAZY_SIMPLE", "name": "LazySimpleSerDe", "match": "lazysimpleserde", "format": "CSV",
+      "library": "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe",
+      "input_format": "org.apache.hadoop.mapred.TextInputFormat",
+      "output_format": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+      "reader": "read_csv (columns by position, fields as text, then cast)", "writable": true, "quoted": false,
+      "creates_format": true,
+      "defaults": {"delimiter": "\u0001", "quote": "", "escape": "", "null_string": "\\N", "header_lines": "0",
+                   "null_for_invalid_data": "true", "false_unless_true": "false"},
+      "checks": ["no_nested_columns", "delimiter_not_in_null_string"],
+      "write_checks": ["single_byte_delimiter"],
+      "notes": "Fields are not quoted. A value that does not parse as its column type is NULL. Writes refuse values that hold the delimiter or a line break, or equal the NULL string.",
+      "test_table": {"fixture": "fixture_serde_policy_lazy_simple", "columns": "id INTEGER, name VARCHAR, amount DOUBLE"}
+    },
+    {
+      "id": "OPEN_CSV", "name": "OpenCSVSerde", "match": "opencsvserde", "format": "CSV",
+      "library": "org.apache.hadoop.hive.serde2.OpenCSVSerde",
+      "input_format": "org.apache.hadoop.mapred.TextInputFormat",
+      "output_format": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat",
+      "reader": "read_csv (columns by position, fields as text, then cast)", "writable": true, "quoted": true,
+      "defaults": {"delimiter": ",", "quote": "\"", "escape": "@quote", "header_lines": "0",
+                   "null_for_invalid_data": "false", "false_unless_true": "true"},
+      "read_defaults": {"null_string": "\n"},
+      "write_defaults": {"null_string": ""},
+      "checks": ["no_nested_columns", "single_byte_quote_escape"],
+      "write_checks": ["single_byte_delimiter"],
+      "notes": "There is no NULL: an empty field is an empty string. A boolean field is true when it is 'true' in any case and false otherwise. Writes quote every value and refuse values that hold a line break.",
+      "test_table": {"fixture": "fixture_serde_policy_opencsv", "columns": "id INTEGER, name VARCHAR, amount DOUBLE"}
+    },
+    {
+      "id": "OPENX_JSON", "name": "OpenX JSON", "match": "openx", "format": "JSON",
+      "library": "org.openx.data.jsonserde.JsonSerDe",
+      "reader": "read_json (one object per line, keys by name)", "writable": false,
+      "write_refusal": "DuckDB writes JSON tables only with the Hive JsonSerDe (org.apache.hive.hcatalog.data.JsonSerDe)",
+      "defaults": {"ignore_errors": "false"},
+      "notes": "Keys are matched to the columns exactly; the SerDe matches them ignoring case by default.",
+      "test_table": {"fixture": "fixture_serde_policy_openx_json", "columns": "id INTEGER, name VARCHAR"}
+    },
+    {
+      "id": "HIVE_JSON", "name": "Hive JsonSerDe", "match": "json", "format": "JSON",
+      "library": "org.apache.hive.hcatalog.data.JsonSerDe",
+      "input_format": "org.apache.hadoop.mapred.TextInputFormat",
+      "output_format": "org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat", "creates_format": true,
+      "reader": "read_json (one object per line, keys by name)", "writable": true,
+      "defaults": {"ignore_errors": "false"},
+      "notes": "Also Hive 3's org.apache.hadoop.hive.serde2.JsonSerDe and any other SerDe whose name holds 'json'.",
+      "test_table": {"create": "format = 'json'", "columns": "id INTEGER, name VARCHAR"}
+    },
+    {
+      "id": "AVRO", "name": "AvroSerDe", "match": "avro", "format": "AVRO",
+      "library": "org.apache.hadoop.hive.serde2.avro.AvroSerDe",
+      "input_format": "org.apache.hadoop.hive.ql.io.avro.AvroContainerInputFormat",
+      "output_format": "org.apache.hadoop.hive.ql.io.avro.AvroContainerOutputFormat", "creates_format": true,
+      "reader": "read_avro from the avro extension (columns by name)", "writable": true
+    }
+  ],
+  "unsupported_serdes": [
+    {"name": "OrcSerde", "match": "orcserde", "reason": "ORC files, for which this extension has no reader",
+     "test": {"table": "fixture_orc", "error": "uses SerDe 'org.apache.hadoop.hive.ql.io.orc.OrcSerde' \\(ORC files"}},
+    {"name": "RegexSerDe", "match": "regexserde", "reason": "lines parsed with a regular expression"},
+    {"name": "MultiDelimitSerDe", "match": "multidelimitserde", "reason": "multi-character field delimiters"},
+    {"name": "ColumnarSerDe / LazyBinaryColumnarSerDe", "match": "columnarserde", "reason": "RCFile files"},
+    {"name": "LazyBinarySerDe", "match": "lazybinaryserde", "reason": "binary SequenceFile records"}
+  ],
+  "properties": [
+    {
+      "key": "field.delim", "serdes": ["LAZY_SIMPLE"], "default": "\\001",
+      "read": {"action": "apply", "option": "delimiter", "transform": "byte_code"},
+      "write": {"action": "apply", "option": "delimiter", "transform": "byte_code"},
+      "create_option": "delimiter",
+      "notes": "NUL, line breaks and non-ASCII bytes are refused.",
+      "tests": [
+        {"direction": "read", "props": {"field.delim": "|"}, "lines": ["1|a,b|1.5", "2|\\N|\\N"], "expect": ["1\ta,b\t1.5", "2\tNULL\tNULL"]},
+        {"direction": "read", "props": {"field.delim": "9"}, "lines": ["1\ta|b\t1.5"], "expect": ["1\ta|b\t1.5"]},
+        {"direction": "read", "props": {"field.delim": "0"}, "lines": ["1"], "error": "has the field delimiter '0', a byte DuckDB can not split fields on"},
+        {"direction": "write", "props": {"field.delim": "|"}, "insert": "(1, 'a,b', 1.5), (2, NULL, NULL)", "content": "1|a,b|1.5<nl>2|\\N|\\N<nl>", "expect": ["1\ta,b\t1.5", "2\tNULL\tNULL"]},
+        {"direction": "write", "props": {"field.delim": "|"}, "insert": "(1, 'a|b', 1.5)", "error": "holds the field delimiter '\\|' or a line break"}
+      ]
+    },
+    {
+      "key": "serialization.format", "serdes": ["LAZY_SIMPLE"], "default": "\\001",
+      "read": {"action": "apply", "option": "delimiter", "transform": "byte_code"},
+      "write": {"action": "apply", "option": "delimiter", "transform": "byte_code"},
+      "create_option": "delimiter",
+      "notes": "The delimiter when field.delim is not set.",
+      "tests": [
+        {"direction": "read", "props": {"serialization.format": "9"}, "lines": ["1\ta,b\t2.5"], "expect": ["1\ta,b\t2.5"]},
+        {"direction": "read", "props": {"field.delim": "|", "serialization.format": ";"}, "lines": ["1|a;b|2.5"], "expect": ["1\ta;b\t2.5"]},
+        {"direction": "write", "props": {"serialization.format": ";"}, "insert": "(1, 'a,b', 1.5)", "content": "1;a,b;1.5<nl>", "expect": ["1\ta,b\t1.5"]}
+      ]
+    },
+    {
+      "key": "serialization.null.format", "serdes": ["LAZY_SIMPLE"], "default": "\\N",
+      "read": {"action": "apply", "option": "null_string", "transform": "text"},
+      "write": {"action": "apply", "option": "null_string", "transform": "text"},
+      "tests": [
+        {"direction": "read", "props": {"field.delim": ",", "serialization.null.format": "NA"}, "lines": ["1,NA,NA", "2,\\N,3.5"], "expect": ["1\tNULL\tNULL", "2\t\\N\t3.5"]},
+        {"direction": "write", "props": {"field.delim": ",", "serialization.null.format": "NA"}, "insert": "(1, NULL, NULL), (2, '\\N', 2.5)", "content": "1,NA,NA<nl>2,\\N,2.5<nl>", "expect": ["1\tNULL\tNULL", "2\t\\N\t2.5"]},
+        {"direction": "write", "props": {"field.delim": ",", "serialization.null.format": "NA"}, "insert": "(1, 'NA', 1.5)", "error": "or is the table's NULL string 'NA'"}
+      ]
+    },
+    {
+      "key": "skip.header.line.count", "serdes": ["LAZY_SIMPLE", "OPEN_CSV"], "default": "0",
+      "read": {"action": "apply", "option": "header_lines", "transform": "count"},
+      "write": {"action": "apply", "option": "header_lines", "transform": "count", "refuse_when": "above_one",
+                "message": "Writing to Hive table '{table}' is not supported: its files start with {value} header lines, DuckDB writes at most one"},
+      "notes": "Also read from the table parameters (TBLPROPERTIES).",
+      "tests": [
+        {"serde": "LAZY_SIMPLE", "direction": "read", "props": {"field.delim": ",", "skip.header.line.count": "1"}, "lines": ["id,name,amount", "1,a,1.5"], "expect": ["1\ta\t1.5"]},
+        {"serde": "LAZY_SIMPLE", "direction": "read", "props": {"field.delim": ",", "skip.header.line.count": "x"}, "lines": ["1,a,1.5"], "error": "has an invalid 'skip.header.line.count' of 'x', expected a non-negative number"},
+        {"serde": "LAZY_SIMPLE", "direction": "write", "props": {"field.delim": ",", "skip.header.line.count": "1"}, "insert": "(1, 'a', 1.5)", "content": "id,name,amount<nl>1,a,1.5<nl>", "expect": ["1\ta\t1.5"]},
+        {"serde": "LAZY_SIMPLE", "direction": "write", "props": {"field.delim": ",", "skip.header.line.count": "2"}, "insert": "(1, 'a', 1.5)", "error": "its files start with 2 header lines, DuckDB writes at most one"},
+        {"serde": "OPEN_CSV", "direction": "read", "props": {"skip.header.line.count": "2"}, "lines": ["written by a job", "id,name,amount", "1,\"a,b\",1.5"], "expect": ["1\ta,b\t1.5"]},
+        {"serde": "OPEN_CSV", "direction": "write", "props": {"skip.header.line.count": "1"}, "insert": "(1, 'a', 1.5)", "content": "\"id\",\"name\",\"amount\"<nl>\"1\",\"a\",\"1.5\"<nl>", "expect": ["1\ta\t1.5"]}
+      ]
+    },
+    {
+      "key": "skip.header.line.count", "serdes": ["HIVE_JSON", "OPENX_JSON"],
+      "read": {"action": "refuse", "refuse_when": "positive", "transform": "count",
+               "message": "Hive table '{table}' has 'skip.header.line.count' set on JSON files, which DuckDB can not read or write"},
+      "write": {"action": "refuse", "refuse_when": "positive", "transform": "count",
+                "message": "Hive table '{table}' has 'skip.header.line.count' set on JSON files, which DuckDB can not read or write"},
+      "tests": [
+        {"serde": "HIVE_JSON", "direction": "read", "props": {"skip.header.line.count": "1"}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "error": "has 'skip.header.line.count' set on JSON files"},
+        {"serde": "HIVE_JSON", "direction": "write", "props": {"skip.header.line.count": "1"}, "insert": "(1, 'a')", "error": "has 'skip.header.line.count' set on JSON files"},
+        {"serde": "OPENX_JSON", "direction": "read", "props": {"skip.header.line.count": "1"}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "error": "has 'skip.header.line.count' set on JSON files"}
+      ]
+    },
+    {
+      "key": "skip.footer.line.count", "serdes": ["LAZY_SIMPLE", "OPEN_CSV", "HIVE_JSON", "OPENX_JSON"],
+      "read": {"action": "refuse", "refuse_when": "positive", "transform": "count"},
+      "write": {"action": "refuse", "refuse_when": "positive", "transform": "count"},
+      "notes": "Refused rather than returning the footer lines as rows.",
+      "tests": [
+        {"serde": "LAZY_SIMPLE", "direction": "read", "props": {"skip.footer.line.count": "1"}, "lines": ["1"], "error": "has 'skip.footer.line.count' set, which DuckDB can not read or write"},
+        {"serde": "LAZY_SIMPLE", "direction": "read", "props": {"field.delim": ",", "skip.footer.line.count": "0"}, "lines": ["1,a,1.5"], "expect": ["1\ta\t1.5"]},
+        {"serde": "LAZY_SIMPLE", "direction": "write", "props": {"skip.footer.line.count": "1"}, "insert": "(1, 'a', 1.5)", "error": "has 'skip.footer.line.count' set, which DuckDB can not read or write"},
+        {"serde": "OPEN_CSV", "direction": "read", "props": {"skip.footer.line.count": "1"}, "lines": ["1"], "error": "has 'skip.footer.line.count' set"},
+        {"serde": "OPEN_CSV", "direction": "write", "props": {"skip.footer.line.count": "1"}, "insert": "(1, 'a', 1.5)", "error": "has 'skip.footer.line.count' set"},
+        {"serde": "HIVE_JSON", "direction": "read", "props": {"skip.footer.line.count": "1"}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "error": "has 'skip.footer.line.count' set"},
+        {"serde": "HIVE_JSON", "direction": "write", "props": {"skip.footer.line.count": "1"}, "insert": "(1, 'a')", "error": "has 'skip.footer.line.count' set"},
+        {"serde": "OPENX_JSON", "direction": "read", "props": {"skip.footer.line.count": "1"}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "error": "has 'skip.footer.line.count' set"}
+      ]
+    },
+    {
+      "key": "escape.delim", "serdes": ["LAZY_SIMPLE"],
+      "read": {"action": "refuse", "refuse_when": "set"},
+      "write": {"action": "refuse", "refuse_when": "set"},
+      "notes": "DuckDB's reader has no LazySimpleSerDe escaping.",
+      "tests": [
+        {"direction": "read", "props": {"escape.delim": "\\"}, "lines": ["1"], "error": "has 'escape.delim' set, which DuckDB can not read or write"},
+        {"direction": "write", "props": {"escape.delim": "\\"}, "insert": "(1, 'a', 1.5)", "error": "has 'escape.delim' set"}
+      ]
+    },
+    {
+      "key": "serialization.encoding", "serdes": ["LAZY_SIMPLE"], "default": "UTF-8",
+      "read": {"action": "refuse", "refuse_when": "not_utf8",
+               "message": "Hive table '{table}' has the 'serialization.encoding' '{value}' (DuckDB reads UTF-8), which DuckDB can not read or write"},
+      "write": {"action": "refuse", "refuse_when": "not_utf8",
+                "message": "Hive table '{table}' has the 'serialization.encoding' '{value}' (DuckDB reads UTF-8), which DuckDB can not read or write"},
+      "tests": [
+        {"direction": "read", "props": {"serialization.encoding": "ISO-8859-1"}, "lines": ["1"], "error": "has the 'serialization.encoding' 'ISO-8859-1' \\(DuckDB reads UTF-8\\)"},
+        {"direction": "read", "props": {"field.delim": ",", "serialization.encoding": "utf8"}, "lines": ["1,a,1.5"], "expect": ["1\ta\t1.5"]},
+        {"direction": "write", "props": {"serialization.encoding": "ISO-8859-1"}, "insert": "(1, 'a', 1.5)", "error": "has the 'serialization.encoding' 'ISO-8859-1'"}
+      ]
+    },
+    {
+      "key": "serialization.last.column.takes.rest", "serdes": ["LAZY_SIMPLE"], "default": "false",
+      "read": {"action": "refuse", "refuse_when": "true"},
+      "write": {"action": "refuse", "refuse_when": "true"},
+      "tests": [
+        {"direction": "read", "props": {"serialization.last.column.takes.rest": "TRUE"}, "lines": ["1"], "error": "has 'serialization.last.column.takes.rest' set"},
+        {"direction": "write", "props": {"serialization.last.column.takes.rest": "true"}, "insert": "(1, 'a', 1.5)", "error": "has 'serialization.last.column.takes.rest' set"}
+      ]
+    },
+    {
+      "key": "timestamp.formats", "serdes": ["LAZY_SIMPLE"],
+      "read": {"action": "warn", "refuse_when": "non_empty"},
+      "write": {"action": "ignore"},
+      "notes": "Not applied: timestamps are read with DuckDB's default format; a warning is logged.",
+      "tests": [
+        {"direction": "read", "props": {"field.delim": ",", "timestamp.formats": "yyyy-MM-dd'T'HH:mm:ss"}, "lines": ["1,a,1.5"], "expect": ["1\ta\t1.5"], "warns": true},
+        {"direction": "write", "props": {"field.delim": ",", "timestamp.formats": "yyyy-MM-dd'T'HH:mm:ss"}, "insert": "(1, 'a', 1.5)", "content": "1,a,1.5<nl>", "expect": ["1\ta\t1.5"]}
+      ]
+    },
+    {
+      "key": "collection.delim", "serdes": ["LAZY_SIMPLE"], "default": "\\002",
+      "read": {"action": "ignore"},
+      "write": {"action": "ignore"},
+      "notes": "Harmless: nested columns, the only ones it separates, are refused.",
+      "tests": [
+        {"direction": "read", "props": {"field.delim": ",", "collection.delim": ":"}, "lines": ["1,a:b,1.5"], "expect": ["1\ta:b\t1.5"]},
+        {"direction": "write", "props": {"field.delim": ",", "collection.delim": ":"}, "insert": "(1, 'a:b', 1.5)", "content": "1,a:b,1.5<nl>", "expect": ["1\ta:b\t1.5"]}
+      ]
+    },
+    {
+      "key": "separatorChar", "serdes": ["OPEN_CSV"], "default": ",",
+      "read": {"action": "apply", "option": "delimiter", "transform": "character"},
+      "write": {"action": "apply", "option": "delimiter", "transform": "character"},
+      "create_option": "delimiter",
+      "tests": [
+        {"direction": "read", "props": {"separatorChar": "|"}, "lines": ["1|\"a|b\"|1.5", "2|c,d|2"], "expect": ["1\ta|b\t1.5", "2\tc,d\t2.0"]},
+        {"direction": "write", "props": {"separatorChar": "|"}, "insert": "(1, 'a|b', 1.5), (2, NULL, 2.5)", "content": "\"1\"|\"a|b\"|\"1.5\"<nl>\"2\"||\"2.5\"<nl>", "expect": ["1\ta|b\t1.5", "2\t(empty)\t2.5"]}
+      ]
+    },
+    {
+      "key": "quoteChar", "serdes": ["OPEN_CSV"], "default": "\"",
+      "read": {"action": "apply", "option": "quote", "transform": "character"},
+      "write": {"action": "apply", "option": "quote", "transform": "character"},
+      "create_option": "quote",
+      "notes": "A character of more than one byte is refused.",
+      "tests": [
+        {"direction": "read", "props": {"quoteChar": "'"}, "lines": ["1,'a,b',1.5", "2,'x''y',2"], "expect": ["1\ta,b\t1.5", "2\tx'y\t2.0"]},
+        {"direction": "read", "props": {"quoteChar": "é"}, "lines": ["1"], "error": "has a quoteChar or escapeChar of more than one byte"},
+        {"direction": "write", "props": {"quoteChar": "'"}, "insert": "(1, 'a,b', 1.5)", "content": "'1','a,b','1.5'<nl>", "expect": ["1\ta,b\t1.5"]}
+      ]
+    },
+    {
+      "key": "escapeChar", "serdes": ["OPEN_CSV"], "default": "the quote character",
+      "read": {"action": "apply", "option": "escape", "transform": "character"},
+      "write": {"action": "apply", "option": "escape", "transform": "character"},
+      "create_option": "escape",
+      "notes": "Defaults to the quote character, which reads the doubled quotes Hive writes. A character of more than one byte is refused.",
+      "tests": [
+        {"direction": "read", "props": {}, "lines": ["1,\"a\"\"b\",1.5"], "expect": ["1\ta\"b\t1.5"]},
+        {"direction": "read", "props": {"escapeChar": "\\"}, "lines": ["1,\"a\\\"b\",1.5"], "expect": ["1\ta\"b\t1.5"]},
+        {"direction": "read", "props": {"escapeChar": "é"}, "lines": ["1"], "error": "has a quoteChar or escapeChar of more than one byte"},
+        {"direction": "write", "props": {"escapeChar": "\\"}, "insert": "(1, 'a\"b', 1.5)", "content": "\"1\",\"a\\\"b\",\"1.5\"<nl>", "expect": ["1\ta\"b\t1.5"]}
+      ]
+    },
+    {
+      "key": "use.null.for.invalid.data", "serdes": ["OPEN_CSV"], "default": "false",
+      "read": {"action": "apply", "option": "null_for_invalid_data", "transform": "boolean"},
+      "write": {"action": "ignore"},
+      "notes": "Without it a value that does not parse as its column type fails the query.",
+      "tests": [
+        {"direction": "read", "props": {}, "lines": ["1,a,oops"], "error": "Could not convert string 'oops' to DOUBLE"},
+        {"direction": "read", "props": {"use.null.for.invalid.data": "TRUE"}, "lines": ["1,a,oops"], "expect": ["1\ta\tNULL"]},
+        {"direction": "write", "props": {"use.null.for.invalid.data": "true"}, "insert": "(1, 'a', 1.5)", "content": "\"1\",\"a\",\"1.5\"<nl>", "expect": ["1\ta\t1.5"]}
+      ]
+    },
+    {
+      "key": "serialization.format", "serdes": ["OPEN_CSV", "PARQUET"],
+      "read": {"action": "ignore"},
+      "write": {"action": "ignore"},
+      "notes": "Harmless: these SerDes do not read it.",
+      "tests": [
+        {"serde": "OPEN_CSV", "direction": "read", "props": {"serialization.format": "|"}, "lines": ["1,a,1.5"], "expect": ["1\ta\t1.5"]},
+        {"serde": "OPEN_CSV", "direction": "write", "props": {"serialization.format": "|"}, "insert": "(1, 'a', 1.5)", "content": "\"1\",\"a\",\"1.5\"<nl>", "expect": ["1\ta\t1.5"]},
+        {"serde": "PARQUET", "direction": "write", "covers": ["read"], "props": {"serialization.format": "9"}, "insert": "(1, 'a')", "expect": ["1\ta"]}
+      ]
+    },
+    {
+      "key": "ignore.malformed.json", "serdes": ["OPENX_JSON"], "default": "false",
+      "read": {"action": "apply", "option": "ignore_errors", "transform": "boolean", "combine": "any"},
+      "write": {"action": "ignore"},
+      "notes": "A line that is not valid JSON is a row of NULLs, and a value that does not fit its column NULL (either property enables both).",
+      "tests": [
+        {"direction": "read", "props": {}, "lines": ["{\"id\": 1, \"name\": \"a\"}", "not json"], "error": "Malformed JSON"},
+        {"direction": "read", "props": {"ignore.malformed.json": "TRUE"}, "lines": ["{\"id\": 1, \"name\": \"a\"}", "not json"], "expect": ["NULL\tNULL", "1\ta"]}
+      ]
+    },
+    {
+      "key": "use.null.for.invalid.data", "serdes": ["OPENX_JSON"], "default": "false",
+      "read": {"action": "apply", "option": "ignore_errors", "transform": "boolean", "combine": "any"},
+      "write": {"action": "ignore"},
+      "tests": [
+        {"direction": "read", "props": {"use.null.for.invalid.data": "true"}, "lines": ["{\"id\": \"x\", \"name\": \"a\"}", "{\"id\": 2, \"name\": \"b\"}"], "expect": ["NULL\ta", "2\tb"]},
+        {"direction": "read", "props": {"ignore.malformed.json": "false", "use.null.for.invalid.data": "true"}, "lines": ["not json", "{\"id\": 2, \"name\": \"b\"}"], "expect": ["NULL\tNULL", "2\tb"]}
+      ]
+    },
+    {
+      "key": "case.insensitive", "serdes": ["OPENX_JSON"], "default": "true",
+      "read": {"action": "warn", "refuse_when": "true"},
+      "write": {"action": "ignore"},
+      "notes": "Not applied: keys are matched exactly; a warning is logged when it is true.",
+      "tests": [
+        {"direction": "read", "props": {"case.insensitive": "TRUE"}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "expect": ["1\ta"], "warns": true},
+        {"direction": "read", "props": {"case.insensitive": "false"}, "lines": ["{\"id\": 1, \"Name\": \"a\"}"], "expect": ["1\tNULL"]}
+      ]
+    },
+    {
+      "key": "mapping.", "prefix": true, "serdes": ["OPENX_JSON"],
+      "read": {"action": "warn", "refuse_when": "non_empty"},
+      "write": {"action": "ignore"},
+      "notes": "mapping.<column> = <key>: not applied, a warning is logged.",
+      "tests": [
+        {"direction": "read", "props": {"mapping.name": "Name"}, "lines": ["{\"id\": 1, \"name\": \"a\", \"Name\": \"b\"}"], "expect": ["1\ta"], "warns": true}
+      ]
+    },
+    {
+      "key": "dots.in.keys", "serdes": ["OPENX_JSON"], "default": "false",
+      "read": {"action": "warn", "refuse_when": "true"},
+      "write": {"action": "ignore"},
+      "notes": "Not applied: a warning is logged when it is true.",
+      "tests": [
+        {"direction": "read", "props": {"dots.in.keys": "true"}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "expect": ["1\ta"], "warns": true}
+      ]
+    },
+    {
+      "key": "timestamp.formats", "serdes": ["HIVE_JSON"],
+      "read": {"action": "warn", "refuse_when": "non_empty"},
+      "write": {"action": "ignore"},
+      "notes": "Not applied: timestamps are read with DuckDB's default format; a warning is logged.",
+      "tests": [
+        {"direction": "read", "props": {"timestamp.formats": "yyyy-MM-dd'T'HH:mm:ss"}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "expect": ["1\ta"], "warns": true},
+        {"direction": "write", "props": {"timestamp.formats": "yyyy-MM-dd'T'HH:mm:ss"}, "insert": "(1, 'a')", "content": "{\"id\":1,\"name\":\"a\"}<nl>", "expect": ["1\ta"]}
+      ]
+    },
+    {
+      "key": "ignore.malformed.json", "serdes": ["HIVE_JSON"],
+      "read": {"action": "ignore"},
+      "write": {"action": "ignore"},
+      "notes": "Not a property of this SerDe: a malformed line fails the query.",
+      "tests": [
+        {"direction": "read", "props": {"ignore.malformed.json": "true"}, "lines": ["{\"id\": 1, \"name\": \"a\"}", "not json"], "error": "Malformed JSON"},
+        {"direction": "write", "props": {"ignore.malformed.json": "true"}, "insert": "(1, 'a')", "content": "{\"id\":1,\"name\":\"a\"}<nl>", "expect": ["1\ta"]}
+      ]
+    }
+  ],
+  "serde_tests": [
+    {"serde": "LAZY_SIMPLE", "direction": "read", "props": {}, "lines": ["1\u0001a,b\u00011.5", "2\u0001\\N\u0001\\N", "x\u0001\u0001"], "expect": ["NULL\t(empty)\tNULL", "1\ta,b\t1.5", "2\tNULL\tNULL"]},
+    {"serde": "LAZY_SIMPLE", "direction": "write", "props": {}, "insert": "(1, 'a,b', 1.5), (2, NULL, NULL)", "content": "1<01>a,b<01>1.5<nl>2<01>\\N<01>\\N<nl>", "expect": ["1\ta,b\t1.5", "2\tNULL\tNULL"]},
+    {"serde": "OPEN_CSV", "direction": "read", "props": {}, "lines": ["1,\"a,b\",1.5", "2,,2"], "expect": ["1\ta,b\t1.5", "2\t(empty)\t2.0"]},
+    {"serde": "OPEN_CSV", "direction": "write", "props": {}, "insert": "(1, 'a,b', 1.5), (2, NULL, 2.5)", "content": "\"1\",\"a,b\",\"1.5\"<nl>\"2\",,\"2.5\"<nl>", "expect": ["1\ta,b\t1.5", "2\t(empty)\t2.5"]},
+    {"serde": "OPENX_JSON", "direction": "read", "props": {}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "expect": ["1\ta"]},
+    {"serde": "OPENX_JSON", "direction": "write", "props": {}, "insert": "(1, 'a')", "error": "the table uses the OpenX JSON SerDe 'org.openx.data.jsonserde.JsonSerDe', DuckDB writes JSON tables only with the Hive JsonSerDe"},
+    {"serde": "HIVE_JSON", "direction": "read", "props": {}, "lines": ["{\"id\": 1, \"name\": \"a\"}"], "expect": ["1\ta"]},
+    {"serde": "HIVE_JSON", "direction": "write", "props": {}, "insert": "(1, 'a')", "content": "{\"id\":1,\"name\":\"a\"}<nl>", "expect": ["1\ta"]}
+  ]
+}

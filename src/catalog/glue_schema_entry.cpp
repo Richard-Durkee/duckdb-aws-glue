@@ -403,17 +403,20 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	table.file_format = options.format;
 	if (table.file_format == HiveFileFormat::CSV) {
 		// with a quote or escape character OpenCSVSerde (which quotes), without both LazySimpleSerDe (which does not)
-		if (options.csv_quote.empty() && options.csv_escape.empty()) {
-			table.serde_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
-			table.serde_parameters["field.delim"] = options.csv_delimiter;
-			table.serde_parameters["serialization.format"] = options.csv_delimiter;
-		} else {
-			// the escape character defaults to the quote character, like DuckDB's COPY
-			string quote = options.csv_quote.empty() ? "\"" : options.csv_quote;
-			table.serde_library = "org.apache.hadoop.hive.serde2.OpenCSVSerde";
-			table.serde_parameters["separatorChar"] = options.csv_delimiter;
-			table.serde_parameters["quoteChar"] = quote;
-			table.serde_parameters["escapeChar"] = options.csv_escape.empty() ? quote : options.csv_escape;
+		auto quoted = !options.csv_quote.empty() || !options.csv_escape.empty();
+		auto &serde = GetSerDeDefinition(quoted ? HiveSerDe::OPEN_CSV : HiveSerDe::LAZY_SIMPLE);
+		// the escape character defaults to the quote character, like DuckDB's COPY
+		string quote = options.csv_quote.empty() ? "\"" : options.csv_quote;
+		table.serde_library = serde.library;
+		for (auto &parameter : GetSerDeCreateParameters(serde.serde)) {
+			string option = parameter.create_option ? parameter.create_option : "";
+			if (option == "delimiter") {
+				table.serde_parameters[parameter.key] = options.csv_delimiter;
+			} else if (option == "quote") {
+				table.serde_parameters[parameter.key] = quote;
+			} else if (option == "escape") {
+				table.serde_parameters[parameter.key] = options.csv_escape.empty() ? quote : options.csv_escape;
+			}
 		}
 	}
 	table.bucket_columns = options.bucket_columns;

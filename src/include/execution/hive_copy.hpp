@@ -28,6 +28,8 @@ public:
 
 	//! The catalog of the table
 	optional_ptr<Catalog> table_catalog;
+	//! The start of the name of every file this plan writes
+	string file_prefix;
 
 private:
 	optional_ptr<GlueSchemaEntry> schema;

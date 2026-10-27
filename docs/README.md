@@ -312,6 +312,21 @@ becomes `CALL glue_alter_table(table, [actions])`: every action is checked again
 statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
 may be partially qualified; it is resolved like in a query.
 
+`REPLACE COLUMNS` is Hive's statement for the data columns, of the table or of one partition:
+
+```sql
+ALTER TABLE my_datalake.default.orders REPLACE COLUMNS (id BIGINT, amount DOUBLE COMMENT 'in EUR', note VARCHAR);
+ALTER TABLE my_datalake.default.orders REPLACE COLUMNS (id BIGINT, amount DOUBLE, note VARCHAR) CASCADE;
+ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-14', country = 'IN') REPLACE COLUMNS (id BIGINT, amount DOUBLE, note VARCHAR);
+```
+
+It applies the rules of `glue_replace_columns`: a column that stays may only be widened, the partition keys are not
+listed, and a comment not given again is dropped. Without `PARTITION`, only the table's columns change, as in Hive;
+the partitions keep the columns they were created with. `CASCADE` also sets every partition's columns to the new ones
+(`BatchUpdatePartition`, 100 partitions per call). With `PARTITION (...)`, only that partition changes, checked against
+its own columns: this repairs a partition left with older types by a type change of the table, which `INSERT` refuses to
+write to. It is an action of DuckDB's `ALTER TABLE` statement, so a `READ_ONLY` attachment refuses it.
+
 Listing the partitions of a table - `glue_partitions`, and planning a scan of a partitioned table - pages through
 Glue's `GetPartitions`. A scan fetches them when planning first needs them (pruning, cardinality), not at bind, so
 `DESCRIBE`, `CREATE VIEW` and `PREPARE` make no `GetPartitions` call; every scan of the table in a query shares one

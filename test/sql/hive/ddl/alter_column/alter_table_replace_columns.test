@@ -1,0 +1,160 @@
+# name: test/sql/hive/ddl/alter_column/alter_table_replace_columns.test
+# description: ALTER TABLE ... [PARTITION (...)] REPLACE COLUMNS (...) [CASCADE], Hive's statement through the
+#              glue_hive_ddl grammar extension: of the table, of one partition, or of the table and all partitions
+# group: [alter_column]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rc_events;
+
+statement ok
+CREATE TABLE my_datalake.default.rc_events (id INTEGER, v INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.rc_events VALUES (1, 10, 'a'), (2, 20, 'b');
+
+# the table's columns: a column widened and one added with a comment; the partitions keep theirs
+statement ok
+ALTER TABLE my_datalake.default.rc_events REPLACE COLUMNS (id INTEGER, v BIGINT, note VARCHAR COMMENT 'free text');
+
+query TTT
+SELECT column_name, data_type, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'rc_events' ORDER BY column_index;
+----
+id	INTEGER	NULL
+v	BIGINT	NULL
+note	VARCHAR	free text
+dt	VARCHAR	NULL
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.rc_events', {dt: 'a'});
+----
+[int, int]
+
+# one partition: its columns are set to the table's again, the other partition and the table are unchanged
+statement ok
+ALTER TABLE my_datalake.default.rc_events PARTITION (dt = 'a') REPLACE COLUMNS (id INTEGER, v BIGINT, note VARCHAR);
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.rc_events', {dt: 'a'});
+----
+[int, bigint, string]
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.rc_events', {dt: 'b'});
+----
+[int, int]
+
+# a partition's columns are checked against its own: its files were written with them
+statement error
+ALTER TABLE my_datalake.default.rc_events PARTITION (dt = 'a') REPLACE COLUMNS (id INTEGER, v INTEGER, note VARCHAR);
+----
+can not change column 'v' of table 'default.rc_events' from BIGINT to INTEGER
+
+statement error
+ALTER TABLE my_datalake.default.rc_events PARTITION (dt = 'zzz') REPLACE COLUMNS (id INTEGER, v BIGINT);
+----
+Partition [zzz] does not exist
+
+statement error
+ALTER TABLE my_datalake.default.rc_events PARTITION (day = 'a') REPLACE COLUMNS (id INTEGER, v BIGINT);
+----
+'day' is not a partition key of table 'default.rc_events'
+
+statement error
+ALTER TABLE my_datalake.default.rc_events PARTITION (dt = 'a') REPLACE COLUMNS (id INTEGER, v BIGINT) CASCADE;
+----
+CASCADE changes the columns of the table and of all its partitions
+
+statement error
+ALTER TABLE my_datalake.default.rc_events REPLACE COLUMNS (id INTEGER, dt VARCHAR);
+----
+'dt' is a partition key of table 'default.rc_events'
+
+statement error
+ALTER TABLE my_datalake.default.rc_events REPLACE COLUMNS (id INTEGER, v INTEGER);
+----
+can not change column 'v' of table 'default.rc_events' from BIGINT to INTEGER
+
+# CASCADE: the table and every partition get the new columns; as in Hive, a comment not given again is dropped
+statement ok
+ALTER TABLE my_datalake.default.rc_events REPLACE COLUMNS (id BIGINT, v BIGINT, note VARCHAR) CASCADE;
+
+query TTT
+SELECT column_name, data_type, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'rc_events' ORDER BY column_index;
+----
+id	BIGINT	NULL
+v	BIGINT	NULL
+note	VARCHAR	NULL
+dt	VARCHAR	NULL
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.rc_events', {dt: 'a'});
+----
+[bigint, bigint, string]
+
+query I
+SELECT [c.type FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.rc_events', {dt: 'b'});
+----
+[bigint, bigint, string]
+
+# the data files are not rewritten: they read with the new columns, the added one is NULL
+query IIIT
+SELECT id, v, note, dt FROM my_datalake.default.rc_events ORDER BY id;
+----
+1	10	NULL	a
+2	20	NULL	b
+
+# without the grammar extension the statement is not parsed
+statement ok
+RESET active_grammar_extensions;
+
+statement error
+ALTER TABLE my_datalake.default.rc_events REPLACE COLUMNS (id BIGINT, v BIGINT, note VARCHAR);
+----
+Parser Error
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+# DuckDB's own tables refuse the action
+statement ok
+CREATE TABLE memory.main.rc_local (id INTEGER);
+
+statement error
+ALTER TABLE memory.main.rc_local REPLACE COLUMNS (id BIGINT);
+----
+"glue_replace_columns" is not supported for DuckDB tables
+
+# a READ_ONLY attachment refuses it before the catalog is reached
+statement ok
+ATTACH '{GLUE_CATALOG_ID}' AS rc_ro_datalake (
+    TYPE glue,
+    READ_ONLY,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement error
+ALTER TABLE rc_ro_datalake.default.rc_events REPLACE COLUMNS (id BIGINT, v BIGINT, note VARCHAR, extra VARCHAR);
+----
+read-only mode
+
+statement ok
+DROP TABLE my_datalake.default.rc_events;

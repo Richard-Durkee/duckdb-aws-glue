@@ -26,6 +26,7 @@
 #include "duckdb/parser/parser.hpp"
 #include "catalog/glue_view.hpp"
 #include "api/glue_api.hpp"
+#include "functions/glue_functions.hpp"
 #include "catalog/glue_catalog.hpp"
 
 namespace duckdb {
@@ -743,6 +744,73 @@ void GlueSchemaEntry::SetTableComment(ClientContext &context, const string &tabl
 	RefreshTable(context, table_name);
 }
 
+//! The child of struct value 'value' named 'name'
+static const Value &StructChild(const Value &value, const char *name) {
+	auto &types = StructType::GetChildTypes(value.type());
+	for (idx_t i = 0; i < types.size(); i++) {
+		if (types[i].first.GetIdentifierName() == name) {
+			return StructValue::GetChildren(value)[i];
+		}
+	}
+	throw InternalException("ALTER TABLE payload has no field '%s'", name);
+}
+
+void GlueSchemaEntry::ReplaceColumns(ClientContext &context, const string &table_name, const Value &payload) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	GlueTableInfo current;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
+		                       database_info.name);
+	}
+	auto target_name = database_info.name + "." + table_name;
+	vector<GlueReplaceColumn> given;
+	for (auto &column : ListValue::GetChildren(StructChild(payload, "columns"))) {
+		GlueReplaceColumn entry;
+		entry.name = StructChild(column, "name").GetValue<string>();
+		entry.type = StructChild(column, "type").GetValue<string>();
+		auto &comment = StructChild(column, "comment");
+		if (!comment.IsNull()) {
+			entry.comment = comment.GetValue<string>();
+		}
+		given.push_back(std::move(entry));
+	}
+	bool cascade = StructChild(payload, "cascade").GetValue<bool>();
+	auto &partition = StructChild(payload, "partition");
+	if (partition.IsNull()) {
+		// as in Hive, the comments of the columns that stay are dropped unless given again
+		auto columns =
+		    GlueReplaceColumns(context, current, current.columns, given, false, "REPLACE COLUMNS", target_name);
+		GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
+		if (cascade) {
+			GlueAPI::SetAllPartitionColumns(context, glue_catalog, database_info.name, table_name, columns);
+		}
+		RefreshTable(context, table_name);
+		return;
+	}
+	if (cascade) {
+		throw BinderException("REPLACE COLUMNS: CASCADE changes the columns of the table and of all its partitions, "
+		                      "it can not be combined with PARTITION (...)");
+	}
+	if (current.partition_keys.empty()) {
+		throw BinderException("REPLACE COLUMNS: table '%s' is not partitioned", target_name);
+	}
+	vector<pair<string, optional<string>>> pairs;
+	for (auto &key_value : ListValue::GetChildren(partition)) {
+		auto &value = StructChild(key_value, "value");
+		pairs.emplace_back(StructChild(key_value, "key").GetValue<string>(),
+		                   value.IsNull() ? optional<string>() : optional<string>(value.GetValue<string>()));
+	}
+	auto values = GluePartitionValues("REPLACE COLUMNS", glue_catalog, current, pairs);
+	GluePartitionDetails details;
+	if (!GlueAPI::GetPartition(context, glue_catalog, database_info.name, table_name, values, details)) {
+		throw CatalogException("Partition [%s] does not exist in Glue table '%s'", StringUtil::Join(values, ", "),
+		                       target_name);
+	}
+	// checked against the partition's own columns: those are what its files were written with
+	auto columns = GlueReplaceColumns(context, current, details.columns, given, false, "REPLACE COLUMNS", target_name);
+	GlueAPI::SetPartitionColumns(context, glue_catalog, database_info.name, table_name, values, columns);
+}
+
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &context = transaction.GetContext();
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
@@ -785,6 +853,15 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		throw NotImplementedException("Only ALTER TABLE is supported for Glue tables");
 	}
 	auto &alter_table = info.Cast<AlterTableInfo>();
+	if (alter_table.alter_table_type == AlterTableType::EXTENSION_ALTER_STMT) {
+		auto &extension_alter = alter_table.Cast<ExtensionAlterTableInfo>();
+		if (extension_alter.alter_name != "glue_replace_columns") {
+			throw NotImplementedException("ALTER TABLE action \"%s\" is not supported for Glue tables",
+			                              extension_alter.alter_name);
+		}
+		ReplaceColumns(context, table_name, extension_alter.GetPayload());
+		return;
+	}
 	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS ||
 	    alter_table.alter_table_type == AlterTableType::RESET_TABLE_OPTIONS) {
 		AlterTableProperties(context, alter_table);

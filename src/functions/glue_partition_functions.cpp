@@ -485,7 +485,6 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 	auto result = make_uniq<GlueReplaceColumnsBindData>();
 	result->target = ResolveGlueTable(context, "glue_replace_columns", input.inputs[0], false);
 	GlueCatalog::ThrowIfInExplicitTransaction(context);
-	auto &table = result->target.table;
 	auto &columns = input.inputs[1];
 	if (!IsStringStruct(columns) || StructType::GetChildCount(columns.type()) == 0) {
 		throw BinderException("glue_replace_columns: the columns must be a struct of column name to type, e.g. "
@@ -505,93 +504,38 @@ unique_ptr<FunctionData> GlueReplaceColumnsBind(ClientContext &context, TableFun
 	if (comments && !IsStringStruct(*comments)) {
 		throw BinderException("glue_replace_columns: 'comments' must be a struct of column name to comment");
 	}
-	case_insensitive_map_t<idx_t> current;
-	for (idx_t i = 0; i < table.columns.size(); i++) {
-		current[table.columns[i].name] = i;
-	}
+	vector<GlueReplaceColumn> given;
+	case_insensitive_map_t<idx_t> given_index;
 	auto &column_names = StructType::GetChildTypes(columns.type());
 	auto &column_types = StructValue::GetChildren(columns);
-	// csv files are read by position, the other formats by name; other SerDes are refused
-	bool by_position = table.GetFileFormat() == HiveFileFormat::CSV;
-	if (by_position && column_names.size() != table.columns.size()) {
-		throw BinderException("glue_replace_columns: table '%s' is stored as csv, which is read by position, so it "
-		                      "must keep its %d columns",
-		                      result->target.TableName(), table.columns.size());
-	}
-	case_insensitive_map_t<idx_t> given;
 	for (idx_t i = 0; i < column_names.size(); i++) {
-		GlueColumn column;
+		GlueReplaceColumn column;
 		column.name = column_names[i].first.GetIdentifierName();
 		if (column_types[i].IsNull()) {
 			throw BinderException("glue_replace_columns: no type given for column '%s'", column.name);
 		}
-		column.type =
-		    GlueTypes::FromLogicalType(TransformStringToLogicalType(column_types[i].GetValue<string>(), context));
-		// the type as it reads back from Glue; a type that can not be read back fails here, before Glue is changed
-		auto type = GlueTypes::ToLogicalType(column.type);
-		// a column that stays must keep a type its existing files can be read with, as for ALTER COLUMN TYPE
-		optional_ptr<const GlueColumn> previous;
-		if (by_position) {
-			previous = &table.columns[i];
-		} else {
-			auto existing = current.find(column.name);
-			if (existing != current.end()) {
-				previous = &table.columns[existing->second];
-			}
-		}
-		if (previous) {
-			// a column matched by name keeps its stored name: the json reader matches field names case-sensitively
-			if (!by_position) {
-				column.name = previous->name;
-			}
-			if (keep_comments) {
-				column.comment = previous->comment;
-			}
-			auto from = GlueTypes::ToLogicalType(previous->type);
-			if (!GlueSchemaEntry::IsAllowedHiveTypeChange(from, type)) {
-				throw BinderException("glue_replace_columns: can not change column '%s' of table '%s' from %s to %s: "
-				                      "existing files keep their types, only widening changes are supported",
-				                      previous->name, result->target.TableName(), from.ToString(), type.ToString());
-			}
-		}
-		for (auto &key : table.partition_keys) {
-			if (StringUtil::CIEquals(key.name, column.name)) {
-				throw BinderException(
-				    "glue_replace_columns: '%s' is a partition key of table '%s', the columns are the "
-				    "data columns only",
-				    column.name, result->target.TableName());
-			}
-		}
-		given[column.name] = result->columns.size();
-		result->columns.push_back(std::move(column));
+		column.type = column_types[i].GetValue<string>();
+		given_index[column.name] = given.size();
+		given.push_back(std::move(column));
 	}
 	if (comments) {
 		auto &comment_names = StructType::GetChildTypes(comments->type());
 		auto &comment_values = StructValue::GetChildren(*comments);
 		for (idx_t i = 0; i < comment_names.size(); i++) {
 			auto &name = comment_names[i].first.GetIdentifierName();
-			auto column = given.find(name);
-			if (column == given.end()) {
+			auto column = given_index.find(name);
+			if (column == given_index.end()) {
 				throw BinderException("glue_replace_columns: 'comments' names '%s', which is not one of the columns",
 				                      name);
 			}
 			// NULL removes the comment
-			result->columns[column->second].comment =
+			given[column->second].comment =
 			    comment_values[i].IsNull() ? string() : comment_values[i].GetValue<string>();
 		}
 	}
-	auto require_kept = [&](const string &column) {
-		if (given.find(column) == given.end()) {
-			throw BinderException("glue_replace_columns: table '%s' is %s, the columns must keep '%s'",
-			                      result->target.TableName(), table.DescribeBucketing(), column);
-		}
-	};
-	for (auto &column : table.bucket_columns) {
-		require_kept(column);
-	}
-	for (auto &column : table.sort_columns) {
-		require_kept(column.name);
-	}
+	auto &table = result->target.table;
+	result->columns = GlueReplaceColumns(context, table, table.columns, given, keep_comments, "glue_replace_columns",
+	                                     result->target.TableName());
 	names = {"columns"};
 	return_types = {LogicalType::LIST(LogicalType::STRUCT(
 	    {{"name", LogicalType::VARCHAR}, {"type", LogicalType::VARCHAR}, {"comment", LogicalType::VARCHAR}}))};
@@ -1015,6 +959,92 @@ TableFunction GetGlueAlterTableFunction() {
 	TableFunction function("glue_alter_table", {LogicalType::VARCHAR, LogicalType::ANY}, GlueAlterTableScan,
 	                       GlueAlterTableBind, GlueAlterTableInit);
 	return function;
+}
+
+vector<GlueColumn> GlueReplaceColumns(ClientContext &context, const GlueTableInfo &table,
+                                      const vector<GlueColumn> &current_columns, const vector<GlueReplaceColumn> &given,
+                                      bool keep_comments, const string &what, const string &target_name) {
+	case_insensitive_map_t<idx_t> current;
+	for (idx_t i = 0; i < current_columns.size(); i++) {
+		current[current_columns[i].name] = i;
+	}
+	// csv files are read by position, the other formats by name; other SerDes are refused
+	bool by_position = table.GetFileFormat() == HiveFileFormat::CSV;
+	if (by_position && given.size() != current_columns.size()) {
+		throw BinderException("%s: table '%s' is stored as csv, which is read by position, so it must keep its %d "
+		                      "columns",
+		                      what, target_name, current_columns.size());
+	}
+	vector<GlueColumn> result;
+	case_insensitive_map_t<idx_t> given_names;
+	for (idx_t i = 0; i < given.size(); i++) {
+		GlueColumn column;
+		column.name = given[i].name;
+		if (given_names.find(column.name) != given_names.end()) {
+			throw BinderException("%s: column '%s' is given twice", what, column.name);
+		}
+		column.type = GlueTypes::FromLogicalType(TransformStringToLogicalType(given[i].type, context));
+		// the type as it reads back from Glue; a type that can not be read back fails here, before Glue is changed
+		auto type = GlueTypes::ToLogicalType(column.type);
+		// a column that stays must keep a type its existing files can be read with, as for ALTER COLUMN TYPE
+		optional_ptr<const GlueColumn> previous;
+		if (by_position) {
+			previous = &current_columns[i];
+		} else {
+			auto existing = current.find(column.name);
+			if (existing != current.end()) {
+				previous = &current_columns[existing->second];
+			}
+		}
+		if (previous) {
+			// a column matched by name keeps its stored name: the json reader matches field names case-sensitively
+			if (!by_position) {
+				column.name = previous->name;
+			}
+			if (keep_comments) {
+				column.comment = previous->comment;
+			}
+			auto from = GlueTypes::ToLogicalType(previous->type);
+			if (!GlueSchemaEntry::IsAllowedHiveTypeChange(from, type)) {
+				throw BinderException("%s: can not change column '%s' of table '%s' from %s to %s: existing files keep "
+				                      "their types, only widening changes are supported",
+				                      what, previous->name, target_name, from.ToString(), type.ToString());
+			}
+		}
+		for (auto &key : table.partition_keys) {
+			if (StringUtil::CIEquals(key.name, column.name)) {
+				throw BinderException("%s: '%s' is a partition key of table '%s', the columns are the data columns "
+				                      "only",
+				                      what, column.name, target_name);
+			}
+		}
+		if (given[i].comment) {
+			column.comment = *given[i].comment;
+		}
+		given_names[column.name] = i;
+		result.push_back(std::move(column));
+	}
+	auto require_kept = [&](const string &column) {
+		if (given_names.find(column) == given_names.end()) {
+			throw BinderException("%s: table '%s' is %s, the columns must keep '%s'", what, target_name,
+			                      table.DescribeBucketing(), column);
+		}
+	};
+	for (auto &column : table.bucket_columns) {
+		require_kept(column);
+	}
+	for (auto &column : table.sort_columns) {
+		require_kept(column.name);
+	}
+	return result;
+}
+
+vector<string> GluePartitionValues(const string &what, GlueCatalog &catalog, const GlueTableInfo &table,
+                                   const vector<pair<string, optional<string>>> &pairs) {
+	GluePartitionTarget target;
+	target.catalog = &catalog;
+	target.table = table;
+	return ParsePartitionPairs(what, target, pairs);
 }
 
 } // namespace duckdb

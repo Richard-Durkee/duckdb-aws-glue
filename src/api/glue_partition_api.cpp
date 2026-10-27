@@ -13,6 +13,7 @@
 #include <thread>
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
+#include <aws/glue/model/BatchUpdatePartitionRequest.h>
 #include <aws/glue/model/CreatePartitionRequest.h>
 #include <aws/glue/model/DeletePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
@@ -61,6 +62,120 @@ void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog,
 		ThrowGlueError(outcome, StringUtil::Format("UpdatePartition '%s.%s' [%s]", database_name, table_name,
 		                                           PartitionValuesToString(values)));
 	}
+}
+
+void GlueAPI::SetPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                  const string &table_name, const vector<string> &values,
+                                  const vector<GlueColumn> &columns) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "UpdatePartition");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	Aws::Glue::Model::GetPartitionRequest get_request;
+	SetCatalogId(get_request, catalog);
+	get_request.SetDatabaseName(database_name);
+	get_request.SetTableName(table_name);
+	get_request.SetPartitionValues(ToAwsValues(values));
+	auto get_outcome = client->GetPartition(get_request);
+	if (!get_outcome.IsSuccess()) {
+		if (IsEntityNotFound(get_outcome)) {
+			throw CatalogException("Partition [%s] does not exist in Glue table '%s.%s'",
+			                       PartitionValuesToString(values), database_name, table_name);
+		}
+		ThrowGlueError(get_outcome, StringUtil::Format("GetPartition '%s.%s' [%s]", database_name, table_name,
+		                                               PartitionValuesToString(values)));
+	}
+	auto &partition = get_outcome.GetResult().GetPartition();
+	auto storage_descriptor = partition.GetStorageDescriptor();
+	storage_descriptor.SetColumns(ToAwsColumns(columns));
+	Aws::Glue::Model::PartitionInput input;
+	input.SetValues(partition.GetValues());
+	input.SetStorageDescriptor(storage_descriptor);
+	input.SetParameters(partition.GetParameters());
+	Aws::Glue::Model::UpdatePartitionRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetTableName(table_name);
+	request.SetPartitionValueList(ToAwsValues(values));
+	request.SetPartitionInput(input);
+	auto outcome = client->UpdatePartition(request);
+	if (!outcome.IsSuccess()) {
+		ThrowGlueError(outcome, StringUtil::Format("UpdatePartition '%s.%s' [%s]", database_name, table_name,
+		                                           PartitionValuesToString(values)));
+	}
+}
+
+//! The partitions Glue returns per request. 1000 is the maximum the API allows.
+static constexpr int GLUE_PARTITIONS_PAGE_SIZE = 1000;
+//! The most partitions Glue updates in one BatchUpdatePartition call
+static constexpr idx_t GLUE_BATCH_UPDATE_PARTITION_SIZE = 100;
+
+idx_t GlueAPI::SetAllPartitionColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                      const string &table_name, const vector<GlueColumn> &columns) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "BatchUpdatePartition");
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	auto aws_columns = ToAwsColumns(columns);
+	// every partition with its whole storage descriptor: BatchUpdatePartition replaces a partition's definition
+	vector<Aws::Glue::Model::BatchUpdatePartitionRequestEntry> entries;
+	Aws::String next_token;
+	do {
+		Aws::Glue::Model::GetPartitionsRequest request;
+		SetCatalogId(request, catalog);
+		request.SetDatabaseName(database_name);
+		request.SetTableName(table_name);
+		request.SetMaxResults(GLUE_PARTITIONS_PAGE_SIZE);
+		if (!next_token.empty()) {
+			request.SetNextToken(next_token);
+		}
+		auto outcome = client->GetPartitions(request);
+		if (!outcome.IsSuccess()) {
+			ThrowGlueError(outcome, StringUtil::Format("GetPartitions '%s.%s'", database_name, table_name));
+		}
+		for (auto &partition : outcome.GetResult().GetPartitions()) {
+			auto storage_descriptor = partition.GetStorageDescriptor();
+			storage_descriptor.SetColumns(aws_columns);
+			Aws::Glue::Model::PartitionInput input;
+			input.SetValues(partition.GetValues());
+			input.SetStorageDescriptor(storage_descriptor);
+			input.SetParameters(partition.GetParameters());
+			Aws::Glue::Model::BatchUpdatePartitionRequestEntry entry;
+			entry.SetPartitionValueList(partition.GetValues());
+			entry.SetPartitionInput(input);
+			entries.push_back(std::move(entry));
+		}
+		next_token = outcome.GetResult().GetNextToken();
+	} while (!next_token.empty());
+
+	vector<string> failed;
+	for (idx_t start = 0; start < entries.size(); start += GLUE_BATCH_UPDATE_PARTITION_SIZE) {
+		Aws::Glue::Model::BatchUpdatePartitionRequest request;
+		SetCatalogId(request, catalog);
+		request.SetDatabaseName(database_name);
+		request.SetTableName(table_name);
+		auto end = MinValue<idx_t>(start + GLUE_BATCH_UPDATE_PARTITION_SIZE, entries.size());
+		request.SetEntries(Aws::Vector<Aws::Glue::Model::BatchUpdatePartitionRequestEntry>(
+		    entries.begin() + NumericCast<int64_t>(start), entries.begin() + NumericCast<int64_t>(end)));
+		auto outcome = client->BatchUpdatePartition(request);
+		if (!outcome.IsSuccess()) {
+			ThrowGlueError(outcome, StringUtil::Format("BatchUpdatePartition '%s.%s'", database_name, table_name));
+		}
+		for (auto &error : outcome.GetResult().GetErrors()) {
+			vector<string> values;
+			for (auto &value : error.GetPartitionValueList()) {
+				values.push_back(ToStdString(value));
+			}
+			failed.push_back(StringUtil::Format("[%s]: %s", PartitionValuesToString(values),
+			                                    ToStdString(error.GetErrorDetail().GetErrorMessage())));
+		}
+	}
+	if (!failed.empty()) {
+		throw IOException("Glue did not update the columns of %d of the %d partitions of table '%s.%s' (the table "
+		                  "and the other partitions were updated): %s",
+		                  failed.size(), entries.size(), database_name, table_name, StringUtil::Join(failed, "; "));
+	}
+	return entries.size();
 }
 
 bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -232,8 +347,6 @@ void GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, cons
 	}
 }
 
-//! The partitions Glue returns per request. 1000 is the maximum the API allows.
-static constexpr int GLUE_PARTITIONS_PAGE_SIZE = 1000;
 //! The requests to run at the same time when the catalog is AWS and the setting leaves the choice open
 static constexpr idx_t GLUE_DEFAULT_PARTITION_SEGMENTS = 8;
 //! The maximum Glue accepts for Segment::TotalSegments

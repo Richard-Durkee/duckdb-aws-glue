@@ -2,8 +2,11 @@
 
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/parser/qualified_name.hpp"
+#include "duckdb/common/optional.hpp"
+#include "core/glue_info.hpp"
 
 namespace duckdb {
+class GlueCatalog;
 
 struct GlueColumn;
 
@@ -49,6 +52,23 @@ TableFunction GetGlueSetTableLocationFunction();
 //! ALTER TABLE ... REPLACE COLUMNS, replaces all data columns of the table; the partition keys are kept, the bucketing
 //! and sort columns must be given
 TableFunction GetGlueReplaceColumnsFunction();
+
+//! A column of REPLACE COLUMNS: its name, its DuckDB type, and its comment (unset: dropped, or kept with keep_comments)
+struct GlueReplaceColumn {
+	string name;
+	string type;
+	optional<string> comment;
+};
+//! The data columns REPLACE COLUMNS stores for Hive table 'table', or for one of its partitions, checked against the
+//! columns they replace ('current'): a column that stays may only be widened, the partition keys may not be given and
+//! the bucketing and sort columns must be. 'what' and 'target_name' name the statement and the table in errors.
+vector<GlueColumn> GlueReplaceColumns(ClientContext &context, const GlueTableInfo &table,
+                                      const vector<GlueColumn> &current, const vector<GlueReplaceColumn> &given,
+                                      bool keep_comments, const string &what, const string &target_name);
+//! The values of the partition named by (key, value) pairs, in partition key order; a missing value is the NULL
+//! partition. Throws unless the pairs name every partition key of 'table' once.
+vector<string> GluePartitionValues(const string &what, GlueCatalog &catalog, const GlueTableInfo &table,
+                                   const vector<pair<string, optional<string>>> &pairs);
 //! glue_alter_table(table, [{action, if_not_exists, if_exists, partition, new_partition, location}, ...]): the
 //! partition DDL of one ALTER TABLE statement (what the glue_hive_ddl grammar extension turns the SQL into).
 //! 'partition' and 'new_partition' are lists of {key, value}; the actions are validated against Glue before any

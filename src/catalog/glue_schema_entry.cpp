@@ -755,8 +755,40 @@ static const Value &StructChild(const Value &value, const char *name) {
 	throw InternalException("ALTER TABLE payload has no field '%s'", name);
 }
 
-void GlueSchemaEntry::ReplaceColumns(ClientContext &context, const string &table_name, const Value &payload) {
+//! ADD COLUMNS: 'current' with the given columns appended; each must be new and not a partition key
+static vector<GlueColumn> AppendColumns(ClientContext &context, const GlueTableInfo &table,
+                                        const vector<GlueColumn> &current, const vector<GlueReplaceColumn> &given,
+                                        const string &target_name) {
+	auto result = current;
+	for (auto &entry : given) {
+		for (auto &existing : result) {
+			if (StringUtil::CIEquals(existing.name, entry.name)) {
+				throw CatalogException("ADD COLUMNS: column with name \"%s\" already exists in table '%s'", entry.name,
+				                       target_name);
+			}
+		}
+		for (auto &key : table.partition_keys) {
+			if (StringUtil::CIEquals(key.name, entry.name)) {
+				throw BinderException("ADD COLUMNS: '%s' is a partition key of table '%s'", entry.name, target_name);
+			}
+		}
+		GlueColumn column;
+		column.name = entry.name;
+		column.type = GlueTypes::FromLogicalType(TransformStringToLogicalType(entry.type, context));
+		// a type that can not be read back fails here, before Glue is changed
+		GlueTypes::ToLogicalType(column.type);
+		if (entry.comment) {
+			column.comment = *entry.comment;
+		}
+		result.push_back(std::move(column));
+	}
+	return result;
+}
+
+void GlueSchemaEntry::ChangeColumns(ClientContext &context, const string &table_name, const Value &payload,
+                                    bool append) {
 	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	auto what = append ? "ADD COLUMNS" : "REPLACE COLUMNS";
 	GlueTableInfo current;
 	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
 		throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
@@ -774,12 +806,18 @@ void GlueSchemaEntry::ReplaceColumns(ClientContext &context, const string &table
 		}
 		given.push_back(std::move(entry));
 	}
+	// the new columns, replacing or extending 'columns' (the table's or a partition's)
+	auto change = [&](const vector<GlueColumn> &columns) {
+		if (append) {
+			return AppendColumns(context, current, columns, given, target_name);
+		}
+		// as in Hive, the comments of the columns that stay are dropped unless given again
+		return GlueReplaceColumns(context, current, columns, given, false, what, target_name);
+	};
 	bool cascade = StructChild(payload, "cascade").GetValue<bool>();
 	auto &partition = StructChild(payload, "partition");
 	if (partition.IsNull()) {
-		// as in Hive, the comments of the columns that stay are dropped unless given again
-		auto columns =
-		    GlueReplaceColumns(context, current, current.columns, given, false, "REPLACE COLUMNS", target_name);
+		auto columns = change(current.columns);
 		GlueAPI::UpdateTableColumns(context, glue_catalog, database_info.name, table_name, columns);
 		if (cascade) {
 			GlueAPI::SetAllPartitionColumns(context, glue_catalog, database_info.name, table_name, columns);
@@ -788,11 +826,12 @@ void GlueSchemaEntry::ReplaceColumns(ClientContext &context, const string &table
 		return;
 	}
 	if (cascade) {
-		throw BinderException("REPLACE COLUMNS: CASCADE changes the columns of the table and of all its partitions, "
-		                      "it can not be combined with PARTITION (...)");
+		throw BinderException("%s: CASCADE changes the columns of the table and of all its partitions, it can not be "
+		                      "combined with PARTITION (...)",
+		                      what);
 	}
 	if (current.partition_keys.empty()) {
-		throw BinderException("REPLACE COLUMNS: table '%s' is not partitioned", target_name);
+		throw BinderException("%s: table '%s' is not partitioned", what, target_name);
 	}
 	vector<pair<string, optional<string>>> pairs;
 	for (auto &key_value : ListValue::GetChildren(partition)) {
@@ -800,15 +839,15 @@ void GlueSchemaEntry::ReplaceColumns(ClientContext &context, const string &table
 		pairs.emplace_back(StructChild(key_value, "key").GetValue<string>(),
 		                   value.IsNull() ? optional<string>() : optional<string>(value.GetValue<string>()));
 	}
-	auto values = GluePartitionValues("REPLACE COLUMNS", glue_catalog, current, pairs);
+	auto values = GluePartitionValues(what, glue_catalog, current, pairs);
 	GluePartitionDetails details;
 	if (!GlueAPI::GetPartition(context, glue_catalog, database_info.name, table_name, values, details)) {
 		throw CatalogException("Partition [%s] does not exist in Glue table '%s'", StringUtil::Join(values, ", "),
 		                       target_name);
 	}
 	// checked against the partition's own columns: those are what its files were written with
-	auto columns = GlueReplaceColumns(context, current, details.columns, given, false, "REPLACE COLUMNS", target_name);
-	GlueAPI::SetPartitionColumns(context, glue_catalog, database_info.name, table_name, values, columns);
+	GlueAPI::SetPartitionColumns(context, glue_catalog, database_info.name, table_name, values,
+	                             change(details.columns));
 }
 
 void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
@@ -831,6 +870,11 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 		}
 		if (info.type == AlterType::SET_COMMENT || info.type == AlterType::SET_COLUMN_COMMENT) {
 			throw NotImplementedException("Comments on Glue views are not supported yet");
+		}
+		if (info.type == AlterType::ALTER_TABLE &&
+		    info.Cast<AlterTableInfo>().alter_table_type == AlterTableType::EXTENSION_ALTER_STMT &&
+		    info.Cast<ExtensionAlterTableInfo>().alter_name == "glue_alter_table") {
+			throw BinderException("ALTER TABLE: Glue view '%s.%s' has no partitions", database_info.name, table_name);
 		}
 		throw BinderException("\"%s\" is a view", table_name);
 	}
@@ -855,12 +899,22 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 	auto &alter_table = info.Cast<AlterTableInfo>();
 	if (alter_table.alter_table_type == AlterTableType::EXTENSION_ALTER_STMT) {
 		auto &extension_alter = alter_table.Cast<ExtensionAlterTableInfo>();
-		if (extension_alter.alter_name != "glue_replace_columns") {
-			throw NotImplementedException("ALTER TABLE action \"%s\" is not supported for Glue tables",
-			                              extension_alter.alter_name);
+		if (extension_alter.alter_name == "glue_replace_columns" || extension_alter.alter_name == "glue_add_columns") {
+			ChangeColumns(context, table_name, extension_alter.GetPayload(),
+			              extension_alter.alter_name == "glue_add_columns");
+			return;
 		}
-		ReplaceColumns(context, table_name, extension_alter.GetPayload());
-		return;
+		if (extension_alter.alter_name == "glue_alter_table") {
+			GlueTableInfo current;
+			if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, current)) {
+				throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
+				                       database_info.name);
+			}
+			GlueAlterPartitions(context, glue_catalog, current, StructChild(extension_alter.GetPayload(), "actions"));
+			return;
+		}
+		throw NotImplementedException("ALTER TABLE action \"%s\" is not supported for Glue tables",
+		                              extension_alter.alter_name);
 	}
 	if (alter_table.alter_table_type == AlterTableType::SET_TABLE_OPTIONS ||
 	    alter_table.alter_table_type == AlterTableType::RESET_TABLE_OPTIONS) {

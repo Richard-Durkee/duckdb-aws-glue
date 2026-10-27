@@ -307,21 +307,25 @@ ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-16', country = '
 ALTER TABLE my_datalake.default.orders SET LOCATION 's3://bucket/orders_v2/';
 ```
 
-Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). The statement
-becomes `CALL glue_alter_table(table, [actions])`: every action is checked against Glue before any is applied, so a
-statement that fails changes nothing, and consecutive adds go out as one `BatchCreatePartition` call. The table name
-may be partially qualified; it is resolved like in a query.
+Actions can be chained in one statement (`ADD PARTITION (...) LOCATION '...' ADD PARTITION (...) ...`). They are one
+action of DuckDB's `ALTER TABLE` statement, run by the Glue catalog as `CALL glue_alter_table(table, [actions])` runs
+them: every action is checked against Glue before any is applied, so a statement that fails changes nothing, and
+consecutive adds go out as one `BatchCreatePartition` call. As an `ALTER TABLE`, the table name is resolved like in a
+query, `ALTER TABLE IF EXISTS` applies, and a `READ_ONLY` attachment refuses the statement.
 
-`REPLACE COLUMNS` is Hive's statement for the data columns, of the table or of one partition:
+`REPLACE COLUMNS` and `ADD COLUMNS` are Hive's statements for the data columns, of the table or of one partition:
 
 ```sql
 ALTER TABLE my_datalake.default.orders REPLACE COLUMNS (id BIGINT, amount DOUBLE COMMENT 'in EUR', note VARCHAR);
 ALTER TABLE my_datalake.default.orders REPLACE COLUMNS (id BIGINT, amount DOUBLE, note VARCHAR) CASCADE;
 ALTER TABLE my_datalake.default.orders PARTITION (dt = '2016-05-14', country = 'IN') REPLACE COLUMNS (id BIGINT, amount DOUBLE, note VARCHAR);
+ALTER TABLE my_datalake.default.orders ADD COLUMNS (channel VARCHAR COMMENT 'web or store', score DOUBLE) CASCADE;
 ```
 
-It applies the rules of `glue_replace_columns`: a column that stays may only be widened, the partition keys are not
-listed, and a comment not given again is dropped. Without `PARTITION`, only the table's columns change, as in Hive;
+`ADD COLUMNS` appends new columns (not existing ones, not partition keys), as the built-in `ADD COLUMN` does for one.
+
+`REPLACE COLUMNS` applies the rules of `glue_replace_columns`: a column that stays may only be widened, the partition keys are not
+listed, and a comment not given again is dropped. For both, without `PARTITION` only the table's columns change, as in Hive;
 the partitions keep the columns they were created with. `CASCADE` also sets every partition's columns to the new ones
 (`BatchUpdatePartition`, 100 partitions per call). With `PARTITION (...)`, only that partition changes, checked against
 its own columns: this repairs a partition left with older types by a type change of the table, which `INSERT` refuses to

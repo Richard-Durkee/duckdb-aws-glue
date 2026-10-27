@@ -156,5 +156,24 @@ ALTER TABLE rc_ro_datalake.default.rc_events REPLACE COLUMNS (id BIGINT, v BIGIN
 ----
 read-only mode
 
+# the partition statements are ALTER TABLE actions as well: refused by a READ_ONLY attachment, IF EXISTS applies
+statement error
+ALTER TABLE rc_ro_datalake.default.rc_events ADD PARTITION (dt = 'c');
+----
+read-only mode
+
+statement error
+ALTER TABLE rc_ro_datalake.default.rc_events DROP PARTITION (dt = 'a');
+----
+read-only mode
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.rc_events');
+----
+2
+
+statement ok
+ALTER TABLE IF EXISTS my_datalake.default.rc_missing ADD PARTITION (dt = 'c');
+
 statement ok
 DROP TABLE my_datalake.default.rc_events;

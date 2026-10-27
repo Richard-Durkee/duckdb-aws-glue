@@ -84,8 +84,8 @@ private:
 	                                               const GlueTableInfo *resolved_table_info);
 	static bool CatalogTypeIsSupported(CatalogType type);
 	void AlterTableProperties(ClientContext &context, AlterTableInfo &alter_table);
-	//! ALTER TABLE ... [PARTITION (...)] REPLACE COLUMNS (...) [CASCADE] (the glue_hive_ddl grammar extension)
-	void ReplaceColumns(ClientContext &context, const string &table_name, const Value &payload);
+	//! ALTER TABLE ... [PARTITION (...)] REPLACE / ADD COLUMNS (...) [CASCADE] (the glue_hive_ddl grammar extension)
+	void ChangeColumns(ClientContext &context, const string &table_name, const Value &payload, bool append);
 	//! COMMENT ON COLUMN: Glue keeps the comment with the column
 	void SetColumnComment(ClientContext &context, const string &table_name, SetColumnCommentInfo &info);
 	//! COMMENT ON TABLE: Glue stores it as the table's Description

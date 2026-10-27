@@ -65,6 +65,10 @@ struct GlueReplaceColumn {
 vector<GlueColumn> GlueReplaceColumns(ClientContext &context, const GlueTableInfo &table,
                                       const vector<GlueColumn> &current, const vector<GlueReplaceColumn> &given,
                                       bool keep_comments, const string &what, const string &target_name);
+//! Apply the partition actions of an ALTER TABLE statement to Hive table 'table': the 'actions' list of
+//! glue_alter_table, checked against Glue before any is applied
+void GlueAlterPartitions(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
+                         const Value &actions);
 //! The values of the partition named by (key, value) pairs, in partition key order; a missing value is the NULL
 //! partition. Throws unless the pairs name every partition key of 'table' once.
 vector<string> GluePartitionValues(const string &what, GlueCatalog &catalog, const GlueTableInfo &table,

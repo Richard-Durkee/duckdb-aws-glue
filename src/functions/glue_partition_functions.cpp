@@ -1,5 +1,7 @@
 #include "functions/glue_functions.hpp"
 
+#include <functional>
+
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/exception.hpp"
@@ -646,23 +648,9 @@ vector<string> ParsePartitionPairsValue(const string &function_name, const GlueP
 	return ParsePartitionPairs(function_name, target, result);
 }
 
-unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctionBindInput &input,
-                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
-	auto result = make_uniq<GlueAlterTableBindData>();
-	auto &actions = input.inputs[1];
-	if (actions.IsNull() || actions.type().id() != LogicalTypeId::LIST) {
-		throw BinderException("glue_alter_table expects a list of actions");
-	}
-	// table-level actions do not need a partitioned table
-	bool needs_partitions = false;
-	for (auto &action : ListValue::GetChildren(actions)) {
-		auto name = StringUtil::Lower(GetStructField(action, "action").ToString());
-		if (name != "set_table_location") {
-			needs_partitions = true;
-		}
-	}
-	result->target = ResolveGlueTable(context, "glue_alter_table", input.inputs[0], needs_partitions);
-	GlueCatalog::ThrowIfInExplicitTransaction(context);
+//! The actions of an ALTER TABLE partition statement, checked against the table but not yet against Glue
+vector<GlueAlterStep> ParseAlterSteps(const GluePartitionTarget &target, const Value &actions) {
+	vector<GlueAlterStep> steps;
 	for (auto &action : ListValue::GetChildren(actions)) {
 		if (action.IsNull() || action.type().id() != LogicalTypeId::STRUCT) {
 			throw BinderException("glue_alter_table: every action must be a struct");
@@ -678,19 +666,19 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		step.if_exists = !if_exists.IsNull() && if_exists.GetValue<bool>();
 		if (name == "add") {
 			step.action = GlueAlterAction::ADD;
-			step.values = ParsePartitionPairsValue("ALTER TABLE ADD PARTITION", result->target, partition);
-			step.location = location.IsNull() ? DefaultPartitionLocation(result->target, step.values)
+			step.values = ParsePartitionPairsValue("ALTER TABLE ADD PARTITION", target, partition);
+			step.location = location.IsNull() ? DefaultPartitionLocation(target, step.values)
 			                                  : ParseLocation("ALTER TABLE ADD PARTITION", location);
 		} else if (name == "drop") {
 			step.action = GlueAlterAction::DROP;
-			step.values = ParsePartitionPairsValue("ALTER TABLE DROP PARTITION", result->target, partition);
+			step.values = ParsePartitionPairsValue("ALTER TABLE DROP PARTITION", target, partition);
 		} else if (name == "rename") {
 			step.action = GlueAlterAction::RENAME;
-			step.values = ParsePartitionPairsValue("ALTER TABLE RENAME PARTITION", result->target, partition);
-			step.new_values = ParsePartitionPairsValue("ALTER TABLE RENAME PARTITION", result->target, new_partition);
+			step.values = ParsePartitionPairsValue("ALTER TABLE RENAME PARTITION", target, partition);
+			step.new_values = ParsePartitionPairsValue("ALTER TABLE RENAME PARTITION", target, new_partition);
 		} else if (name == "set_partition_location") {
 			step.action = GlueAlterAction::SET_PARTITION_LOCATION;
-			step.values = ParsePartitionPairsValue("ALTER TABLE PARTITION SET LOCATION", result->target, partition);
+			step.values = ParsePartitionPairsValue("ALTER TABLE PARTITION SET LOCATION", target, partition);
 			step.location = ParseLocation("ALTER TABLE PARTITION SET LOCATION", location);
 		} else if (name == "set_table_location") {
 			step.action = GlueAlterAction::SET_TABLE_LOCATION;
@@ -698,8 +686,32 @@ unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctio
 		} else {
 			throw BinderException("glue_alter_table: unknown action '%s'", name);
 		}
-		result->steps.push_back(std::move(step));
+		steps.push_back(std::move(step));
 	}
+	return steps;
+}
+
+//! Whether the actions need a partitioned table: only SET LOCATION of the table itself does not
+bool AlterStepsNeedPartitions(const Value &actions) {
+	for (auto &action : ListValue::GetChildren(actions)) {
+		auto name = StringUtil::Lower(GetStructField(action, "action").ToString());
+		if (name != "set_table_location") {
+			return true;
+		}
+	}
+	return false;
+}
+
+unique_ptr<FunctionData> GlueAlterTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                            vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto result = make_uniq<GlueAlterTableBindData>();
+	auto &actions = input.inputs[1];
+	if (actions.IsNull() || actions.type().id() != LogicalTypeId::LIST) {
+		throw BinderException("glue_alter_table expects a list of actions");
+	}
+	result->target = ResolveGlueTable(context, "glue_alter_table", input.inputs[0], AlterStepsNeedPartitions(actions));
+	GlueCatalog::ThrowIfInExplicitTransaction(context);
+	result->steps = ParseAlterSteps(result->target, actions);
 	names = {"action", "partition", "location"};
 	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR};
 	return std::move(result);
@@ -721,18 +733,17 @@ string DescribeAction(GlueAlterAction action) {
 	return "unknown";
 }
 
-//! Apply every action, once, and record the row each one reports. Kept separate from emitting them because
-//! there can be more actions than a DataChunk holds, so the rows are handed out over several scan calls
-//! while the Glue calls must happen exactly once.
-void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueAlterTableState &state) {
-	auto &bind_data = data.bind_data->Cast<GlueAlterTableBindData>();
-	auto &catalog = *bind_data.target.catalog;
-	auto &table = bind_data.target.table;
-	auto table_name = bind_data.target.TableName();
+//! Apply the actions: everything that can fail is checked against Glue first, then the actions run in order and
+//! 'applied' is called after each one
+void ApplyAlterSteps(ClientContext &context, const GluePartitionTarget &target, const vector<GlueAlterStep> &steps,
+                     const std::function<void(const GlueAlterStep &)> &applied) {
+	auto &catalog = *target.catalog;
+	auto &table = target.table;
+	auto table_name = target.TableName();
 
 	// Glue has no transactions: check everything that can fail against the catalog first, so that a statement
 	// which fails half way registers or removes nothing
-	for (auto &step : bind_data.steps) {
+	for (auto &step : steps) {
 		GluePartitionInfo existing;
 		switch (step.action) {
 		case GlueAlterAction::ADD:
@@ -766,13 +777,6 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 	}
 
 	// consecutive adds go out as one BatchCreatePartition call
-	auto emit = [&](const GlueAlterStep &step) {
-		GlueAlterTableState::EmittedRow row;
-		row.action = Value(DescribeAction(step.action));
-		row.partition = step.values.empty() ? Value(LogicalType::VARCHAR) : Value(StringUtil::Join(step.values, ", "));
-		row.location = step.location.empty() ? Value(LogicalType::VARCHAR) : Value(step.location);
-		state.rows.push_back(std::move(row));
-	};
 	vector<GluePartitionInput> pending_adds;
 	auto flush_adds = [&]() {
 		if (pending_adds.empty()) {
@@ -781,7 +785,7 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 		GlueAPI::BatchCreatePartitions(context, catalog, table.schema_name, table.name, pending_adds);
 		pending_adds.clear();
 	};
-	for (auto &step : bind_data.steps) {
+	for (auto &step : steps) {
 		if (step.action != GlueAlterAction::ADD) {
 			flush_adds();
 		}
@@ -806,9 +810,23 @@ void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueA
 			GlueAPI::SetTableLocation(context, catalog, table.schema_name, table.name, step.location);
 			break;
 		}
-		emit(step);
+		applied(step);
 	}
 	flush_adds();
+}
+
+//! Apply every action, once, and record the row each one reports. Kept separate from emitting them because
+//! there can be more actions than a DataChunk holds, so the rows are handed out over several scan calls
+//! while the Glue calls must happen exactly once.
+void GlueAlterTableApply(ClientContext &context, TableFunctionInput &data, GlueAlterTableState &state) {
+	auto &bind_data = data.bind_data->Cast<GlueAlterTableBindData>();
+	ApplyAlterSteps(context, bind_data.target, bind_data.steps, [&](const GlueAlterStep &step) {
+		GlueAlterTableState::EmittedRow row;
+		row.action = Value(DescribeAction(step.action));
+		row.partition = step.values.empty() ? Value(LogicalType::VARCHAR) : Value(StringUtil::Join(step.values, ", "));
+		row.location = step.location.empty() ? Value(LogicalType::VARCHAR) : Value(step.location);
+		state.rows.push_back(std::move(row));
+	});
 }
 
 void GlueAlterTableScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
@@ -1045,6 +1063,17 @@ vector<string> GluePartitionValues(const string &what, GlueCatalog &catalog, con
 	target.catalog = &catalog;
 	target.table = table;
 	return ParsePartitionPairs(what, target, pairs);
+}
+
+void GlueAlterPartitions(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
+                         const Value &actions) {
+	GluePartitionTarget target;
+	target.catalog = &catalog;
+	target.table = table;
+	if (AlterStepsNeedPartitions(actions) && table.partition_keys.empty()) {
+		throw InvalidInputException("Table '%s' is not partitioned", target.TableName());
+	}
+	ApplyAlterSteps(context, target, ParseAlterSteps(target, actions), [](const GlueAlterStep &) {});
 }
 
 } // namespace duckdb

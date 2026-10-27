@@ -1,0 +1,114 @@
+# name: test/sql/hive/ddl/alter_column/alter_table_add_columns.test
+# description: ALTER TABLE ... [PARTITION (...)] ADD COLUMNS (...) [CASCADE], Hive's statement through the
+#              glue_hive_ddl grammar extension
+# group: [alter_column]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+SET active_grammar_extensions = ['glue_hive_ddl'];
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.ac_events;
+
+statement ok
+CREATE TABLE my_datalake.default.ac_events (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.ac_events VALUES (1, 'a'), (2, 'b');
+
+# several columns at once, appended to the table's; the partitions keep theirs
+statement ok
+ALTER TABLE my_datalake.default.ac_events ADD COLUMNS (score DOUBLE COMMENT 'from 0 to 1', tag VARCHAR);
+
+query TTT
+SELECT column_name, data_type, comment FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ac_events' ORDER BY column_index;
+----
+id	INTEGER	NULL
+score	DOUBLE	from 0 to 1
+tag	VARCHAR	NULL
+dt	VARCHAR	NULL
+
+query I
+SELECT [c.name FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ac_events', {dt: 'a'});
+----
+[id]
+
+# one partition
+statement ok
+ALTER TABLE my_datalake.default.ac_events PARTITION (dt = 'a') ADD COLUMNS (score DOUBLE);
+
+query I
+SELECT [c.name FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ac_events', {dt: 'a'});
+----
+[id, score]
+
+query I
+SELECT [c.name FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ac_events', {dt: 'b'});
+----
+[id]
+
+statement error
+ALTER TABLE my_datalake.default.ac_events PARTITION (dt = 'a') ADD COLUMNS (score DOUBLE);
+----
+column with name "score" already exists
+
+statement error
+ALTER TABLE my_datalake.default.ac_events ADD COLUMNS (id BIGINT);
+----
+column with name "id" already exists
+
+statement error
+ALTER TABLE my_datalake.default.ac_events ADD COLUMNS (dt VARCHAR);
+----
+'dt' is a partition key of table 'default.ac_events'
+
+statement error
+ALTER TABLE my_datalake.default.ac_events PARTITION (dt = 'a') ADD COLUMNS (extra VARCHAR) CASCADE;
+----
+CASCADE changes the columns of the table and of all its partitions
+
+# CASCADE: the table and every partition get the new column at the end
+statement ok
+ALTER TABLE my_datalake.default.ac_events ADD COLUMNS (extra VARCHAR) CASCADE;
+
+query I
+SELECT [c.name FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ac_events', {dt: 'b'});
+----
+[id, score, tag, extra]
+
+query I
+SELECT [c.name FOR c IN columns] FROM glue_get_partition_response('my_datalake.default.ac_events', {dt: 'a'});
+----
+[id, score, tag, extra]
+
+query IRTTT
+SELECT id, score, tag, extra, dt FROM my_datalake.default.ac_events ORDER BY id;
+----
+1	NULL	NULL	NULL	a
+2	NULL	NULL	NULL	b
+
+# the built-in single-column form still works
+statement ok
+ALTER TABLE my_datalake.default.ac_events ADD COLUMN one_more INTEGER;
+
+query I
+SELECT count(*) FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'ac_events' AND column_name = 'one_more';
+----
+1
+
+statement ok
+DROP TABLE my_datalake.default.ac_events;

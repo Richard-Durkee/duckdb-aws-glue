@@ -12,8 +12,6 @@
 #include "duckdb/parser/peg/parsed_grammar.hpp"
 #include "duckdb/parser/peg/transformer/parse_result.hpp"
 #include "duckdb/parser/peg/transformer/peg_transformer.hpp"
-#include "duckdb/parser/statement/call_statement.hpp"
-#include "duckdb/parser/tableref/basetableref.hpp"
 
 namespace duckdb {
 
@@ -131,32 +129,36 @@ void TransformAction(PEGTransformer &transformer, ParseResult &action_result, ve
 	throw InternalException("Unknown Glue partition action rule '%s'", action.Name());
 }
 
-//! GlueAlterTableStatement <- 'ALTER' 'TABLE' BaseTableName GluePartitionAction+
-//! -> CALL glue_alter_table('<table>', [actions])
-arena_ptr<TransformResultValue> FinalizeGlueAlterTable(PEGTransformer &transformer, ParseResult &parse_result) {
+//! GluePartitionActions <- GluePartitionAction+
+//! -> an ALTER TABLE action 'glue_alter_table' with payload {actions: [...]}, the actions glue_alter_table takes
+arena_ptr<TransformResultValue> FinalizeGluePartitionActions(PEGTransformer &transformer, ParseResult &parse_result) {
 	auto &list = parse_result.Cast<ListParseResult>();
-	auto table = transformer.Transform<unique_ptr<BaseTableRef>>(list.GetChild(2));
 	vector<FunctionArgument> actions;
-	for (auto &action : list.Child<RepeatParseResult>(3).GetChildren()) {
+	for (auto &action : list.Child<RepeatParseResult>(0).GetChildren()) {
 		TransformAction(transformer, action.get(), actions);
 	}
-	vector<FunctionArgument> arguments;
-	arguments.emplace_back(Constant(Value(table->GetQualifiedName().ToString())));
-	arguments.emplace_back(Call("list_value", std::move(actions)));
-	auto statement = make_uniq<CallStatement>();
-	statement->function = Call("glue_alter_table", std::move(arguments));
-	unique_ptr<SQLStatement> result = std::move(statement);
-	return transformer.MakeResult<unique_ptr<SQLStatement>>(std::move(result));
+	vector<string> action_sql;
+	for (auto &action : actions) {
+		action_sql.push_back(action.GetExpression().ToString());
+	}
+	vector<FunctionArgument> payload;
+	payload.emplace_back(Identifier("actions"), Call("list_value", std::move(actions)));
+	unique_ptr<AlterTableInfo> result = make_uniq<ExtensionAlterTableInfo>(
+	    AlterEntryData(), "glue_alter_table", Call("struct_pack", std::move(payload)),
+	    "PARTITION ACTIONS " + StringUtil::Join(action_sql, ", "));
+	return transformer.MakeResult<unique_ptr<AlterTableInfo>>(std::move(result));
 }
 
-arena_ptr<TransformProcess> StartGlueAlterTableTransform(PEGTransformer &transformer, ParseResult &parse_result) {
-	return transformer.MakeProcess<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueAlterTable);
+arena_ptr<TransformProcess> StartGluePartitionActionsTransform(PEGTransformer &transformer, ParseResult &parse_result) {
+	return transformer.MakeProcess<FinalizeTransformProcess>(transformer, parse_result, FinalizeGluePartitionActions);
 }
 
-//! GlueReplaceColumns <- GluePartitionSpec? 'REPLACE' 'COLUMNS' Parens(List(GlueColumnDefinition)) 'CASCADE'?
-//! -> an ALTER TABLE action 'glue_replace_columns' with payload
+//! GlueReplaceColumns / GlueAddColumns <- GluePartitionSpec? ('REPLACE' / 'ADD') 'COLUMNS'
+//!                                       Parens(List(GlueColumnDefinition)) 'CASCADE'?
+//! -> an ALTER TABLE action 'glue_replace_columns' / 'glue_add_columns' with payload
 //!    {partition: [{key, value}, ...] or NULL, columns: [{name, type, comment}, ...], cascade}
-arena_ptr<TransformResultValue> FinalizeGlueReplaceColumns(PEGTransformer &transformer, ParseResult &parse_result) {
+arena_ptr<TransformResultValue> TransformColumnsAction(PEGTransformer &transformer, ParseResult &parse_result,
+                                                       const char *alter_name, const char *verb) {
 	auto &list = parse_result.Cast<ListParseResult>();
 	string action_sql;
 	unique_ptr<ParsedExpression> partition;
@@ -194,7 +196,7 @@ arena_ptr<TransformResultValue> FinalizeGlueReplaceColumns(PEGTransformer &trans
 		columns.emplace_back(Call("struct_pack", std::move(fields)));
 	}
 	bool cascade = list.Child<OptionalParseResult>(4).HasResult();
-	action_sql += "REPLACE COLUMNS (" + StringUtil::Join(column_sql, ", ") + ")";
+	action_sql += string(verb) + " COLUMNS (" + StringUtil::Join(column_sql, ", ") + ")";
 	if (cascade) {
 		action_sql += " CASCADE";
 	}
@@ -204,12 +206,24 @@ arena_ptr<TransformResultValue> FinalizeGlueReplaceColumns(PEGTransformer &trans
 	payload.emplace_back(Identifier("columns"), Call("list_value", std::move(columns)));
 	payload.emplace_back(Identifier("cascade"), Constant(Value::BOOLEAN(cascade)));
 	unique_ptr<AlterTableInfo> result = make_uniq<ExtensionAlterTableInfo>(
-	    AlterEntryData(), "glue_replace_columns", Call("struct_pack", std::move(payload)), std::move(action_sql));
+	    AlterEntryData(), alter_name, Call("struct_pack", std::move(payload)), std::move(action_sql));
 	return transformer.MakeResult<unique_ptr<AlterTableInfo>>(std::move(result));
+}
+
+arena_ptr<TransformResultValue> FinalizeGlueReplaceColumns(PEGTransformer &transformer, ParseResult &parse_result) {
+	return TransformColumnsAction(transformer, parse_result, "glue_replace_columns", "REPLACE");
 }
 
 arena_ptr<TransformProcess> StartGlueReplaceColumnsTransform(PEGTransformer &transformer, ParseResult &parse_result) {
 	return transformer.MakeProcess<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueReplaceColumns);
+}
+
+arena_ptr<TransformResultValue> FinalizeGlueAddColumns(PEGTransformer &transformer, ParseResult &parse_result) {
+	return TransformColumnsAction(transformer, parse_result, "glue_add_columns", "ADD");
+}
+
+arena_ptr<TransformProcess> StartGlueAddColumnsTransform(PEGTransformer &transformer, ParseResult &parse_result) {
+	return transformer.MakeProcess<FinalizeTransformProcess>(transformer, parse_result, FinalizeGlueAddColumns);
 }
 
 class GlueHiveDDLGrammar final : public GrammarExtension {
@@ -224,8 +238,7 @@ public:
 	vector<GrammarChange> GetChanges() const override {
 		vector<GrammarChange> changes;
 		changes.push_back(
-		    GrammarChange::AddRule("GlueAlterTableStatement <- 'ALTER' 'TABLE' BaseTableName GluePartitionAction+",
-		                           StartGlueAlterTableTransform));
+		    GrammarChange::AddRule("GluePartitionActions <- GluePartitionAction+", StartGluePartitionActionsTransform));
 		changes.push_back(GrammarChange::AddRule(
 		    "GluePartitionAction <- GlueAddPartitions / GlueDropPartitions / GlueRenamePartition / "
 		    "GluePartitionSetLocation / GlueTableSetLocation"));
@@ -243,13 +256,16 @@ public:
 		    "GlueReplaceColumns <- GluePartitionSpec? 'REPLACE' 'COLUMNS' Parens(List(GlueColumnDefinition)) "
 		    "'CASCADE'?",
 		    StartGlueReplaceColumnsTransform));
+		changes.push_back(GrammarChange::AddRule(
+		    "GlueAddColumns <- GluePartitionSpec? 'ADD' 'COLUMNS' Parens(List(GlueColumnDefinition)) 'CASCADE'?",
+		    StartGlueAddColumnsTransform));
 		changes.push_back(GrammarChange::AddRule("GlueColumnDefinition <- ColumnName Type GlueColumnComment?"));
 		changes.push_back(GrammarChange::AddRule("GlueColumnComment <- 'COMMENT' StringLiteral"));
-		// tried before the built-in ALTER statement; it fails on anything that is not a partition action, so the
-		// built-in ALTER TABLE forms are unaffected
-		changes.push_back(GrammarChange::PrependChoice("Statement", "GlueAlterTableStatement"));
-		// an action of the built-in ALTER TABLE statement, executed by the catalog that owns the table
+		// actions of the built-in ALTER TABLE statement, executed by the catalog that owns the table; tried before the
+		// built-in actions, they fail on anything else, so the built-in ALTER TABLE forms are unaffected
+		changes.push_back(GrammarChange::PrependChoice("AlterTableOptions", "GluePartitionActions"));
 		changes.push_back(GrammarChange::PrependChoice("AlterTableOptions", "GlueReplaceColumns"));
+		changes.push_back(GrammarChange::PrependChoice("AlterTableOptions", "GlueAddColumns"));
 		return changes;
 	}
 };

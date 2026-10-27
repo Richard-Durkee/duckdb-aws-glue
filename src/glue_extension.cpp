@@ -113,6 +113,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ranges at the same time, when that takes fewer listings than one per partition. Default "
 	                          "true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("hive_listing_measure_keys",
+	                          "Size the listings of a partitioned table by the keys the sampled partition holds rather "
+	                          "than one per partition. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	config.AddExtensionOption("hive_listing_threads",
 	                          "How many threads the extension keeps for listings when hive_partition_listing_concurrency "
 	                          "is not 0. The threads are shared by every database of the process and only ever added. "

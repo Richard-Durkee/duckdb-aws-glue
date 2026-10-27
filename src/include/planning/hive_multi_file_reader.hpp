@@ -141,6 +141,8 @@ private:
 	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
 	//! they hold one of 'partitions'
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
+	//! The data files of one partition, listed by themselves; measures the keys a partition holds
+	vector<OpenFileInfo> SamplePartition(idx_t partition_index) const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
 	//! The partition of the deepest registered location containing the file, searching no shorter than

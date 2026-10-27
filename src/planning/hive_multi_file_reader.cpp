@@ -256,7 +256,8 @@ void HiveMultiFileList::PlanListings() const {
 			partitions_below_root++;
 		}
 	}
-	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
+	auto keys_below_root = partitions_below_root * MaxValue<idx_t>(scan_info->keys_per_partition.load(), 1);
+	auto root_pages = (keys_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
 	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
 	vector<idx_t> separately;
 	bool listed_by_ranges = false;
@@ -567,8 +568,59 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	return MultiFileCount(expanded_files.size() + remaining, FileExpansionType::NOT_ALL_FILES_KNOWN);
 }
 
+//! hive_listing_measure_keys
+static bool MeasureKeysEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_listing_measure_keys", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return true;
+}
+
+vector<OpenFileInfo> HiveMultiFileList::SamplePartition(idx_t partition_index) const {
+	auto location = (*scan_info->Partitions(client_context))[partition_index].location;
+	StringUtil::RTrim(location, "/");
+	vector<OpenFileInfo> files;
+	if (location.empty()) {
+		return files;
+	}
+	// the keys of the directory, data files or not, are what a listing pages through
+	auto listing = HiveQueryCache::Get(client_context)
+	                   ->GetDirectoryListing(client_context, location, CacheListings(client_context, *scan_info));
+	auto listed = listing->GetAllFiles();
+	idx_t expected = 0;
+	scan_info->keys_per_partition.compare_exchange_strong(expected, MaxValue<idx_t>(listed.size(), 1));
+	auto prefix = location + "/";
+	BuildPartitionLocations();
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto &file : listed) {
+		if (!IsDataFile(file, prefix)) {
+			continue;
+		}
+		// as ListPartitions keeps them: not the files of a partition registered at a location nested inside this one
+		auto owner = OwningPartition(file.path, location.size());
+		if (owner.IsValid() && owner.GetIndex() != partition_index) {
+			continue;
+		}
+		scan_info->file_partitions[file.path] = partition_index;
+		files.push_back(std::move(file));
+	}
+	return files;
+}
+
 vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	lock_guard<mutex> lck(lock);
+	if (!scan_info->partition_keys.empty() && MeasureKeysEnabled(client_context) && next_job == 0) {
+		// the sample is the first partition read, listed by itself: how many keys it holds sizes the listings
+		auto indexes = PartitionIndexes();
+		if (!indexes->empty()) {
+			auto files = SamplePartition((*indexes)[0]);
+			planned = false;
+			listing_jobs.clear();
+			PlanListings();
+			return files;
+		}
+	}
 	PlanListings();
 	vector<OpenFileInfo> files;
 	if (scan_info->partition_keys.empty()) {

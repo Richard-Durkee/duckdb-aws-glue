@@ -581,13 +581,21 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 			partitions.emplace(directory, std::move(partition));
 			continue;
 		}
-		auto parsed = HivePartitioning::Parse(file);
-		for (auto &key : table_info.partition_keys) {
-			auto value = parsed.find(key.name);
-			if (value == parsed.end()) {
-				throw InternalException("Written file '%s' has no value for partition key '%s'", file, key.name);
+		// only the directories the copy added: the table location may hold a <key>=<value> of its own
+		auto &keys = table_info.partition_keys;
+		auto components = StringUtil::Split(directory, '/');
+		if (components.size() < keys.size()) {
+			throw InternalException("Written file '%s' has no directory for each partition key", file);
+		}
+		auto first = components.size() - keys.size();
+		for (idx_t i = 0; i < keys.size(); i++) {
+			auto &component = components[first + i];
+			auto equals = component.find('=');
+			if (equals == string::npos ||
+			    !StringUtil::CIEquals(HivePartitioning::Unescape(component.substr(0, equals)), keys[i].name)) {
+				throw InternalException("Written file '%s' has no value for partition key '%s'", file, keys[i].name);
 			}
-			partition.values.push_back(HivePartitioning::Unescape(value->second));
+			partition.values.push_back(HivePartitioning::Unescape(component.substr(equals + 1)));
 		}
 		partitions.emplace(directory, std::move(partition));
 	}

@@ -193,23 +193,6 @@ vector<column_t> GlueTable::GetRowIdColumns() const {
 	return vector<column_t>();
 }
 
-GlueTableInfo GlueTable::RefreshTableInfo(ClientContext &context) const {
-	auto &glue_catalog = catalog.Cast<GlueCatalog>();
-	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
-		GlueTableInfo info;
-		if (!GlueAPI::GetTable(context, glue_catalog, table_info.schema_name, table_info.name, info)) {
-			return nullptr;
-		}
-		return make_shared_ptr<const GlueTableInfo>(std::move(info));
-	};
-	auto cache = GlueTransactionCache::Of(context, catalog);
-	auto result = cache ? cache->GetTable(table_info.schema_name, table_info.name, load) : load();
-	if (!result) {
-		throw CatalogException("Glue table '%s.%s' no longer exists", table_info.schema_name, table_info.name);
-	}
-	return *result;
-}
-
 //! Called by duckdb_tables().sql. On success, returns a CreateTableInfo so ToString() renders
 //! a full CREATE TABLE statement. On failure, returns an UnsupportedTableInfo whose ToString()
 //! renders the "Not supported: ..." reason, so a bulk catalog scan does not break on one bad table.
@@ -230,22 +213,11 @@ unique_ptr<CreateInfo> GlueTable::GetInfo() const {
 // Scan
 //===--------------------------------------------------------------------===//
 TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<FunctionData> &bind_data) {
-	// Ask Glue what kind of table this is right before scanning (once per query): only Hive (Glue native) tables can
-	// be read
-	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
-	    HiveQueryCache::TableKey(catalog.GetName().GetIdentifierName(), table_info.schema_name, table_info.name));
-	shared_ptr<const GlueTableInfo> latest_info;
-	{
-		annotated_lock_guard<annotated_mutex> guard(entry->lock);
-		if (!entry->table_info) {
-			entry->table_info = make_shared_ptr<const GlueTableInfo>(RefreshTableInfo(context));
-		}
-		latest_info = entry->table_info;
-	}
-	auto format = latest_info->GetFormat();
+	// only Hive (Glue native) tables can be read
+	auto format = table_info.GetFormat();
 	switch (format.format) {
 	case GlueFormat::HIVE:
-		if (latest_info->IsPartitionProjected()) {
+		if (table_info.IsPartitionProjected()) {
 			// Athena derives the partitions from the projection.* parameters and ignores the registered ones, which
 			// such a table usually has none of: reading the registered partitions would silently return no or wrong
 			// rows
@@ -254,13 +226,13 @@ TableFunction GlueTable::GetScanFunction(ClientContext &context, unique_ptr<Func
 			                              "projection.* parameters and ignores the ones registered in Glue, so a scan "
 			                              "of the registered ones would read no rows or the wrong ones. Set "
 			                              "projection.enabled to false and register the partitions to read it",
-			                              latest_info->schema_name, latest_info->name);
+			                              table_info.schema_name, table_info.name);
 		}
-		return GetHiveScanFunction(context, bind_data, *latest_info);
+		return GetHiveScanFunction(context, bind_data, table_info);
 	default:
 		throw NotImplementedException("Glue table '%s.%s' has table format %s, which can not be read yet; use "
 		                              "glue_get_table_response() to inspect its definition",
-		                              latest_info->schema_name, latest_info->name, format.Describe(*latest_info));
+		                              table_info.schema_name, table_info.name, format.Describe(table_info));
 	}
 }
 

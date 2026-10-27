@@ -299,6 +299,13 @@ type than the table declares (a type the optimizer pushed into the scan), and `H
 Parquet table with a `binary` column, whose string columns are decoded file by file. Both only work when the caller
 and this extension are linked into the same binary.
 
+`EXPLAIN (SQL)` renders a Hive scan as these reads, so the SQL it prints reads the scan's files without this extension
+(and `SET debug_verify_statement = 'explain_sql_strict'` runs a query as that SQL). The scan lists its files for it:
+a partition the filters pruned is not read, a filter the partition values decided is restated over the reads, and a
+scan without files is a relation without rows. A scan no reader call can read (a Parquet table with a `binary`
+column, or one whose query reads `$path`, `$file_size`, `$file_modified_time` or another virtual column) is rendered
+as the Glue table it reads, by name; a `hive_scan()` call then cannot be rendered.
+
 ## Partitions
 
 DuckDB has no `ALTER TABLE ... PARTITION` syntax, so the Hive partition statements are table functions. The

@@ -2,6 +2,7 @@
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/multi_file/multi_file_data.hpp"
@@ -30,6 +31,7 @@
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/catalog/catalog_entry/table_function_catalog_entry.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/main/database.hpp"
@@ -39,8 +41,16 @@
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/expression/constant_expression.hpp"
 #include "duckdb/parser/expression/function_expression.hpp"
+#include "duckdb/parser/query_node/select_node.hpp"
+#include "duckdb/parser/query_node/set_operation_node.hpp"
+#include "duckdb/parser/statement/select_statement.hpp"
+#include "duckdb/parser/tableref/basetableref.hpp"
+#include "duckdb/parser/tableref/emptytableref.hpp"
+#include "duckdb/parser/tableref/subqueryref.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/planner/bound_expression_sql_exporter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/sql_export_helpers.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
 
@@ -707,6 +717,8 @@ static string ReaderFunctionName(HiveFileFormat format) {
 	throw InternalException("Unknown Hive file format");
 }
 
+static TableFunctionToSQLResult HiveScanToSQL(ClientContext &context, const LogicalGet &get);
+
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
                            unique_ptr<FunctionData> &bind_data) {
 	// the reader for the file format; the data columns (everything but the partition keys) are what the files hold
@@ -788,6 +800,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	// and the row count comes from a sampled file rather than the format's constant
 	scan_function.cardinality = HiveScanCardinality;
 	scan_function.get_table_entry = HiveScanGetTableEntry;
+	// EXPLAIN (SQL) shows the scan as the standard reader calls that read its files
+	scan_function.to_sql = HiveScanToSQL;
 	scan_info->format_virtual_columns = scan_function.get_virtual_columns;
 	scan_function.get_virtual_columns = HiveScanGetVirtualColumns;
 	if (IsTextFileFormat(scan_info->file_format)) {
@@ -997,6 +1011,37 @@ static void AddPruningFiltersToExtraInfo(ExtraOperatorInfo &extra_info, const ve
 	}
 }
 
+//! Keep a filter the pruning took out of the plan for a SQL export of the scan, over the scan's columns
+//! (ExtraOperatorInfo::FILE_FILTER_TABLE_INDEX), as DuckDB's own hive partitioning does
+static void RetainFileFilter(MultiFilePushdownInfo &pushdown_info, unique_ptr<Expression> filter) {
+	auto &retained = pushdown_info.extra_info.file_filter_expressions;
+	if (!retained) {
+		return;
+	}
+	bool representable = true;
+	ExpressionIterator::VisitExpressionMutable<BoundColumnRefExpression>(
+	    filter, [&](BoundColumnRefExpression &column, unique_ptr<Expression> &) {
+		    auto binding = column.Binding();
+		    if (column.Depth() != 0 || binding.table_index != pushdown_info.table_index ||
+		        binding.column_index.GetIndex() >= pushdown_info.column_indexes.size()) {
+			    representable = false;
+			    return;
+		    }
+		    auto &index = pushdown_info.column_indexes[binding.column_index.GetIndex()];
+		    if (index.IsVirtualColumn() || index.IsPushdownExtract() || index.HasType()) {
+			    representable = false;
+			    return;
+		    }
+		    column.BindingMutable() = ColumnBinding(TableIndex(ExtraOperatorInfo::FILE_FILTER_TABLE_INDEX),
+		                                            ProjectionIndex(index.GetPrimaryIndex()));
+	    });
+	if (!representable) {
+		retained.reset();
+		return;
+	}
+	retained->push_back(std::move(filter));
+}
+
 unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientContext &context, MultiFileList &files,
                                                                      const MultiFileOptions &options,
                                                                      MultiFilePushdownInfo &pushdown_info,
@@ -1022,10 +1067,15 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters, decided_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);
+	if (!pushdown_info.extra_info.total_files.IsValid()) {
+		pushdown_info.extra_info.file_filter_expressions = vector<unique_ptr<Expression>>();
+	}
 	vector<unique_ptr<Expression>> remaining_filters;
 	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
 		if (decided_filters.find(filter_index) == decided_filters.end()) {
 			remaining_filters.push_back(std::move(filters[filter_index]));
+		} else {
+			RetainFileFilter(pushdown_info, std::move(filters[filter_index]));
 		}
 	}
 	filters = std::move(remaining_filters);
@@ -1463,6 +1513,145 @@ optional<vector<unique_ptr<ParsedExpression>>> HiveScanGetFilePartitionValues(co
 		return nullopt;
 	}
 	return std::move(values);
+}
+
+//! A constant spelled as the SQL export spells one, with its type
+static unique_ptr<ParsedExpression> ExportedConstant(const Value &value) {
+	auto exported = BoundExpressionSQLExporter::Export(BoundConstantExpression(value), {});
+	if (exported.HasError()) {
+		return nullptr;
+	}
+	return std::move(exported.GetValue());
+}
+
+//! The reader call over 'files', its named parameters in name order
+static unique_ptr<TableRef> ReaderCallRef(const HiveReaderCall &call, const vector<string> &files) {
+	vector<Value> file_values;
+	for (auto &file : files) {
+		file_values.emplace_back(file);
+	}
+	vector<unique_ptr<ParsedExpression>> arguments;
+	auto file_list = ExportedConstant(Value::LIST(LogicalType::VARCHAR, std::move(file_values)));
+	if (!file_list) {
+		return nullptr;
+	}
+	arguments.push_back(std::move(file_list));
+	vector<Identifier> names;
+	for (auto &parameter : call.parameters) {
+		names.push_back(parameter.first);
+	}
+	std::sort(names.begin(), names.end(), [](const Identifier &left, const Identifier &right) {
+		return left.GetIdentifierName() < right.GetIdentifierName();
+	});
+	for (auto &name : names) {
+		auto value = ExportedConstant(call.parameters.find(name)->second);
+		if (!value) {
+			return nullptr;
+		}
+		arguments.push_back(make_uniq<ComparisonExpression>(ExpressionType::COMPARE_EQUAL,
+		                                                    make_uniq<ColumnRefExpression>(name), std::move(value)));
+	}
+	auto function = make_uniq<TableFunctionRef>();
+	function->function = SQLExportHelpers::SystemFunction(Identifier(call.function), std::move(arguments));
+	return std::move(function);
+}
+
+//! A scan without reader calls: a Glue table is read by name, as an export without to_sql reads it
+static TableFunctionToSQLResult ReadTableByName(const LogicalGet &get, string reason) {
+	auto table = get.GetTable();
+	if (!table) {
+		return {nullptr, std::move(reason)};
+	}
+	auto reference = make_uniq<BaseTableRef>();
+	reference->SetQualifiedName(table->schema.GetQualifiedName(table->name));
+	return {std::move(reference), {}};
+}
+
+//! The scan as the reader calls that read its files, one per partition, UNION ALLed, each selecting every column of the
+//! scan in order (a partition key as the partition's value). Without files, a relation of the columns with no rows.
+static TableFunctionToSQLResult HiveScanToSQL(ClientContext &, const LogicalGet &get) {
+	auto info = BoundHiveScanInfo(get);
+	if (!info) {
+		return {nullptr, "hive_scan"};
+	}
+	for (auto &index : get.GetColumnIds()) {
+		if (index.IsVirtualColumn() && !index.IsEmptyColumn()) {
+			return ReadTableByName(get, "virtual_column");
+		}
+	}
+	auto call = HiveScanGetReaderCall(get);
+	if (!call) {
+		return ReadTableByName(get, "reader_call");
+	}
+	auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
+	// the files of each partition, the partitions in the order the scan lists them
+	vector<vector<string>> partition_files;
+	unordered_map<idx_t, idx_t> read_of_partition;
+	for (auto &file : bind_data.file_list->GetAllFiles()) {
+		idx_t read = 0;
+		if (!info->partition_keys.empty()) {
+			auto partition_index = info->FindPartitionIndexOfFile(file.path);
+			if (!partition_index.IsValid()) {
+				return ReadTableByName(get, "partition_values");
+			}
+			read = read_of_partition.emplace(partition_index.GetIndex(), partition_files.size()).first->second;
+		}
+		if (read == partition_files.size()) {
+			partition_files.emplace_back();
+		}
+		partition_files[read].push_back(file.path);
+	}
+	vector<unique_ptr<QueryNode>> reads;
+	for (auto &files : partition_files) {
+		optional<vector<unique_ptr<ParsedExpression>>> partition_values;
+		if (!info->partition_keys.empty()) {
+			partition_values = HiveScanGetFilePartitionValues(get, files[0]);
+			if (!partition_values) {
+				return ReadTableByName(get, "partition_values");
+			}
+		}
+		auto read = make_uniq<SelectNode>();
+		idx_t data_column = 0;
+		for (auto &name : bind_data.names) {
+			auto key_index = info->GetPartitionKeyIndex(name.GetIdentifierName());
+			if (key_index == DConstants::INVALID_INDEX) {
+				D_ASSERT(data_column < call->columns.size());
+				read->select_list.push_back(call->columns[data_column++]->Copy());
+			} else {
+				read->select_list.push_back(std::move((*partition_values)[key_index]));
+			}
+		}
+		read->from_table = ReaderCallRef(*call, files);
+		if (!read->from_table) {
+			return ReadTableByName(get, "reader_parameter");
+		}
+		reads.push_back(std::move(read));
+	}
+	if (reads.empty()) {
+		auto empty = make_uniq<SelectNode>();
+		for (idx_t i = 0; i < bind_data.names.size() && i < bind_data.types.size(); i++) {
+			auto column = ExportedConstant(Value(bind_data.types[i]));
+			if (!column) {
+				return ReadTableByName(get, "column_type");
+			}
+			column->SetAlias(bind_data.names[i]);
+			empty->select_list.push_back(std::move(column));
+		}
+		empty->from_table = make_uniq<EmptyTableRef>();
+		empty->where_clause = ConstantExpression::FromValue(Value::BOOLEAN(false));
+		reads.push_back(std::move(empty));
+	}
+	auto statement = make_uniq<SelectStatement>();
+	if (reads.size() == 1) {
+		statement->node = std::move(reads[0]);
+	} else {
+		auto union_all = make_uniq<SetOperationNode>();
+		union_all->setop_type = SetOperationType::UNION;
+		union_all->setop_all = true;
+		union_all->children = std::move(reads);
+		statement->node = std::move(union_all);
+	}
+	return {make_uniq<SubqueryRef>(std::move(statement)), {}};
 }
 
 } // namespace duckdb

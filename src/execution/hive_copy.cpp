@@ -10,6 +10,7 @@
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/timestamp.hpp"
 
 namespace duckdb {
 
@@ -60,6 +61,8 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 			write->table_name = table_info.name;
 			write->location = location;
 			write->staging_root = staging_root;
+			write->file_prefix = file_prefix;
+			write->started_ms = NumericCast<int64_t>(Timestamp::GetEpochMs(Timestamp::GetCurrentTimestamp()));
 			if (info) {
 				// CREATE TABLE AS: the table is created when the statement commits
 				auto &create_schema = *schema.get_mutable();

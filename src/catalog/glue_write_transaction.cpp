@@ -98,6 +98,39 @@ static void PublishStagedFiles(FileSystem &fs, GlueTableWrite &write) {
 	}
 }
 
+//! The time in milliseconds a UUIDv7 file name '<prefix>-<uuid>.<extension>' was created, -1 if it is not one
+static int64_t UUIDv7Time(const string &name, const string &prefix) {
+	if (!StringUtil::StartsWith(name, prefix + "-")) {
+		return -1;
+	}
+	auto uuid = name.substr(prefix.size() + 1);
+	if (uuid.size() < 36 || uuid[8] != '-' || uuid[14] != '7') {
+		return -1;
+	}
+	auto hex = uuid.substr(0, 8) + uuid.substr(9, 4);
+	return NumericCast<int64_t>(std::stoull(hex, nullptr, 16));
+}
+
+//! The files an execution that did not complete wrote below its location (or staging directory): the copy only
+//! reports its files when it finishes
+static vector<string> FindWrittenFiles(FileSystem &fs, const GlueTableWrite &write) {
+	vector<string> result;
+	auto root = write.staging_root.empty() ? write.location : write.staging_root;
+	auto listing = fs.GlobFileList(root + "/**", FileGlobOptions::ALLOW_EMPTY);
+	for (auto &file : listing->Files()) {
+		if (!write.staging_root.empty()) {
+			result.push_back(file.path);
+			continue;
+		}
+		auto time = UUIDv7Time(StringUtil::GetFileName(file.path), write.file_prefix);
+		// a second of slack for the clock
+		if (time >= write.started_ms - 1000) {
+			result.push_back(file.path);
+		}
+	}
+	return result;
+}
+
 static void RemoveFilesBestEffort(FileSystem &fs, const vector<string> &files) {
 	if (files.empty()) {
 		return;
@@ -206,6 +239,13 @@ ErrorData GlueWriteTransaction::RollbackInternal(ClientContext &context, GlueCat
 			result.Merge(ErrorData(ex));
 		}
 		vector<string> files = write.files;
+		if (!write.complete) {
+			try {
+				files = FindWrittenFiles(fs, write);
+			} catch (std::exception &ex) {
+				result.Merge(ErrorData(ex));
+			}
+		}
 		files.insert(files.end(), write.published_files.begin(), write.published_files.end());
 		try {
 			RemoveFilesBestEffort(fs, files);

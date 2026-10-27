@@ -428,14 +428,16 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	                                     overwrite_location, staging_root)
 	                 .Cast<GlueHiveCopy>();
 	copy.table_catalog = &insert.catalog;
+	copy.file_prefix = UUID::ToString(UUID::GenerateRandomUUID()).substr(0, 8);
 	auto write_root = staging_root.empty() ? location : staging_root;
 	// as the COPY binder does: without it every chunk becomes a batch of its own (a 2048-row parquet row group)
 	if (copy.function.desired_batch_size) {
 		copy.batch_size = copy.function.desired_batch_size(context, *copy.bind_data);
 	}
 	copy.use_tmp_file = false;
-	// files of earlier inserts are kept, so every file needs a unique name
-	copy.filename_pattern.SetFilenamePattern("{uuid}");
+	// files of earlier inserts are kept, so every file needs a unique name. The prefix and the time in a UUIDv7 tell
+	// the files of a failed execution apart, so that its rollback finds them without the copy's file list
+	copy.filename_pattern.SetFilenamePattern(copy.file_prefix + "-{uuidv7}");
 	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
 		copy.file_path = write_root;

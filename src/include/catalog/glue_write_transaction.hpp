@@ -26,8 +26,12 @@ struct GlueTableWrite {
 	unique_ptr<GlueTableInfo> create_table;
 	//! CREATE TABLE AS with overwrite: the data files at the location before the statement, deleted at commit
 	vector<string> replaced_files;
-	//! the files the statement wrote, as written (below 'staging_root' when staged)
+	//! the files the statement wrote, as written (below 'staging_root' when staged); only known once it completes
 	vector<string> files;
+	//! the start of every file name the statement writes, followed by a UUIDv7, and when it started: an
+	//! incomplete write is rolled back by deleting the files below the location with that prefix and a later time
+	string file_prefix;
+	int64_t started_ms = 0;
 	//! the partitions to register at commit, at their final locations
 	vector<GluePartitionInput> partitions;
 	//! whether the statement completed; an incomplete write is only rolled back

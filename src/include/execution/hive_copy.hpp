@@ -26,8 +26,10 @@ public:
 	//! The write of the current execution in the transaction's write set
 	GlueTableWrite &CurrentWrite() const;
 
-	//! INSERT: the catalog of the table
+	//! The catalog of the table
 	optional_ptr<Catalog> table_catalog;
+	//! The start of the name of every file this plan writes
+	string file_prefix;
 
 private:
 	optional_ptr<GlueSchemaEntry> schema;

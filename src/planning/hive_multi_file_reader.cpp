@@ -696,6 +696,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		// A table without a binary column has the reader read such a column as text (it verifies the UTF-8); with a
 		// binary column the reader keeps the bytes, and InitializeReader decodes the ones Glue declares string
 		param_map["binary_as_string"] = Value::BOOLEAN(!HasBinaryColumn(*scan_info));
+		// writers leave NaN out of a float column's min/max, so without a nan_count the bounds do not cover NaN
+		param_map["can_have_nan"] = Value::BOOLEAN(true);
 		break;
 	case HiveFileFormat::CSV:
 		// Hive CSV files carry no schema: the columns are given, by position, and the dialect is the one the table

@@ -13,10 +13,9 @@ class GlueCatalog;
 struct GlueViewNames {
 	//! CREATE VIEW: qualify bare table names with their database; a table of another catalog, named with its catalog,
 	//! goes to its Glue catalog id or "external:<type>:<alias>". Throws for catalog-qualified columns, table functions,
-	//! a bare name outside the view's catalog, another region or endpoint, no reported id, and in-memory catalogs.
-	//! DEFER_BINDING: a missing bare name goes to the view's database
+	//! a bare name outside the view's catalog, another region or endpoint, no reported id, and in-memory catalogs
 	static void QualifyForStorage(ClientContext &context, GlueCatalog &view_catalog, const Identifier &view_schema,
-	                              QueryNode &query, bool defer_binding);
+	                              QueryNode &query);
 	//! the catalog ids the stored body names tables by
 	static identifier_set_t ReferencedCatalogIds(QueryNode &query);
 	//! id -> alias, for the given ids: an attached Glue catalog in the view's region and endpoint, or an attached

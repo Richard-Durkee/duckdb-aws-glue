@@ -40,6 +40,8 @@ A parquet `BYTE_ARRAY` column without a `STRING` annotation (as Impala and older
 UTF-8 text when Glue declares the column `string` (bytes that are not UTF-8 are an error), and as bytes when it
 declares it `binary`, whatever the session's `binary_as_string`. In a table that declares a `binary` column (or field),
 such bytes inside an `array`, `struct` or `map` column keep the escaped form the reader gives a BLOB.
+A `float` or `double` column may hold NaN wherever the file does not count its NaN values (`nan_count`, which most
+writers leave out): such a column's min/max never skip a row group for a filter that NaN could match.
 Text tables are read the way their SerDe reads them:
 
 - LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
@@ -51,7 +53,8 @@ Text tables are read the way their SerDe reads them:
   does not support null_padding in conjunction with quoted new lines`); with more files DuckDB reads one thread per
   file and the field is read as one value, as CSV defines it. `SET hive_csv_parallel = false` reads one thread per
   file in every scan. Hive and Athena v3 split the record at the line break first (TextInputFormat) and return two
-  broken rows, a difference this extension does not reproduce.
+  broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
+  case and false otherwise.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
   NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
@@ -162,7 +165,10 @@ their codec themselves.
   BatchCreatePartition. New partitions get `<key>=<value>` directories; rows of an existing partition are written to
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
   into a partition whose location is not below the table location fails; the rows of other partitions can still be
-  inserted. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
+  inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
+  still refuses a partition, the write is rolled back by deleting the files it wrote (the partitions it registered
+  stay, empty), so the statement can be run again without adding its
+  rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
   (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
@@ -226,10 +232,11 @@ this connection's cache: a write through it, a rollback, or DETACH.
 
 ## Views
 
-- `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...`, `CREATE SECURE VIEW` and
-  `CREATE VIEW ... WITH (DEFER_BINDING)` create a Glue view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB.
-  `OR REPLACE` updates it in place. Unqualified table names in the SELECT refer to the view's own database. The view's
-  columns store their DuckDB types (e.g. `HUGEINT`, `INTEGER`), not Glue types.
+- `CREATE [OR REPLACE] VIEW [IF NOT EXISTS] db.v [(col, ...)] AS SELECT ...` and `CREATE SECURE VIEW` create a Glue
+  view (a table of type `VIRTUAL_VIEW`) marked as written by DuckDB. `OR REPLACE` updates it in place. Unqualified table
+  names in the SELECT refer to the view's own database. The view's columns store their DuckDB types (e.g. `HUGEINT`,
+  `INTEGER`), not Glue types.
+- `CREATE VIEW ... WITH (DEFER_BINDING)` is not supported yet: the tables a view reads must exist when it is created.
 - A column in the SELECT can not start with the name of another catalog the view reads (`cat.db.t.col`,
   `* EXCLUDE (cat.db.t.col)`), or with its own catalog's name as a row reference (`cat.t`), even when that name is a
   table, alias or column: use a table alias with another name.
@@ -398,7 +405,9 @@ A config creates the S3 secret (`on_init`) and sets `GLUE_CATALOG_ID`, `GLUE_END
 which the tests use in their ATTACH; tests are skipped without a config (`require-env GLUE_CATALOG_ID`). Tests under
 `test/sql/cloud/` read tables of the live account that the tests do not create and only run with the cloud config.
 The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` in front of moto, which answers
-GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it.
+GetTables on a database named `fault_*` with a Glue error; tests that need it are skipped without it. It also sets
+`GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
+`link_db` as Glue does through a database resource link whose target is `target_db`.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)
@@ -486,9 +495,9 @@ TPC-H and TPC-DS benchmarks on native tables, the reference for these, run with
 
 `.github/workflows/Regression.yml` builds the benchmark runner for a PR and for its merge base once, then compares
 their timings (5 runs each) in two jobs of about three minutes, so it runs only a few join-heavy TPC-H and TPC-DS
-queries. The parquet job runs `benchmark/*.benchmark`, `benchmark/pushdown/`, the parquet benchmarks of
+queries. The parquet job runs `benchmark/*.benchmark`, the parquet benchmarks of `benchmark/pushdown/` and
 `benchmark/optimizer/` and TPC-DS q64 at SF1. The csv/json job runs the csv and json benchmarks of
-`benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
+`benchmark/pushdown/` and `benchmark/optimizer/`, TPC-H q09, q18 and q21 at SF0.1 and TPC-DS q14, q64, q72 and q78 at SF0.01 on csv tables. The
 other queries and the json and avro TPC benchmarks only run locally.
 
 ## Building

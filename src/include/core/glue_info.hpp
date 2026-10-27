@@ -179,6 +179,7 @@ struct GluePartitionInfo {
 
 //! A partition as GetPartition returns it: also its storage descriptor and parameters
 struct GluePartitionDetails : public GluePartitionInfo {
+	string input_format;
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
 	vector<GlueColumn> columns;

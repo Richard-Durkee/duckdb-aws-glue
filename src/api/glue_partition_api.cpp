@@ -101,6 +101,7 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	}
 	auto &storage_descriptor = partition.GetStorageDescriptor();
 	result.location = ToStdString(storage_descriptor.GetLocation());
+	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
 	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	result.columns = ToColumns(storage_descriptor.GetColumns());
@@ -253,6 +254,7 @@ static void ReadPartition(const Aws::Glue::Model::Partition &partition, GluePart
 static void ReadPartition(const Aws::Glue::Model::Partition &partition, GluePartitionDetails &result) {
 	ReadPartition(partition, static_cast<GluePartitionInfo &>(result));
 	auto &storage_descriptor = partition.GetStorageDescriptor();
+	result.input_format = ToStdString(storage_descriptor.GetInputFormat());
 	result.serde_library = ToStdString(storage_descriptor.GetSerdeInfo().GetSerializationLibrary());
 	result.serde_parameters = ToStdMap(storage_descriptor.GetSerdeInfo().GetParameters());
 	result.columns = ToColumns(storage_descriptor.GetColumns());

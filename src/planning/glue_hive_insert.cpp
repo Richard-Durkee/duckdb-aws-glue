@@ -29,6 +29,7 @@
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "core/glue_format.hpp"
 #include "core/glue_types.hpp"
 #include "execution/hive_copy.hpp"
 
@@ -151,11 +152,50 @@ static optional_idx FindPartitionSchemaMismatch(const vector<GlueColumn> &table_
 	return optional_idx();
 }
 
+//! How an existing partition is stored when its own InputFormat, SerDe or SerDe properties write files differently
+//! from the table's ("csv", "csv with another dialect", ...); empty when the copy writes its files as it stores them
+static string FindPartitionStorageMismatch(const GlueTableInfo &table_info, const GluePartitionDetails &partition) {
+	if (partition.input_format.empty() && partition.serde_library.empty()) {
+		return string();
+	}
+	auto partition_storage = table_info;
+	if (!partition.input_format.empty()) {
+		partition_storage.input_format = partition.input_format;
+	}
+	if (!partition.serde_library.empty()) {
+		partition_storage.serde_library = partition.serde_library;
+		partition_storage.serde_parameters = partition.serde_parameters;
+	}
+	auto file_format = table_info.GetFileFormat();
+	auto format = GlueTableFormat::Detect(partition_storage);
+	if (!format.IsHive()) {
+		return format.Describe(partition_storage);
+	}
+	try {
+		auto partition_format = partition_storage.GetFileFormat();
+		if (partition_format != file_format || !format.IsWritable(partition_storage, file_format)) {
+			return HiveFileFormatToString(partition_format);
+		}
+		if (file_format == HiveFileFormat::CSV &&
+		    (partition_storage.GetSerDe() != table_info.GetSerDe() ||
+		     partition_storage.GetFieldDelimiter() != table_info.GetFieldDelimiter() ||
+		     partition_storage.GetQuoteCharacter() != table_info.GetQuoteCharacter() ||
+		     partition_storage.GetEscapeCharacter() != table_info.GetEscapeCharacter() ||
+		     partition_storage.GetNullFormat() != table_info.GetNullFormat() ||
+		     partition_storage.GetHeaderLineCount() != table_info.GetHeaderLineCount())) {
+			return "csv with another dialect";
+		}
+	} catch (NotImplementedException &) {
+		return "an unsupported format";
+	}
+	return string();
+}
+
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
-//! at other locations, which are written to their own location, and the existing partitions whose column types differ
-//! from the table's, which a row may not be written to: files of the table's types in them would not match what the
-//! partition declares. 'partition_directories' receives the directories of the partitions at other locations with
-//! their Glue values.
+//! at other locations, which are written to their own location, and the existing partitions whose column types or
+//! storage differ from the table's, which a row may not be written to: files written as the table's would not match
+//! what the partition declares. 'partition_directories' receives the directories of the partitions at other locations
+//! with their Glue values.
 static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, optional_ptr<GlueTable> existing_table,
                                                   const GlueTableInfo &table_info, const string &location,
                                                   const vector<Identifier> &names, const vector<LogicalType> &types,
@@ -206,8 +246,9 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			    make_uniq<BoundConstantExpression>(std::move(value))));
 		}
 		auto mismatch = FindPartitionSchemaMismatch(table_info.columns, partition.columns);
+		auto stored_as = mismatch.IsValid() ? string() : FindPartitionStorageMismatch(table_info, partition);
 		auto relative_path = RelativePartitionPath(location, partition.location);
-		if (!mismatch.IsValid() && relative_path == hive_directory) {
+		if (!mismatch.IsValid() && stored_as.empty() && relative_path == hive_directory) {
 			continue;
 		}
 		BoundCaseCheck check;
@@ -218,15 +259,26 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 			conjunction->GetChildrenMutable() = std::move(conditions);
 			check.when_expr = std::move(conjunction);
 		}
-		if (mismatch.IsValid()) {
-			auto &table_column = table_info.columns[mismatch.GetIndex()];
-			auto &partition_column = partition.columns[mismatch.GetIndex()];
-			auto message = StringUtil::Format(
-			    "Writing to Hive table '%s.%s' failed: partition [%s] declares column '%s' as '%s', but the table "
-			    "declares column '%s' as '%s'. The table schema changed after the partition was created, and "
-			    "inserting into a partition whose column types differ from the table's is not supported",
-			    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
-			    partition_column.name, partition_column.type, table_column.name, table_column.type);
+		if (mismatch.IsValid() || !stored_as.empty()) {
+			string message;
+			if (mismatch.IsValid()) {
+				auto &table_column = table_info.columns[mismatch.GetIndex()];
+				auto &partition_column = partition.columns[mismatch.GetIndex()];
+				message = StringUtil::Format(
+				    "Writing to Hive table '%s.%s' failed: partition [%s] declares column '%s' as '%s', but the table "
+				    "declares column '%s' as '%s'. The table schema changed after the partition was created, and "
+				    "inserting into a partition whose column types differ from the table's is not supported",
+				    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "),
+				    partition_column.name, partition_column.type, table_column.name, table_column.type);
+			} else {
+				message = StringUtil::Format(
+				    "Writing to Hive table '%s.%s' failed: partition [%s] is stored as %s (InputFormat '%s', SerDe "
+				    "'%s'), but the table as %s. Inserting into a partition stored in another format than the "
+				    "table's is not supported",
+				    table_info.schema_name, table_info.name, StringUtil::Join(partition.values, ", "), stored_as,
+				    partition.input_format, partition.serde_library,
+				    HiveFileFormatToString(table_info.GetFileFormat()));
+			}
 			ErrorData error;
 			vector<unique_ptr<Expression>> error_children;
 			error_children.push_back(make_uniq<BoundConstantExpression>(Value(message)));

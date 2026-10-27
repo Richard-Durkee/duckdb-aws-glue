@@ -1,0 +1,68 @@
+# name: test/sql/hive/dml/insert/insert_partition_storage_mismatch.test
+# description: INSERT refuses the existing partitions stored in another format or csv dialect than their table, and
+#              writes to those stored like it
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# fixture_insert_partition_formats (scripts/docker-compose.yml) is a parquet table with a partition of its storage, one
+# with the older parquet classes and a SerDe property, one without a storage format, a csv partition and a Hudi one
+statement error
+INSERT INTO my_datalake.default.fixture_insert_partition_formats VALUES (1, 'a', 'text');
+----
+partition [text] is stored as csv (InputFormat 'org.apache.hadoop.mapred.TextInputFormat', SerDe 'org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe'), but the table as parquet
+
+statement error
+INSERT INTO my_datalake.default.fixture_insert_partition_formats VALUES (1, 'a', 'hudi');
+----
+<REGEX>:.*partition \[hudi\] is stored as HUDI.*
+
+query I
+SELECT count(*) FROM glob('s3://glue-test/warehouse/fixture/fixture_insert_partition_formats/dt=text/*');
+----
+0
+
+# rows for a partition stored like the table are refused with them
+statement error
+INSERT INTO my_datalake.default.fixture_insert_partition_formats VALUES (2, 'b', 'parquet'), (3, 'c', 'text');
+----
+partition [text] is stored as csv
+
+# the partitions that store files as the table does are written to
+statement ok
+INSERT INTO my_datalake.default.fixture_insert_partition_formats VALUES (4, 'd', 'parquet'), (5, 'e', 'parquet_alias'), (6, 'f', 'bare'), (7, 'g', 'new');
+
+query IT
+SELECT DISTINCT id, dt FROM my_datalake.default.fixture_insert_partition_formats WHERE id >= 4 ORDER BY id;
+----
+4	parquet
+5	parquet_alias
+6	bare
+7	new
+
+# fixture_insert_partition_dialects is a csv table (',') with a partition of its dialect and one delimited by '|'
+statement error
+INSERT INTO my_datalake.default.fixture_insert_partition_dialects VALUES (1, 'a', 'pipe');
+----
+partition [pipe] is stored as csv with another dialect
+
+statement ok
+INSERT INTO my_datalake.default.fixture_insert_partition_dialects VALUES (2, 'b', 'comma');
+
+query IT
+SELECT DISTINCT id, dt FROM my_datalake.default.fixture_insert_partition_dialects WHERE dt = 'comma' ORDER BY id;
+----
+2	comma

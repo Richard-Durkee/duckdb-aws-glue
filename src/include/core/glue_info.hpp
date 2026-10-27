@@ -90,8 +90,8 @@ struct GlueTableInfo {
 	//! StorageDescriptor.SortColumns, in Glue's order; only name and sort_order are set
 	vector<GlueColumn> sort_columns;
 	unordered_map<string, string> parameters;
-	//! Glue's VersionId and CreateTime of a fetched table; a DROP + CREATE starts at version 1 again, CreateTime
-	//! tells the two apart. Empty for a definition not fetched from Glue.
+	//! Glue's VersionId and CreateTime of a fetched table; a DROP + CREATE starts at the same version again, CreateTime
+	//! (and TableType, within one second) tells the two apart. Empty for a definition not fetched from Glue.
 	string version_id;
 	int64_t create_time_ms = 0;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()

@@ -107,8 +107,13 @@ public:
 	//! there. When the scan lists the table root, the files of every partition the root's first page holds completely
 	//! instead (fetching more only until it holds one the scan reads), and the scan continues that listing.
 	vector<OpenFileInfo> ListSampleDirectory() const;
+	//! ListSampleDirectory without starting a prefetch
+	vector<OpenFileInfo> ListSampleDirectoryInternal() const;
 	vector<OpenFileInfo> GetDisplayFileList(optional_idx max_files = optional_idx()) const override;
 	unique_ptr<MultiFileList> Copy() const override;
+	//! List the partitions of this list in the background (hive_listing_prefetch), so that the scan finds the
+	//! listings done or under way when it starts. Once per list
+	void StartPrefetch() const;
 
 protected:
 	bool ExpandNextPath() const override;
@@ -169,6 +174,7 @@ private:
 	//! Registered partition location (without trailing '/') to its index in HiveScanInfo::Partitions()
 	mutable unordered_map<string, idx_t> partition_by_location;
 	mutable bool partition_locations_built = false;
+	mutable atomic<bool> prefetch_started {false};
 };
 
 //! Bind the reader for the file format (read_parquet, read_csv, read_json or read_avro) over the partitions of

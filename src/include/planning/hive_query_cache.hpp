@@ -5,6 +5,8 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/main/client_context_state.hpp"
 
+#include <condition_variable>
+
 #include "core/glue_info.hpp"
 
 namespace duckdb {
@@ -33,6 +35,16 @@ struct HiveDirectoryListingEntry {
 	shared_ptr<MultiFileList> listing DUCKDB_GUARDED_BY(lock);
 };
 
+//! A listing running in the background for a scan that has not started yet
+struct HiveListingPrefetch {
+	mutex lock;
+	std::condition_variable finished_cv;
+	bool finished = false;
+
+	void Finish();
+	void Wait();
+};
+
 //! What the running query learned about the tables it scans, dropped when the query ends: the partitions of a table
 //! (asked for once however often the query scans it), the recursive listings of directories (shared by the estimate and
 //! every scan listing the same directory) and the table samples
@@ -54,12 +66,15 @@ public:
 	                                              bool cache_in_connection = false);
 	//! The listing of 'glob' (a prefix listing of a range of partitions), fetched page by page as it is read
 	shared_ptr<MultiFileList> GetGlobListing(ClientContext &context, const string &glob);
+	//! A background listing the query waits for when it ends
+	void AddPrefetch(shared_ptr<HiveListingPrefetch> prefetch);
 
 private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
+	vector<shared_ptr<HiveListingPrefetch>> prefetches DUCKDB_GUARDED_BY(lock);
 };
 
 //! The partitions Glue registers for the table of 'info' in this query, fetched once for every scan of the table

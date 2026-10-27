@@ -157,6 +157,10 @@ private:
 };
 } // namespace
 
+void SubmitListingTask(ClientContext &context, std::function<void()> task) {
+	HiveListingPool::Get(ListingThreads(context)).Submit(std::move(task));
+}
+
 void RunListingTasks(ClientContext &context, idx_t count, const std::function<void(idx_t)> &task) {
 	if (count == 0) {
 		return;

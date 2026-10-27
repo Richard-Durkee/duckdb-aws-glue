@@ -42,5 +42,7 @@ private:
 void RunListingTasks(ClientContext &context, idx_t count, const std::function<void(idx_t)> &task);
 //! hive_partition_listing_concurrency
 idx_t ListingConcurrency(ClientContext &context);
+//! Run 'task' in the background on the listing pool
+void SubmitListingTask(ClientContext &context, std::function<void()> task);
 
 } // namespace duckdb

@@ -205,6 +205,15 @@ static idx_t PartitionsListedTogether(ClientContext &context) {
 //! The keys S3 returns per ListObjectsV2 page
 static constexpr idx_t S3_KEYS_PER_LIST_PAGE = 1000;
 
+//! hive_listing_prefetch: 'all' (default), 'filtered' or 'off'
+static string PrefetchMode(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_listing_prefetch", setting) && !setting.IsNull()) {
+		return StringUtil::Lower(setting.ToString());
+	}
+	return "all";
+}
+
 //! hive_partition_range_listing
 static bool RangeListingEnabled(ClientContext &context) {
 	Value setting;
@@ -609,6 +618,15 @@ vector<OpenFileInfo> HiveMultiFileList::SamplePartition(idx_t partition_index) c
 }
 
 vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
+	auto files = ListSampleDirectoryInternal();
+	if (PrefetchMode(client_context) == "all") {
+		// planning goes on after the sample: list the rest meanwhile
+		StartPrefetch();
+	}
+	return files;
+}
+
+vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectoryInternal() const {
 	lock_guard<mutex> lck(lock);
 	if (!scan_info->partition_keys.empty() && MeasureKeysEnabled(client_context) && next_job == 0) {
 		// the sample is the first partition read, listed by itself: how many keys it holds sizes the listings
@@ -769,6 +787,26 @@ vector<OpenFileInfo> HiveMultiFileList::GetDisplayFileList(optional_idx max_file
 		result.emplace_back((*partitions)[partition_index].location);
 	}
 	return result;
+}
+
+void HiveMultiFileList::StartPrefetch() const {
+	if (scan_info->partition_keys.empty() || prefetch_started.exchange(true)) {
+		return;
+	}
+	// an independent list of the same partitions: its listings land in the query's cache, where the scan finds them
+	shared_ptr<MultiFileList> list = Copy();
+	auto prefetch = make_shared_ptr<HiveListingPrefetch>();
+	HiveQueryCache::Get(client_context)->AddPrefetch(prefetch);
+	SubmitListingTask(client_context, [list, prefetch]() {
+		try {
+			auto &hive_list = list->Cast<HiveMultiFileList>();
+			hive_list.ListSampleDirectoryInternal();
+			hive_list.GetTotalFileCount();
+		} catch (...) {
+			// the scan lists again and reports the error
+		}
+		prefetch->Finish();
+	});
 }
 
 unique_ptr<MultiFileList> HiveMultiFileList::Copy() const {
@@ -1252,7 +1290,11 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	if (kept.size() == candidates->size()) {
 		return nullptr;
 	}
-	return make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
+	auto result = make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));
+	if (PrefetchMode(context) != "off") {
+		result->StartPrefetch();
+	}
+	return std::move(result);
 }
 
 unique_ptr<MultiFileList> HiveMultiFileList::DynamicFilterPushdown(MultiFileDynamicPushdownInfo &info) const {

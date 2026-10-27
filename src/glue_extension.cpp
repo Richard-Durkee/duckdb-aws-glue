@@ -117,6 +117,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Size the listings of a partitioned table by the keys the sampled partition holds rather "
 	                          "than one per partition. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("hive_listing_prefetch",
+	                          "When to list a scan's partitions in the background before the scan starts: 'filtered' "
+	                          "once filters have pruned them, 'all' also after a scan without such filters is sampled "
+	                          "(a scan pruned later by a join then lists more than it reads), 'off' never. Default "
+	                          "'all'.",
+	                          LogicalType::VARCHAR, Value("all"));
 	config.AddExtensionOption("hive_listing_threads",
 	                          "How many threads the extension keeps for listings when hive_partition_listing_concurrency "
 	                          "is not 0. The threads are shared by every database of the process and only ever added. "

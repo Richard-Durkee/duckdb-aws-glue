@@ -73,7 +73,35 @@ string HiveQueryCache::TableKey(const string &catalog, const string &database, c
 	return catalog + "\x1f" + database + "\x1f" + table;
 }
 
+void HiveListingPrefetch::Finish() {
+	{
+		lock_guard<mutex> guard(lock);
+		finished = true;
+	}
+	finished_cv.notify_all();
+}
+
+void HiveListingPrefetch::Wait() {
+	std::unique_lock<mutex> guard(lock);
+	finished_cv.wait(guard, [&]() { return finished; });
+}
+
+void HiveQueryCache::AddPrefetch(shared_ptr<HiveListingPrefetch> prefetch) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	prefetches.push_back(std::move(prefetch));
+}
+
 void HiveQueryCache::QueryEnd(ClientContext &context) {
+	// a background listing uses the context and this cache: it must be done before the query is
+	vector<shared_ptr<HiveListingPrefetch>> running;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		running = std::move(prefetches);
+		prefetches.clear();
+	}
+	for (auto &prefetch : running) {
+		prefetch->Wait();
+	}
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	glue_tables.clear();
 	samples.clear();

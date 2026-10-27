@@ -113,7 +113,7 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 	return true;
 }
 
-void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {
+GlueCreateOutcome GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateTable");
 	if (table.location.empty()) {
@@ -203,12 +203,12 @@ void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, cons
 	auto outcome = client->CreateTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
-			throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table.name,
-			                       table.schema_name);
+			return GlueCreateOutcome::ALREADY_EXISTED;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateTable '%s.%s' (location '%s')", table.schema_name, table.name,
 		                                           table.location));
 	}
+	return GlueCreateOutcome::CREATED;
 }
 
 //! The parameters that mark a view as written by DuckDB
@@ -250,7 +250,7 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
                             const string &database_name, const string &table_name,
                             const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
 
-void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
+GlueCreateOutcome GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateView");
 	GlueHttpClientContextScope http_scope(context);
@@ -263,11 +263,11 @@ void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const Glu
 	auto outcome = client->CreateTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
-			throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view.name,
-			                       view.database_name);
+			return GlueCreateOutcome::ALREADY_EXISTED;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateView '%s.%s'", view.database_name, view.name));
 	}
+	return GlueCreateOutcome::CREATED;
 }
 
 void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {

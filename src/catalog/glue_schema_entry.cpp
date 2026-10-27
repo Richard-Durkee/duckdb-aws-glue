@@ -340,6 +340,38 @@ static void CheckEntryType(optional_ptr<CatalogEntry> existing, CatalogType expe
 	}
 }
 
+static optional_ptr<CatalogEntry> OnExistingTable(const CreateTableInfo &base, const string &database_name,
+                                                  const string &table_name) {
+	switch (base.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return nullptr;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table_name,
+		                       database_name);
+	default:
+		throw NotImplementedException(
+		    "CREATE OR REPLACE TABLE is not supported for Glue catalogs, use separate DROP and CREATE statements");
+	}
+}
+
+//! Whether CREATE VIEW goes on to replace the existing view: not for IF NOT EXISTS, an error for a plain CREATE
+static bool ReplacesExistingView(const CreateViewInfo &info, const GlueView &existing, const string &database_name,
+                                 const string &view_name) {
+	switch (info.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return false;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view_name,
+		                       database_name);
+	default:
+		if (!existing.IsDuckDBView()) {
+			throw CatalogException(
+			    "Glue view \"%s\" was not written by DuckDB; replace it from the engine that wrote it", view_name);
+		}
+		return true;
+	}
+}
+
 GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const CreateTableInfo &base) {
 	if (!base.constraints.empty()) {
 		throw NotImplementedException("Constraints are not supported when creating tables in a Glue catalog");
@@ -470,21 +502,21 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto existing = tables.GetEntry(context, lookup);
 	CheckEntryType(existing, CatalogType::TABLE_ENTRY, table_name, "create");
 	if (existing) {
-		switch (base.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return nullptr;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\"", table_name,
-			                       database_info.name);
-		default:
-			throw NotImplementedException(
-			    "CREATE OR REPLACE TABLE is not supported for Glue catalogs, use separate DROP and CREATE statements");
-		}
+		return OnExistingTable(base, database_info.name, table_name);
 	}
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
-	GlueAPI::CreateHiveTable(context, glue_catalog, table);
+	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
+		// another client created the table since the lookup above: take its entry
+		auto raced = tables.GetEntry(context, lookup);
+		if (!raced) {
+			throw CatalogException("Glue table \"%s.%s\" exists but could not be fetched", database_info.name,
+			                       table_name);
+		}
+		CheckEntryType(raced, CatalogType::TABLE_ENTRY, table_name, "create");
+		return OnExistingTable(base, database_info.name, table_name);
+	}
 
 	// re-fetch so the entry reflects what Glue stored
 	GlueTableInfo created;
@@ -513,20 +545,8 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	EntryLookupInfo lookup(CatalogType::VIEW_ENTRY, QualifiedName(Identifier(view_name)));
 	auto existing = tables.GetEntry(context, lookup);
 	CheckEntryType(existing, CatalogType::VIEW_ENTRY, view_name, "create");
-	if (existing) {
-		switch (info.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return existing;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("View with name \"%s\" already exists in Glue database \"%s\"", view_name,
-			                       database_info.name);
-		default:
-			if (!existing->Cast<GlueView>().IsDuckDBView()) {
-				throw CatalogException(
-				    "Glue view \"%s\" was not written by DuckDB; replace it from the engine that wrote it", view_name);
-			}
-			break;
-		}
+	if (existing && !ReplacesExistingView(info, existing->Cast<GlueView>(), database_info.name, view_name)) {
+		return existing;
 	}
 	if (info.binding_mode == CreateViewBindingMode::SKIP_BINDING) {
 		throw NotImplementedException("Glue views can not be created WITH (DEFER_BINDING) yet");
@@ -575,20 +595,33 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		column.type = info.types[i].ToString();
 		view.columns.push_back(std::move(column));
 	}
-	if (existing) {
-		GlueAPI::UpdateView(context, glue_catalog, view);
-	} else {
-		GlueAPI::CreateView(context, glue_catalog, view);
-	}
-
 	// re-fetch so the entry reflects what Glue stored
-	tables.RemoveEntry(view_name);
-	GlueTableInfo created;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, view_name, created)) {
-		throw CatalogException("Glue view \"%s.%s\" was created but could not be fetched afterwards",
-		                       database_info.name, view_name);
+	auto fetch_stored = [&]() {
+		tables.RemoveEntry(view_name);
+		GlueTableInfo stored;
+		if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, view_name, stored)) {
+			throw CatalogException("Glue view \"%s.%s\" was created but could not be fetched afterwards",
+			                       database_info.name, view_name);
+		}
+		return tables.CreateEntry(tables.CreateEntry(stored));
+	};
+	if (!existing) {
+		if (GlueAPI::CreateView(context, glue_catalog, view) == GlueCreateOutcome::CREATED) {
+			return fetch_stored();
+		}
+		// another client created the view since the lookup above: take its entry
+		existing = tables.GetEntry(context, lookup);
+		if (!existing) {
+			throw CatalogException("Glue view \"%s.%s\" exists but could not be fetched", database_info.name,
+			                       view_name);
+		}
+		CheckEntryType(existing, CatalogType::VIEW_ENTRY, view_name, "create");
+		if (!ReplacesExistingView(info, existing->Cast<GlueView>(), database_info.name, view_name)) {
+			return existing;
+		}
 	}
-	return tables.CreateEntry(tables.CreateEntry(created));
+	GlueAPI::UpdateView(context, glue_catalog, view);
+	return fetch_stored();
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateSequence(CatalogTransaction transaction, CreateSequenceInfo &info) {

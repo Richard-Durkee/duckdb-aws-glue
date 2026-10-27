@@ -101,6 +101,19 @@ GlueSchemaSet &GlueCatalog::GetSchemas() {
 	return schemas;
 }
 
+static optional_ptr<CatalogEntry> OnExistingSchema(const CreateSchemaInfo &info, const string &schema_name,
+                                                   const string &catalog_name) {
+	switch (info.on_conflict) {
+	case OnCreateConflict::IGNORE_ON_CONFLICT:
+		return nullptr;
+	case OnCreateConflict::ERROR_ON_CONFLICT:
+		throw CatalogException("Schema with name \"%s\" already exists in Glue catalog \"%s\"", schema_name,
+		                       catalog_name);
+	default:
+		throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported for Glue catalogs");
+	}
+}
+
 optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transaction, CreateSchemaInfo &info) {
 	auto &context = transaction.GetContext();
 	ThrowIfInExplicitTransaction(context);
@@ -108,15 +121,7 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 
 	auto existing = schemas.GetEntry(context, schema_name);
 	if (existing) {
-		switch (info.on_conflict) {
-		case OnCreateConflict::IGNORE_ON_CONFLICT:
-			return nullptr;
-		case OnCreateConflict::ERROR_ON_CONFLICT:
-			throw CatalogException("Schema with name \"%s\" already exists in Glue catalog \"%s\"", schema_name,
-			                       GetName().GetIdentifierName());
-		default:
-			throw NotImplementedException("CREATE OR REPLACE SCHEMA is not supported for Glue catalogs");
-		}
+		return OnExistingSchema(info, schema_name, GetName().GetIdentifierName());
 	}
 
 	GlueDatabaseInfo database;
@@ -125,7 +130,13 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 	for (auto &option : GlueSchemaEntry::EvaluateOptions(context, info.options, "CREATE SCHEMA")) {
 		SetDatabaseOption(database, option.first, option.second);
 	}
-	GlueAPI::CreateDatabase(context, *this, database);
+	if (GlueAPI::CreateDatabase(context, *this, database) == GlueCreateOutcome::ALREADY_EXISTED) {
+		// another client created the database since the lookup above: take its entry
+		if (!schemas.GetEntry(context, schema_name)) {
+			throw CatalogException("Glue database \"%s\" exists but could not be fetched", schema_name);
+		}
+		return OnExistingSchema(info, schema_name, GetName().GetIdentifierName());
+	}
 
 	// re-fetch so the cached entry reflects what Glue stored
 	GlueDatabaseInfo created;

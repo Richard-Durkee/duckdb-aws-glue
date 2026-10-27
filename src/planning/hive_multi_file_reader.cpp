@@ -132,6 +132,74 @@ const GluePartitionInfo &HiveScanInfo::GetPartitionOfFile(const string &path) co
 	return (*partitions)[partition_index];
 }
 
+static bool SameCSVDialect(const HiveCSVOptions &a, const HiveCSVOptions &b) {
+	return a.delimiter == b.delimiter && a.quote == b.quote && a.escape == b.escape && a.skip_lines == b.skip_lines &&
+	       a.null_string == b.null_string && a.serde_fields == b.serde_fields &&
+	       a.null_for_invalid_data == b.null_for_invalid_data && a.false_unless_true == b.false_unless_true;
+}
+
+string HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partition) const {
+	if (!table_definition) {
+		return string();
+	}
+	auto &table = *table_definition;
+	auto &input_format = partition.input_format.empty() ? table.input_format : partition.input_format;
+	auto &serde_library = partition.serde_library.empty() ? table.serde_library : partition.serde_library;
+	if (StringUtil::CIEquals(input_format, table.input_format) &&
+	    StringUtil::CIEquals(serde_library, table.serde_library) &&
+	    (partition.serde_library.empty() || partition.serde_parameters == table.serde_parameters)) {
+		return string();
+	}
+	auto partition_storage = table;
+	partition_storage.input_format = input_format;
+	partition_storage.serde_library = serde_library;
+	if (!partition.serde_library.empty()) {
+		partition_storage.serde_parameters = partition.serde_parameters;
+	}
+	string stored_as;
+	auto format = GlueTableFormat::Detect(partition_storage);
+	if (!format.IsHive()) {
+		stored_as = format.Describe(partition_storage);
+	} else {
+		try {
+			auto partition_format = partition_storage.GetFileFormat();
+			if (IsTextFileFormat(partition_format)) {
+				partition_storage.CheckTextSerdeSupported(partition_format);
+			}
+			if (partition_format != file_format) {
+				stored_as = HiveFileFormatToString(partition_format);
+			} else if (partition_format == HiveFileFormat::CSV &&
+			           !SameCSVDialect(partition_storage.GetCSVOptions(), csv_options)) {
+				stored_as = "csv with another dialect";
+			} else if (partition_format == HiveFileFormat::JSON &&
+			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {
+				stored_as = "json with other SerDe properties";
+			}
+		} catch (NotImplementedException &) {
+			stored_as = "an unsupported format";
+		}
+	}
+	if (stored_as.empty()) {
+		return string();
+	}
+	vector<string> spec;
+	for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+		spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+	}
+	return StringUtil::Format("Partition [%s] of Hive table '%s' is stored as %s (InputFormat '%s', SerDe '%s'), but "
+	                          "the table as %s (SerDe '%s'): partitions stored in a format other than the table's can "
+	                          "not be read yet",
+	                          StringUtil::Join(spec, ", "), Describe(), stored_as, input_format, serde_library,
+	                          HiveFileFormatToString(file_format), table.serde_library);
+}
+
+void HiveScanInfo::CheckPartitionStorage(const GluePartitionInfo &partition) const {
+	auto mismatch = PartitionStorageMismatch(partition);
+	if (!mismatch.empty()) {
+		throw NotImplementedException(mismatch);
+	}
+}
+
 string HiveScanInfo::Describe() const {
 	if (database_name.empty()) {
 		return table_name;
@@ -378,6 +446,10 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,
 		              expanded_files);
 		return true;
+	}
+	auto partitions = scan_info->Partitions(client_context);
+	for (auto partition_index : job.partitions) {
+		scan_info->CheckPartitionStorage((*partitions)[partition_index]);
 	}
 	if (job.root) {
 		ListRoot(job.partitions);
@@ -639,7 +711,10 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	}
 	vector<GluePartitionInfo> partition_infos;
 	for (idx_t i = 0; i < partitions.size(); i++) {
-		partition_infos.push_back({std::move(partitions[i]), std::move(locations[i])});
+		GluePartitionInfo partition;
+		partition.values = std::move(partitions[i]);
+		partition.location = std::move(locations[i]);
+		partition_infos.push_back(std::move(partition));
 	}
 	info->SetPartitions(std::move(partition_infos));
 	unique_ptr<FunctionData> bind_data;

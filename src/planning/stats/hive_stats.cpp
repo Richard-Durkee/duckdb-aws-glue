@@ -10,6 +10,13 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/logging/logger.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+
+#include <future>
+#include "duckdb/main/config.hpp"
+#include "duckdb/optimizer/optimizer_extension.hpp"
+#include "duckdb/parser/statement/explain_statement.hpp"
+#include "duckdb/planner/operator/logical_explain.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
@@ -130,6 +137,17 @@ static optional_idx SampleLineOrientedRowsPerFile(ClientContext &context, const 
 	return MaxValue<idx_t>(rows, 1);
 }
 
+//! The state the scan's CreateReader takes; the parquet reader does not look at it
+struct ProbeGlobalState : public GlobalTableFunctionState {};
+
+bool ReuseProbeReader(ClientContext &context) {
+	Value value;
+	if (!context.TryGetCurrentSetting("glue_hive_reuse_probe_reader", value) || value.IsNull()) {
+		return true;
+	}
+	return BooleanValue::Get(value);
+}
+
 //! The rows of one data file: from the footer for parquet, from the lines of a bounded prefix for csv and json
 static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &bind_data, const HiveScanInfo &info,
                                const OpenFileInfo &file) {
@@ -137,13 +155,23 @@ static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &
 	case HiveFileFormat::PARQUET: {
 		// the row count is in the footer, and the format's own reader is the only thing that can read it. Parquet is
 		// bound with no named parameters, so a reader built from default options reads the file as the scan will
-		auto options = bind_data.interface->InitializeOptions(context, nullptr);
 		// a throwaway copy of the bind data: Initialize and FinalizeBindData write the opened file's numbers into it,
 		// and the real bind data must not be rewritten behind the running scan
 		auto probe = bind_data.Copy();
 		auto &probe_data = probe->Cast<MultiFileBindData>();
-		auto reader = bind_data.multi_file_reader->CreateReader(context, file, *options, bind_data.file_options,
-		                                                        *probe_data.interface);
+		shared_ptr<BaseFileReader> reader;
+		if (ReuseProbeReader(context)) {
+			// opened as the scan opens its files, so the scan can take this reader instead of opening the file again
+			ProbeGlobalState probe_state;
+			reader = bind_data.multi_file_reader->CreateReader(context, probe_state, file, 0, bind_data);
+			if (reader) {
+				HiveQueryCache::Get(context)->PutProbeReader(file.path, reader);
+			}
+		} else {
+			auto options = bind_data.interface->InitializeOptions(context, nullptr);
+			reader = bind_data.multi_file_reader->CreateReader(context, file, *options, bind_data.file_options,
+			                                                   *probe_data.interface);
+		}
 		if (!reader) {
 			return optional_idx();
 		}
@@ -258,16 +286,159 @@ static unique_ptr<NodeStatistics> UnsampledCardinality(ClientContext &context, c
 	return bind_data.interface->GetCardinality(context, bind_data, estimated_file_count);
 }
 
-//! The sample of the table 'hive_list' reads, measured by the first scan of the table in this query to ask
+//! The sample of the table 'hive_list' reads, measured by the first scan of the table in this query to ask. Without
+//! 'measure' only a sample already taken is returned (or null)
 static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, const MultiFileBindData &bind_data,
-                                                     const HiveMultiFileList &hive_list) {
+                                                     const HiveMultiFileList &hive_list, bool measure = true) {
 	auto &info = hive_list.ScanInfo();
 	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
-	annotated_lock_guard<annotated_mutex> guard(entry->lock);
-	if (!entry->sample) {
-		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
+	std::shared_future<shared_ptr<const HiveTableSample>> pending;
+	{
+		annotated_lock_guard<annotated_mutex> guard(entry->lock);
+		if (entry->sample || !entry->pending.valid()) {
+			if (!entry->sample && measure) {
+				entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
+			}
+			return entry->sample;
+		}
+		pending = entry->pending;
 	}
-	return entry->sample;
+	// measured ahead on another thread (StartHiveSample): wait for it outside the lock
+	auto sample = pending.get();
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	entry->sample = sample;
+	return sample;
+}
+
+static bool SampleAhead(ClientContext &context) {
+	Value value;
+	if (!context.TryGetCurrentSetting("glue_hive_sample_ahead", value) || value.IsNull()) {
+		return true;
+	}
+	return BooleanValue::Get(value);
+}
+
+void StartHiveSample(ClientContext &context, const FunctionData &bind_data_p) {
+	if (!SampleAhead(context)) {
+		return;
+	}
+	auto cache = HiveQueryCache::Get(context);
+	if (cache->GetSampleDemand() != HiveSampleDemand::NEEDED) {
+		return;
+	}
+	auto &bind_data = bind_data_p.Cast<MultiFileBindData>();
+	auto &info = bind_data.file_list->Cast<HiveMultiFileList>().ScanInfo();
+	if (info.file_format == HiveFileFormat::AVRO) {
+		return;
+	}
+	auto entry = cache->GetSample(info.catalog_name + "." + info.Describe());
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (entry->sample || entry->pending.valid()) {
+		return;
+	}
+	// the task owns a copy of the bind data: the plan may replace or drop the original while the task runs
+	shared_ptr<FunctionData> copy(bind_data.Copy());
+	auto &ctx = context;
+	entry->pending = std::async(std::launch::async, [&ctx, copy]() {
+		                 auto &data = copy->Cast<MultiFileBindData>();
+		                 return make_shared_ptr<const HiveTableSample>(
+		                     MeasureTable(ctx, data, data.file_list->Cast<HiveMultiFileList>()));
+	                 }).share();
+}
+
+//===--------------------------------------------------------------------===//
+// Sampling on demand
+//===--------------------------------------------------------------------===//
+enum class HiveSamplingMode : uint8_t { ALWAYS, ON_DEMAND, ON_DEMAND_STRICT };
+
+static HiveSamplingMode GetSamplingMode(ClientContext &context) {
+	Value value;
+	if (!context.TryGetCurrentSetting("glue_hive_cardinality_sampling", value) || value.IsNull()) {
+		return HiveSamplingMode::ON_DEMAND;
+	}
+	auto mode = StringUtil::Lower(value.ToString());
+	if (mode == "always") {
+		return HiveSamplingMode::ALWAYS;
+	}
+	if (mode == "on_demand_strict") {
+		return HiveSamplingMode::ON_DEMAND_STRICT;
+	}
+	return HiveSamplingMode::ON_DEMAND;
+}
+
+//! Whether an optimizer or the physical planner could act on the row estimate of a scan below 'op'. The operators
+//! listed only pass the estimate up; joins (ordering, build side, join filters), ORDER BY / TOP N, windows, samples
+//! and everything else not listed may decide on it. A plain EXPLAIN shows the estimates, so it is a consumer too
+//! unless 'explain_consumes' is off.
+static bool ConsumesEstimates(const LogicalOperator &op, bool explain_consumes) {
+	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_EXPLAIN:
+		if (explain_consumes && op.Cast<LogicalExplain>().explain_type == ExplainType::EXPLAIN_STANDARD) {
+			return true;
+		}
+		break;
+	case LogicalOperatorType::LOGICAL_GET:
+	case LogicalOperatorType::LOGICAL_FILTER:
+	case LogicalOperatorType::LOGICAL_PROJECTION:
+	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
+	case LogicalOperatorType::LOGICAL_LIMIT:
+	case LogicalOperatorType::LOGICAL_DISTINCT:
+	case LogicalOperatorType::LOGICAL_UNION:
+	case LogicalOperatorType::LOGICAL_EMPTY_RESULT:
+	case LogicalOperatorType::LOGICAL_DUMMY_SCAN:
+	case LogicalOperatorType::LOGICAL_EXPRESSION_GET:
+	case LogicalOperatorType::LOGICAL_CHUNK_GET:
+	case LogicalOperatorType::LOGICAL_INSERT:
+	case LogicalOperatorType::LOGICAL_CREATE_TABLE:
+	case LogicalOperatorType::LOGICAL_COPY_TO_FILE:
+		break;
+	default:
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ConsumesEstimates(*child, explain_consumes)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Start sampling the unpartitioned Hive tables of the plan: what they measure does not depend on the filters
+static void StartUnpartitionedSamples(ClientContext &context, LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		if (get.function.cardinality == HiveScanCardinality && get.bind_data) {
+			auto &bind_data = get.bind_data->Cast<MultiFileBindData>();
+			if (bind_data.file_list->Cast<HiveMultiFileList>().ScanInfo().partition_keys.empty()) {
+				StartHiveSample(context, bind_data);
+			}
+		}
+	}
+	for (auto &child : op.children) {
+		StartUnpartitionedSamples(context, *child);
+	}
+}
+
+static void HiveSamplingPreOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	auto mode = GetSamplingMode(input.context);
+	auto needed = mode == HiveSamplingMode::ALWAYS || ConsumesEstimates(*plan, mode == HiveSamplingMode::ON_DEMAND);
+	HiveQueryCache::Get(input.context)
+	    ->SetSampleDemand(needed ? HiveSampleDemand::NEEDED : HiveSampleDemand::NOT_NEEDED);
+	if (needed) {
+		StartUnpartitionedSamples(input.context, *plan);
+	}
+}
+
+//! Marks the end of logical optimization in the log, so requests can be attributed to planning or execution
+static void HiveSamplingPostOptimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
+	DUCKDB_LOG_INFO(input.context, "glue_phase:optimized");
+}
+
+void RegisterHiveSamplingOptimizer(DBConfig &config) {
+	OptimizerExtension extension;
+	extension.pre_optimize_function = HiveSamplingPreOptimize;
+	extension.optimize_function = HiveSamplingPostOptimize;
+	OptimizerExtension::Register(config, std::move(extension));
 }
 
 //! Cardinality of a Hive scan: the files listed for the table, measured once per query, scaled to the partitions
@@ -282,7 +453,12 @@ unique_ptr<NodeStatistics> HiveScanCardinality(ClientContext &context, const Fun
 	if (partitions == 0) {
 		return make_uniq<NodeStatistics>(0);
 	}
-	auto sample_ptr = SampleTable(context, bind_data, hive_list);
+	// with no consumer of the estimate in the plan, answer without I/O: the scan lists and opens the files anyway
+	auto measure = HiveQueryCache::Get(context)->GetSampleDemand() != HiveSampleDemand::NOT_NEEDED;
+	auto sample_ptr = SampleTable(context, bind_data, hive_list, measure);
+	if (!sample_ptr) {
+		return UnsampledCardinality(context, bind_data);
+	}
 	auto &sample = *sample_ptr;
 	if (!sample.file_rows.IsValid()) {
 		if (sample.listed && sample.files == 0 && info.partition_keys.empty()) {

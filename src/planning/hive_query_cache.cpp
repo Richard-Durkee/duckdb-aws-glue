@@ -1,6 +1,7 @@
 #include "planning/hive_query_cache.hpp"
 
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/multi_file/base_file_reader.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "api/glue_api.hpp"
@@ -74,10 +75,43 @@ string HiveQueryCache::TableKey(const string &catalog, const string &database, c
 }
 
 void HiveQueryCache::QueryEnd(ClientContext &context) {
+	// destroyed after the lock is released: a sample still measuring is waited for, and it takes the lock
+	unordered_map<string, shared_ptr<HiveTableSampleEntry>> ended_samples;
 	annotated_lock_guard<annotated_mutex> guard(lock);
 	glue_tables.clear();
+	ended_samples = std::move(samples);
 	samples.clear();
 	directory_listings.clear();
+	sample_demand = HiveSampleDemand::UNKNOWN;
+	probe_readers.clear();
+}
+
+void HiveQueryCache::SetSampleDemand(HiveSampleDemand demand) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	if (sample_demand != HiveSampleDemand::NEEDED) {
+		sample_demand = demand;
+	}
+}
+
+HiveSampleDemand HiveQueryCache::GetSampleDemand() {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return sample_demand;
+}
+
+void HiveQueryCache::PutProbeReader(const string &path, shared_ptr<BaseFileReader> reader) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	probe_readers[path] = std::move(reader);
+}
+
+shared_ptr<BaseFileReader> HiveQueryCache::TakeProbeReader(const string &path) {
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	auto entry = probe_readers.find(path);
+	if (entry == probe_readers.end()) {
+		return nullptr;
+	}
+	auto result = std::move(entry->second);
+	probe_readers.erase(entry);
+	return result;
 }
 
 shared_ptr<GlueTableEntry> HiveQueryCache::GetGlueTable(const string &key) {

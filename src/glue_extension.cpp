@@ -18,6 +18,7 @@
 #include <mutex>
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction_manager.hpp"
+#include "planning/stats/hive_stats.hpp"
 
 namespace duckdb {
 
@@ -117,6 +118,23 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "InternalServiceException, ...) fails the first attempt only. Empty, the default, injects "
 	    "nothing.",
 	    LogicalType::VARCHAR, Value(""), GlueAPI::CheckDebugFailPartitionRegistration, SetScope::SESSION, true);
+
+	config.AddExtensionOption("glue_hive_cardinality_sampling",
+	                          "When a Hive scan's row estimate is sampled (a directory listed and a file opened while "
+	                          "planning): 'always', 'on_demand' (only when the plan has an operator that may act on "
+	                          "it, or is an EXPLAIN) or 'on_demand_strict' (EXPLAIN does not count). Default "
+	                          "'on_demand'.",
+	                          LogicalType::VARCHAR, Value("on_demand"));
+	config.AddExtensionOption("glue_hive_reuse_probe_reader",
+	                          "Hand the reader the cardinality sample opened to the scan that reads the file. "
+	                          "Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("glue_hive_sample_ahead",
+	                          "When a plan needs the Hive scans' row estimates, start measuring each table on its own "
+	                          "thread as soon as its partitions are pruned, instead of one after another when the "
+	                          "join order is planned. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	RegisterHiveSamplingOptimizer(config);
 
 	// The HTTP client factory has to be in place before the first AWS client is constructed
 	InitAWSAPI();

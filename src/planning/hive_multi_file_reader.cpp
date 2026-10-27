@@ -674,6 +674,18 @@ static void HiveTextComplexFilterPushdown(ClientContext &context, LogicalGet &ge
 		                                                ExpressionType::OPERATOR_IS_NOT_NULL));
 		get.table_filters.PushFilter(ProjectionIndex(0), make_uniq<ExpressionFilter>(std::move(always_true)));
 	}
+	StartHiveSample(context, *bind_data);
+}
+
+//! The format's filter pushdown (partition pruning), then the sample of the partitions left starts measuring
+static void HiveComplexFilterPushdown(ClientContext &context, LogicalGet &get, FunctionData *bind_data,
+                                      vector<unique_ptr<Expression>> &filters) {
+	auto &multi_file_data = bind_data->Cast<MultiFileBindData>();
+	auto &scan_info = multi_file_data.multi_file_reader->Cast<HiveMultiFileReader>().ScanInfo();
+	if (scan_info.format_pushdown_complex_filter) {
+		scan_info.format_pushdown_complex_filter(context, get, bind_data, filters);
+	}
+	StartHiveSample(context, *bind_data);
 }
 
 TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan_info,
@@ -774,6 +786,9 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		scan_function.pushdown_complex_filter = HiveTextComplexFilterPushdown;
 		scan_function.filter_pushdown = true;
 		scan_function.filter_prune = false;
+	} else {
+		scan_info->format_pushdown_complex_filter = scan_function.pushdown_complex_filter;
+		scan_function.pushdown_complex_filter = HiveComplexFilterPushdown;
 	}
 
 	vector<LogicalType> return_types;
@@ -822,6 +837,19 @@ unique_ptr<MultiFileReader> HiveMultiFileReader::Copy() const {
 	auto result = make_uniq<HiveMultiFileReader>(scan_info);
 	result->function_name = function_name;
 	return std::move(result);
+}
+
+shared_ptr<BaseFileReader> HiveMultiFileReader::CreateReader(ClientContext &context, GlobalTableFunctionState &gstate,
+                                                             const OpenFileInfo &file, idx_t file_idx,
+                                                             const MultiFileBindData &bind_data) {
+	// the cardinality sample may have opened this file already, with the scan's options
+	if (scan_info && scan_info->file_format == HiveFileFormat::PARQUET && ReuseProbeReader(context)) {
+		auto reader = HiveQueryCache::Get(context)->TakeProbeReader(file.path);
+		if (reader) {
+			return reader;
+		}
+	}
+	return MultiFileReader::CreateReader(context, gstate, file, file_idx, bind_data);
 }
 
 const HiveScanInfo &HiveMultiFileReader::ScanInfo() const {

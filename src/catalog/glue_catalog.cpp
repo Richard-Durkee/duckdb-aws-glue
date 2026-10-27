@@ -1,6 +1,7 @@
 #include "catalog/glue_catalog.hpp"
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/schema_scan_filters.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/main/attached_database.hpp"
@@ -10,6 +11,10 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/parsed_data/bound_create_table_info.hpp"
 #include "duckdb/storage/database_size.hpp"
 
@@ -259,6 +264,62 @@ string GlueCatalog::GetTableLocation(const GlueDatabaseInfo &database, const str
 
 void GlueCatalog::ScanSchemas(ClientContext &context, std::function<void(SchemaCatalogEntry &)> callback) {
 	schemas.Scan(context, [&](CatalogEntry &schema) { callback(schema.Cast<GlueSchemaEntry>()); });
+}
+
+//! Whether the expression is the schema_name column itself, or lower() of it
+static bool IsSchemaNameOperand(const Expression &expr) {
+	if (ExpressionFilter::IsSimpleFilterColumnRef(expr)) {
+		return true;
+	}
+	if (expr.GetExpressionClass() != ExpressionClass::BOUND_FUNCTION) {
+		return false;
+	}
+	auto &function = expr.Cast<BoundFunctionExpression>();
+	return function.Function().GetName() == "lower" && function.GetChildren().size() == 1 &&
+	       ExpressionFilter::IsSimpleFilterColumnRef(*function.GetChildren()[0]);
+}
+
+//! Extracts the name from a `schema_name = 'x'` or `lower(schema_name) = 'x'` filter. Glue stores database names
+//! lowercased, so a single lookup of 'x' finds every database either shape can accept.
+static bool TryGetSchemaNameEquality(optional_ptr<const TableFilter> filter, string &name) {
+	if (!filter) {
+		return false;
+	}
+	auto &expr = *ExpressionFilter::GetExpressionFilter(*filter, "GlueCatalog::GetSchemasForScan").expr;
+	if (!BoundComparisonExpression::IsComparison(expr) || expr.GetExpressionType() != ExpressionType::COMPARE_EQUAL) {
+		return false;
+	}
+	auto &comparison = expr.Cast<BoundFunctionExpression>();
+	auto &left = BoundComparisonExpression::Left(comparison);
+	auto &right = BoundComparisonExpression::Right(comparison);
+	optional_ptr<const Expression> constant;
+	if (IsSchemaNameOperand(left) && right.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		constant = right;
+	} else if (IsSchemaNameOperand(right) && left.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT) {
+		constant = left;
+	} else {
+		return false;
+	}
+	auto &value = constant->Cast<BoundConstantExpression>().GetValue();
+	if (value.IsNull() || value.type().id() != LogicalTypeId::VARCHAR) {
+		return false;
+	}
+	name = StringValue::Get(value);
+	return true;
+}
+
+vector<reference<SchemaCatalogEntry>> GlueCatalog::GetSchemasForScan(ClientContext &context,
+                                                                     const SchemaScanFilters &filters) {
+	string name;
+	if (filters.schema_oid || !TryGetSchemaNameEquality(filters.schema_name, name)) {
+		return Catalog::GetSchemasForScan(context, filters);
+	}
+	vector<reference<SchemaCatalogEntry>> result;
+	auto entry = schemas.GetEntry(context, name);
+	if (entry) {
+		result.push_back(entry->Cast<SchemaCatalogEntry>());
+	}
+	return result;
 }
 
 optional_ptr<SchemaCatalogEntry> GlueCatalog::LookupSchema(CatalogTransaction transaction,

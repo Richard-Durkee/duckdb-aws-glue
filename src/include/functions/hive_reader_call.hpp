@@ -27,12 +27,14 @@ struct HiveReaderCall {
 };
 
 //! Nothing when 'get' is not a Hive scan bound by this build of the extension, or reads its files in a way no reader
-//! call can say: a Parquet table with a binary column, whose string columns are decoded file by file, or a type the
-//! optimizer pushed into a csv or json scan that the reader parses itself
+//! call can say: a Parquet table with a binary column, whose string columns are decoded file by file, or a column the
+//! scan reads as another type than the table's, which the optimizer gives a csv scan when it pushes the type of a cast
+//! over the column into it (type_pushdown) and takes the cast out of the plan
 optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get);
 //! The values of the partition a data file of the scan belongs to as the scan reads them, one constant per partition
-//! key in key order, named after the key. Nothing when 'get' is not such a scan, has no partition keys, or has not
-//! listed 'path': a scan lists its files when they are first asked for (MultiFileList::GetAllFiles lists them all)
+//! key in key order, named after the key. Nothing when 'get' is not such a scan, has no partition keys, reads a key as
+//! another type than the table's (see HiveScanGetReaderCall), or has not listed 'path': a scan lists its files when
+//! they are first asked for (MultiFileList::GetAllFiles lists them all)
 optional<vector<unique_ptr<ParsedExpression>>> HiveScanGetFilePartitionValues(const LogicalGet &get,
                                                                               const string &path);
 

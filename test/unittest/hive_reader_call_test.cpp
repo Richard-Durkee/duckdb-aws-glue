@@ -312,6 +312,16 @@ TEST_CASE("A csv scan is restated as read_csv with the options it was bound with
 	auto read = Restate(con, query);
 	REQUIRE(Rows(con, read) == 4);
 	REQUIRE(Differences(con, query, read) == 0);
+	// a cast right above the scan has the optimizer push its type into read_csv and take the cast out of the plan,
+	// which no reader call says: of a data column, and of a partition key, whose values would be cast from Glue's text
+	for (string cast : {"TRY_CAST(name AS INTEGER)", "CAST(dt AS VARCHAR)"}) {
+		PlannedScan scan(con, "SELECT " + cast + " AS c FROM (" + query + ")");
+		REQUIRE(!HiveScanGetReaderCall(scan.Get()).has_value());
+		bool retypes_key = StringUtil::Contains(cast, "dt");
+		for (auto &file : scan.Files()) {
+			REQUIRE(HiveScanGetFilePartitionValues(scan.Get(), file.path).has_value() != retypes_key);
+		}
+	}
 }
 
 TEST_CASE("json and avro scans are restated", "[hive_reader_call]") {
@@ -457,6 +467,12 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 	read = Restate(con, query);
 	REQUIRE(Rows(con, read) == 5);
 	REQUIRE(Differences(con, query, read) == 0);
+	// a cast the optimizer pushed into the scan is gone from the plan: the column mapping's TRY_CAST to the pushed type
+	// would read as NULL a name the CAST fails on
+	{
+		PlannedScan scan(con, "SELECT CAST(name AS INTEGER) AS n FROM lake.default." + lazy);
+		REQUIRE(!HiveScanGetReaderCall(scan.Get()).has_value());
+	}
 	// OpenCSVSerde: quoted, one header line, no NULL, and a value that does not parse fails the query
 	auto opencsv = tables.Add("opencsv");
 	Run(con, "CREATE TABLE lake.default." + opencsv +

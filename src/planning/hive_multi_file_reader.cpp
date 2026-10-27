@@ -1335,33 +1335,26 @@ static Value DataColumnsSchema(const HiveScanInfo &info, const MultiFileBindData
 	                  std::move(entries));
 }
 
-//! A data column of the scan as an expression over the reader's column: what InitializeReader makes of the column
-//! mapping's cast of a csv field read as text. The field is barred (__internal_barrier) so that the caller's optimizer
-//! does not push the cast into read_csv (type_pushdown), which would convert the text itself, and strictly. Null when a
-//! type the optimizer pushed into a csv scan without serde fields or into a json scan, which the reader parses itself,
-//! differs from the column's
-static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const Identifier &name,
-                                                 const LogicalType &type) {
-	if (info.file_format != HiveFileFormat::CSV && info.file_format != HiveFileFormat::JSON) {
-		return make_uniq<ColumnRefExpression>(name);
-	}
-	bool serde_fields = info.file_format == HiveFileFormat::CSV && info.csv_options.serde_fields;
-	// the type BindHiveScan gives the reader for the column
-	optional_idx table_column;
+//! Whether the scan reads its column 'index' as the table declares it. The optimizer can push the type of a cast over a
+//! column into a csv scan (type_pushdown) and take the cast out of the plan, which no reader call can say
+static bool ScanTypeIsTableType(const HiveScanInfo &info, const MultiFileBindData &bind_data, idx_t index) {
 	for (idx_t i = 0; i < info.names.size() && i < info.types.size(); i++) {
-		if (StringUtil::CIEquals(info.names[i].GetIdentifierName(), name.GetIdentifierName())) {
-			table_column = i;
+		if (StringUtil::CIEquals(info.names[i].GetIdentifierName(), bind_data.names[index].GetIdentifierName())) {
+			return info.types[i] == bind_data.types[index];
 		}
 	}
-	if (!table_column.IsValid()) {
-		return nullptr;
-	}
-	auto reader_type = serde_fields ? LogicalType(LogicalType::VARCHAR) : info.types[table_column.GetIndex()];
-	if (reader_type == type) {
+	return false;
+}
+
+//! A data column of the scan, of the table's type, as an expression over the reader's column: what InitializeReader
+//! makes of the column mapping's cast of a csv field read as text. The field is barred (__internal_barrier) so that the
+//! caller's optimizer does not push the cast into read_csv (type_pushdown), which would convert the text itself, and
+//! strictly
+static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const Identifier &name,
+                                                 const LogicalType &type) {
+	bool serde_fields = info.file_format == HiveFileFormat::CSV && info.csv_options.serde_fields;
+	if (!serde_fields || type == LogicalType::VARCHAR) {
 		return make_uniq<ColumnRefExpression>(name);
-	}
-	if (!serde_fields) {
-		return nullptr;
 	}
 	vector<unique_ptr<ParsedExpression>> field;
 	field.push_back(make_uniq<ColumnRefExpression>(name));
@@ -1396,14 +1389,13 @@ optional<HiveReaderCall> HiveScanGetReaderCall(const LogicalGet &get) {
 	}
 	call.parameters["hive_partitioning"] = Value::BOOLEAN(false);
 	for (idx_t i = 0; i < bind_data.names.size() && i < bind_data.types.size(); i++) {
+		if (!ScanTypeIsTableType(*info, bind_data, i)) {
+			return nullopt;
+		}
 		if (info->GetPartitionKeyIndex(bind_data.names[i].GetIdentifierName()) != DConstants::INVALID_INDEX) {
 			continue;
 		}
-		auto column = ReaderColumn(*info, bind_data.names[i], bind_data.types[i]);
-		if (!column) {
-			return nullopt;
-		}
-		call.columns.push_back(std::move(column));
+		call.columns.push_back(ReaderColumn(*info, bind_data.names[i], bind_data.types[i]));
 	}
 	return std::move(call);
 }
@@ -1421,6 +1413,9 @@ optional<vector<unique_ptr<ParsedExpression>>> HiveScanGetFilePartitionValues(co
 		for (idx_t i = 0; i < bind_data.names.size() && i < bind_data.types.size(); i++) {
 			if (!StringUtil::CIEquals(bind_data.names[i].GetIdentifierName(), info->partition_keys[key])) {
 				continue;
+			}
+			if (!ScanTypeIsTableType(*info, bind_data, i)) {
+				return nullopt;
 			}
 			auto &text = partition.values[key];
 			auto &type = bind_data.types[i];

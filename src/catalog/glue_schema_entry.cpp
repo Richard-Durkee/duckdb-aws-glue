@@ -283,6 +283,9 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			} else {
 				result.csv_escape = string_value;
 			}
+		} else if (StringUtil::CIEquals(key, "overwrite")) {
+			// CREATE TABLE AS only: replace the data files at the location when the statement commits
+			result.overwrite = value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>();
 		} else if (StringUtil::CIEquals(key, "header")) {
 			// csv files with a header line: Hive's "TBLPROPERTIES ('skip.header.line.count' = '1')"
 			if (value.DefaultCastAs(LogicalType::BOOLEAN).GetValue<bool>()) {
@@ -455,6 +458,27 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableFromInfo(CatalogTransacti
                                                                 BoundCreateTableInfo &info,
                                                                 const GlueTableInfo &table_info) {
 	return CreateTableInternal(transaction, info, &table_info);
+}
+
+optional_ptr<CatalogEntry> GlueSchemaEntry::CommitCreateTable(ClientContext &context, const GlueTableInfo &table) {
+	auto &glue_catalog = catalog.Cast<GlueCatalog>();
+	GlueAPI::CreateHiveTable(context, glue_catalog, table);
+	GlueTableInfo created;
+	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table.name, created)) {
+		throw CatalogException("Glue table \"%s.%s\" was created but could not be fetched afterwards",
+		                       database_info.name, table.name);
+	}
+	return tables.CreateEntry(tables.CreateEntry(created));
+}
+
+void GlueSchemaEntry::RollbackCreateTable(ClientContext &context, const string &table_name) {
+	GlueAPI::DeleteTable(context, catalog.Cast<GlueCatalog>(), database_info.name, table_name);
+	tables.RemoveEntry(table_name);
+}
+
+bool GlueSchemaEntry::TableExists(ClientContext &context, const string &table_name) {
+	EntryLookupInfo lookup(CatalogType::TABLE_ENTRY, QualifiedName(Identifier(table_name)));
+	return tables.GetEntry(context, lookup) != nullptr;
 }
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransaction transaction,

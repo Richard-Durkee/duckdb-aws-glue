@@ -110,6 +110,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "with the NULL padding of short rows. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	config.AddExtensionOption("glue_write_staging",
+	                          "Write the files of an INSERT or CREATE TABLE AS into Hive tables below a hidden "
+	                          "staging directory of the table location and copy them into place when the "
+	                          "transaction commits, so that no reader sees them before. Default false: files are "
+	                          "written in place, and only Glue registration waits for the commit.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption(
 	    "glue_debug_fail_partition_registration",
 	    "For tests: '<Glue error code>:<n>' makes the n-th partition a write registers in Glue, "

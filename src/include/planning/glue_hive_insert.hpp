@@ -58,7 +58,7 @@ private:
 	                      GlueHiveInsert &insert, optional_ptr<GlueTable> existing_table,
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
-	                      unique_ptr<BoundCreateTableInfo> create_info);
+	                      unique_ptr<BoundCreateTableInfo> create_info, bool overwrite_location);
 
 public:
 	//! The target catalog (for partition registration after the file write).

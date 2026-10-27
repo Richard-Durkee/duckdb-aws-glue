@@ -7,6 +7,7 @@
 #include "duckdb/transaction/transaction.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_write_transaction.hpp"
 
 #include <functional>
 
@@ -171,6 +172,8 @@ public:
 	//! Per transaction by default; shared through the connection state under glue_metadata_cache_scope='connection'
 	//! (so a prepared statement's two binds share it).
 	shared_ptr<GlueTransactionCache> cache;
+	//! The Hive writes of the transaction, applied at commit
+	GlueWriteTransaction writes;
 
 private:
 	GlueTransactionState transaction_state;

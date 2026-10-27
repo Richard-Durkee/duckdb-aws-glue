@@ -2,6 +2,8 @@
 #include "catalog/glue_catalog.hpp"
 
 #include "duckdb/main/attached_database.hpp"
+#include "duckdb/logging/logger.hpp"
+#include "duckdb/main/client_context.hpp"
 
 #include <algorithm>
 
@@ -9,6 +11,28 @@ namespace duckdb {
 
 GlueTransactionManager::GlueTransactionManager(AttachedDatabase &db_p, GlueCatalog &glue_catalog)
     : TransactionManager(db_p), glue_catalog(glue_catalog) {
+}
+
+//! A transaction commits or rolls back after it stopped being the connection's active transaction, but the Glue and S3
+//! calls that apply or undo its writes look up secrets through the active transaction: they run in a transaction of
+//! their own
+template <class FUNC>
+static void RunInOwnTransaction(ClientContext &context, FUNC &&fun) {
+	if (context.transaction.HasActiveTransaction()) {
+		fun();
+		return;
+	}
+	context.transaction.BeginTransaction();
+	try {
+		fun();
+	} catch (...) {
+		try {
+			context.transaction.Rollback(nullptr);
+		} catch (...) { // NOLINT
+		}
+		throw;
+	}
+	context.transaction.Commit();
 }
 
 Transaction &GlueTransactionManager::StartTransaction(ClientContext &context) {
@@ -23,16 +47,41 @@ Transaction &GlueTransactionManager::StartTransaction(ClientContext &context) {
 
 ErrorData GlueTransactionManager::CommitTransaction(ClientContext &context, Transaction &transaction) {
 	auto &glue_transaction = transaction.Cast<GlueTransaction>();
+	ErrorData write_error;
+	try {
+		if (glue_transaction.writes.HasWrites()) {
+			RunInOwnTransaction(context, [&]() {
+				glue_transaction.writes.Commit(context, glue_catalog, *glue_transaction.cache);
+			});
+		}
+	} catch (std::exception &ex) {
+		write_error = ErrorData(ex);
+	}
 	glue_transaction.Commit();
 	lock_guard<mutex> l(transaction_lock);
 	transaction_sequence.erase(transaction);
 	transactions.erase(transaction);
 	FreeRetiredEntries();
-	return ErrorData();
+	return write_error;
 }
 
 void GlueTransactionManager::RollbackTransaction(Transaction &transaction) {
 	auto &glue_transaction = transaction.Cast<GlueTransaction>();
+	ErrorData write_error;
+	auto context = transaction.context.lock();
+	if (context && glue_transaction.writes.HasWrites()) {
+		try {
+			RunInOwnTransaction(*context, [&]() {
+				write_error = glue_transaction.writes.Rollback(*context, glue_catalog, *glue_transaction.cache);
+			});
+		} catch (std::exception &ex) {
+			write_error = ErrorData(ex);
+		}
+		if (write_error.HasError()) {
+			DUCKDB_LOG_WARNING(*context, "Undoing the Hive writes of a rolled back transaction failed: %s",
+			                   write_error.RawMessage());
+		}
+	}
 	glue_transaction.Rollback();
 	lock_guard<mutex> l(transaction_lock);
 	transaction_sequence.erase(transaction);

@@ -3,6 +3,7 @@
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/map.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -13,6 +14,8 @@
 #include <thread>
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
+#include <aws/glue/model/BatchDeletePartitionRequest.h>
+#include <aws/glue/model/PartitionValueList.h>
 #include <aws/glue/model/CreatePartitionRequest.h>
 #include <aws/glue/model/DeletePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
@@ -411,7 +414,8 @@ void GlueAPI::CheckDebugFailPartitionRegistration(ClientContext &, SetScope, Val
 }
 
 void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                    const string &table_name, const vector<GluePartitionInput> &partitions) {
+                                    const string &table_name, const vector<GluePartitionInput> &partitions,
+                                    vector<idx_t> *created) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "BatchCreatePartition");
 	if (partitions.empty()) {
@@ -479,6 +483,7 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 					ThrowGlueError(outcome,
 					               StringUtil::Format("BatchCreatePartition '%s.%s'", database_name, table_name));
 				}
+				set<idx_t> refused;
 				for (auto &error : outcome.GetResult().GetErrors()) {
 					vector<string> values;
 					for (auto &value : error.GetPartitionValues()) {
@@ -492,11 +497,19 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 						                  "among the partitions sent: %s (%s)",
 						                  database_name, table_name, PartitionValuesToString(values), message, code);
 					}
+					refused.insert(entry->second);
 					if (code == "AlreadyExistsException") {
 						// appending to an existing partition
 						continue;
 					}
 					errors.push_back({entry->second, code, message});
+				}
+				if (created) {
+					for (auto &entry : sent) {
+						if (refused.find(entry.second) == refused.end()) {
+							created->push_back(entry.second);
+						}
+					}
 				}
 			}
 			pending.clear();
@@ -508,6 +521,49 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 				}
 				pending.push_back(error.index);
 			}
+		}
+	}
+}
+
+void GlueAPI::BatchDeletePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                    const string &table_name, const vector<vector<string>> &partitions) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	CheckWritable(catalog, "BatchDeletePartition");
+	if (partitions.empty()) {
+		return;
+	}
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	// BatchDeletePartition accepts at most 25 partitions per call
+	constexpr idx_t BATCH_SIZE = 25;
+	for (idx_t offset = 0; offset < partitions.size(); offset += BATCH_SIZE) {
+		Aws::Glue::Model::BatchDeletePartitionRequest request;
+		SetCatalogId(request, catalog);
+		request.SetDatabaseName(database_name);
+		request.SetTableName(table_name);
+		Aws::Vector<Aws::Glue::Model::PartitionValueList> values;
+		for (idx_t i = offset; i < MinValue<idx_t>(offset + BATCH_SIZE, partitions.size()); i++) {
+			Aws::Glue::Model::PartitionValueList value_list;
+			value_list.SetValues(ToAwsValues(partitions[i]));
+			values.push_back(std::move(value_list));
+		}
+		request.SetPartitionsToDelete(values);
+		auto outcome = client->BatchDeletePartition(request);
+		if (!outcome.IsSuccess()) {
+			ThrowGlueError(outcome, StringUtil::Format("BatchDeletePartition '%s.%s'", database_name, table_name));
+		}
+		for (auto &error : outcome.GetResult().GetErrors()) {
+			auto code = ToStdString(error.GetErrorDetail().GetErrorCode());
+			if (code == "EntityNotFoundException") {
+				continue;
+			}
+			vector<string> failed;
+			for (auto &value : error.GetPartitionValues()) {
+				failed.push_back(ToStdString(value));
+			}
+			throw IOException("Glue BatchDeletePartition '%s.%s' failed for partition [%s]: %s: %s", database_name,
+			                  table_name, PartitionValuesToString(failed), code,
+			                  ToStdString(error.GetErrorDetail().GetErrorMessage()));
 		}
 	}
 }

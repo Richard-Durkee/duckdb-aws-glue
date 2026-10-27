@@ -29,6 +29,8 @@ struct GlueCreateTableOptions {
 	vector<string> bucket_columns;
 	int32_t number_of_buckets = -1;
 	vector<GlueColumn> sort_columns;
+	//! CREATE TABLE AS only: delete the data files already at the location when the statement commits
+	bool overwrite = false;
 	//! Every other option is stored as a table parameter in Glue
 	unordered_map<string, string> parameters;
 };
@@ -45,6 +47,11 @@ public:
 	//! location, format or dialect expressions a second time when execution begins.
 	optional_ptr<CatalogEntry> CreateTableFromInfo(CatalogTransaction transaction, BoundCreateTableInfo &info,
 	                                               const GlueTableInfo &table_info);
+	//! The commit of a CREATE TABLE AS: create the resolved table in Glue and add its entry
+	optional_ptr<CatalogEntry> CommitCreateTable(ClientContext &context, const GlueTableInfo &table);
+	//! The rollback of CommitCreateTable
+	void RollbackCreateTable(ClientContext &context, const string &table_name);
+	bool TableExists(ClientContext &context, const string &table_name);
 	optional_ptr<CatalogEntry> CreateFunction(CatalogTransaction transaction, CreateFunctionInfo &info) override;
 	optional_ptr<CatalogEntry> CreateIndex(CatalogTransaction transaction, CreateIndexInfo &info,
 	                                       TableCatalogEntry &table) override;

@@ -39,6 +39,14 @@ CREATE TABLE my_datalake.default.glog_avro WITH (format = 'avro') AS SELECT rang
 statement ok
 CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
 
+# every scan samples its table, also when no operator of the plan acts on the estimate (see the end of the file)
+statement ok
+SET glue_hive_cardinality_sampling = 'always';
+
+# on the scan's thread: a sample measured ahead plans the listings of its own copy of the scan, a second plan event
+statement ok
+SET glue_hive_sample_ahead = false;
+
 # a cold catalog: every request of the lookup and the partition load is logged; finding the table first needs no
 # GetDatabase
 statement ok
@@ -180,6 +188,43 @@ query II
 SELECT (SELECT count(*) FROM glue_requests()), count(*) FROM duckdb_logs WHERE type = 'GlueScan';
 ----
 0	0
+
+# by default a plan with no operator acting on the row estimate (a count over one scan) skips the sample
+statement ok
+RESET glue_hive_cardinality_sampling;
+
+statement ok
+RESET glue_hive_sample_ahead;
+
+statement ok
+CALL enable_logging(['GlueScan'], storage := 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.glog_parts WHERE dt = 'b';
+----
+1
+
+query II
+SELECT count(*) FILTER (event = 'sample'), count(*) FILTER (event = 'listing') FROM duckdb_logs_parsed('GlueScan');
+----
+0	1
+
+# a join orders its sides by the estimates, so both scans sample
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM my_datalake.default.glog_parts p JOIN my_datalake.default.glog_flat f ON p.id = f.id;
+----
+3
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'sample';
+----
+2
 
 statement ok
 DROP TABLE my_datalake.default.glog_parts;

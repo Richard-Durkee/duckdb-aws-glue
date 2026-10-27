@@ -17,7 +17,7 @@
 		},
 		{
 			"env_name": "GLUE_CATALOG_ID",
-			"env_value": "984506134640"
+			"env_value": "847122343688"
 		},
 		{
 			"env_name": "GLUE_ENDPOINT",
@@ -25,7 +25,7 @@
 		},
 		{
 			"env_name": "DEFAULT_S3_LOCATION",
-			"env_value": "s3://simple-s3-glue-database/glue-database-root"
+			"env_value": "s3://tom-glue-tables-test-bucket"
 		}
 	],
 	"skip_tests": [

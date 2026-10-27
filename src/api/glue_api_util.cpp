@@ -57,6 +57,12 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &sc
 	if (table.DescriptionHasBeenSet()) {
 		result.description = ToStdString(table.GetDescription());
 	}
+	if (table.VersionIdHasBeenSet()) {
+		result.version_id = ToStdString(table.GetVersionId());
+	}
+	if (table.CreateTimeHasBeenSet()) {
+		result.create_time_ms = table.GetCreateTime().Millis();
+	}
 	auto &storage_descriptor = table.GetStorageDescriptor();
 	result.location = ToStdString(storage_descriptor.GetLocation());
 	result.input_format = ToStdString(storage_descriptor.GetInputFormat());

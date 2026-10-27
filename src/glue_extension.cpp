@@ -1,6 +1,7 @@
 #define DUCKDB_EXTENSION_MAIN
 
 #include "glue_extension.hpp"
+#include "core/glue_trace.hpp"
 
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
@@ -123,6 +124,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	InitAWSAPI();
 	RegisterGlueHttpClientFactory();
 	RegisterGlueLogTypes(instance);
+	RegisterGlueTrace(loader);
 
 	// Hive tables are read with read_parquet
 	ExtensionHelper::AutoLoadExtension(instance, "parquet");

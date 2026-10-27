@@ -1,0 +1,125 @@
+# name: test/sql/hive/logging/glue_trace.test
+# description: glue_trace records every Glue request of a statement with its phase and purpose
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gtrace_parts;
+
+statement ok
+CREATE TABLE my_datalake.default.gtrace_parts (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.gtrace_parts VALUES (1, 'a'), (2, 'b'), (3, 'c');
+
+# off by default: nothing is traced
+query I
+SELECT count(*) FROM glue_trace();
+----
+0
+
+statement ok
+SET glue_trace = true;
+
+statement ok
+CALL enable_logging(['GlueRequest', 'GlueTrace'], storage := 'memory');
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as gtrace_cold (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM gtrace_cold.default.gtrace_parts WHERE dt = 'b';
+----
+1
+
+query IIIII
+SELECT phase, operation, target, purpose, status FROM glue_trace() ORDER BY seq;
+----
+bind	AWSGlue.GetDatabase	default	schema lookup	200
+bind	AWSGlue.GetTable	default.gtrace_parts	catalog lookup	200
+optimize	AWSGlue.GetPartitions	default.gtrace_parts	scan: partitions	200
+
+# reading the trace does not replace it
+query I
+SELECT count(*) FROM glue_trace();
+----
+3
+
+query I
+SELECT bool_and(duration_ms >= 0 AND start_ms >= 0 AND response_bytes > 0 AND attempt = 1 AND NOT continuation)
+FROM glue_trace();
+----
+true
+
+query IIII
+SELECT phase, glue_requests, glue_operations, glue_wall_ms <= glue_ms + 0.001 FROM glue_trace_phases() ORDER BY start_ms;
+----
+bind	2	AWSGlue.GetDatabase:1 AWSGlue.GetTable:1	true
+optimize	1	AWSGlue.GetPartitions:1	true
+physical_plan	0	NULL	true
+execute	0	NULL	true
+
+# the log has the same requests, and a GlueTrace entry per phase of the statement
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRequest') r
+JOIN duckdb_logs_parsed('GlueTrace') t ON t.trace_query_id = r.query_id AND t.phase = r.phase;
+----
+3
+
+# the partition lookup of an INSERT into an existing table is planning, the registration is execution; the segment
+# requests run as tasks without starting execution
+statement ok
+SET glue_get_partitions_segments = 4;
+
+statement ok
+INSERT INTO gtrace_cold.default.gtrace_parts VALUES (4, 'd');
+
+query III
+SELECT phase, operation, purpose FROM glue_trace() WHERE operation != 'AWSGlue.GetTable' GROUP BY ALL ORDER BY ALL;
+----
+execute	AWSGlue.BatchCreatePartition	insert: register partitions
+physical_plan	AWSGlue.GetPartitions	insert: existing partitions
+
+query I
+SELECT count(DISTINCT target) FROM glue_trace() WHERE operation = 'AWSGlue.GetPartitions';
+----
+4
+
+statement ok
+RESET glue_get_partitions_segments;
+
+# EXPLAIN ANALYZE shows the requests by phase
+query II
+EXPLAIN ANALYZE SELECT count(*) FROM gtrace_cold.default.gtrace_parts WHERE dt = 'a';
+----
+analyzed_plan	<REGEX>:.*Glue Trace.*bind.*optimize.*AWSGlue.GetPartitions.*execute.*
+
+statement ok
+SET glue_trace = false;
+
+statement ok
+SELECT count(*) FROM gtrace_cold.default.gtrace_parts;
+
+# off again: the last traced statement is the SET itself, the scan after it is not traced
+query I
+SELECT count(*) FROM glue_trace();
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.gtrace_parts;

@@ -1,6 +1,7 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "core/glue_trace.hpp"
 
 #include "duckdb/common/map.hpp"
 #include "duckdb/common/numeric_utils.hpp"
@@ -286,13 +287,15 @@ public:
 	                          const GlueCatalog &catalog, const string &database_name, const string &table_name,
 	                          int segment_number, int total_segments, vector<GluePartitionInfo> &result)
 	    : BaseExecutorTask(executor), context(context), client(client), catalog(catalog), database_name(database_name),
-	      table_name(table_name), segment_number(segment_number), total_segments(total_segments), result(result) {
+	      table_name(table_name), segment_number(segment_number), total_segments(total_segments), result(result),
+	      trace_tags(GlueTraceTag::Capture()) {
 	}
 
 	void ExecuteTask() override {
 		// thread local: without it a worker's requests use the database level HTTP settings and stay out of this
 		// connection's HTTP log
 		GlueHttpClientContextScope http_scope(context);
+		GlueTraceTag trace_tag(trace_tags);
 		FetchPartitionSegment(client, catalog, database_name, table_name, segment_number, total_segments, result);
 	}
 	string TaskType() const override {
@@ -308,6 +311,7 @@ private:
 	int segment_number;
 	int total_segments;
 	vector<GluePartitionInfo> &result;
+	GlueTraceTag::Snapshot trace_tags;
 };
 
 //! The number of GetPartitions requests to run at the same time: the setting when it is given, otherwise one request
@@ -339,6 +343,8 @@ vector<GluePartitionInfo> GlueAPI::GetPartitions(ClientContext &context, GlueCat
 		FetchPartitionSegment(*client, catalog, database_name, table_name, 0, 1, segment_results[0]);
 	} else {
 		// the segments do not overlap, so their requests can run at the same time
+		// for the trace these tasks are not the start of execution
+		GlueTraceOwnTasks own_tasks(context);
 		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
 		for (int segment = 0; segment < total_segments; segment++) {
 			executor.ScheduleTask(make_uniq<FetchPartitionSegmentTask>(

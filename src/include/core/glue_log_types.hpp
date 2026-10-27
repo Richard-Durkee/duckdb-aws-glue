@@ -7,6 +7,7 @@
 
 namespace duckdb {
 class DatabaseInstance;
+struct GlueTraceRequest;
 
 //! One HTTP request to the Glue (or STS) endpoint, logged by the HTTP bridge: with glue_network_calls_via_duckdb off
 //! the SDK's own transport sends the requests and nothing is logged
@@ -19,9 +20,8 @@ public:
 
 	static LogicalType GetLogType();
 	//! 'operation' is the X-Amz-Target header (AWSGlue.GetTable, ...); 'status' is invalid for a request that did not
-	//! reach the service
-	static string ConstructLogMessage(const string &operation, optional_idx status, double duration_ms,
-	                                  idx_t response_bytes, const string &error);
+	//! reach the service. 'phase' is set while glue_trace is on.
+	static string ConstructLogMessage(const GlueTraceRequest &request);
 };
 
 //! What a scan of a Glue Hive table spends its time on, one entry per 'event': 'partitions' (loading them),

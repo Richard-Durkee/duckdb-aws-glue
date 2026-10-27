@@ -10,6 +10,7 @@
 #include "duckdb/main/http/http_transport_manager.hpp"
 
 #include "core/glue_log_types.hpp"
+#include "core/glue_trace.hpp"
 
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
@@ -125,6 +126,8 @@ public:
 	            Aws::Utils::RateLimits::RateLimiterInterface *) const override {
 		auto aws_response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("GlueDuckDBHttp", request);
 		GlueLogTimer timer;
+		auto start_time = Timestamp::GetCurrentTimestamp();
+		string body_buffer;
 		try {
 			string url = EnsureUrlHasPath(request->GetUri().GetURIString(true).c_str());
 
@@ -147,7 +150,6 @@ public:
 			}
 
 			unique_ptr<HTTPResponse> response;
-			string body_buffer;
 			switch (ToDuckDBRequestType(request->GetMethod())) {
 			case RequestType::GET_REQUEST: {
 				GetRequestInfo info(
@@ -198,7 +200,7 @@ public:
 			}
 
 			LogRequest(context, *request, response.get(), string(), timer.ElapsedMillis(),
-			           aws_response->GetResponseBody());
+			           aws_response->GetResponseBody(), body_buffer, start_time);
 			if (!response) {
 				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
 				return aws_response;
@@ -225,7 +227,7 @@ public:
 			}
 		} catch (std::exception &ex) {
 			LogRequest(GlueHttpClientContextScope::Current(), *request, nullptr, ex.what(), timer.ElapsedMillis(),
-			           aws_response->GetResponseBody());
+			           aws_response->GetResponseBody(), body_buffer, start_time);
 			aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
 			aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
 			aws_response->SetClientErrorMessage(ex.what());
@@ -236,26 +238,99 @@ public:
 private:
 	void LogRequest(optional_ptr<ClientContext> context, const Aws::Http::HttpRequest &request,
 	                optional_ptr<HTTPResponse> response, const string &exception, double duration_ms,
-	                Aws::IOStream &body) const {
-		auto operation =
+	                Aws::IOStream &body, const string &request_body, timestamp_t start_time) const {
+		auto &logger = context ? Logger::Get(*context) : Logger::Get(db);
+		bool log = logger.ShouldLog(GlueRequestLogType::NAME, GlueRequestLogType::LEVEL);
+		auto trace = context ? GlueTraceState::GetActive(*context) : nullptr;
+		if (!log && !trace) {
+			return;
+		}
+		GlueTraceRequest entry;
+		entry.operation =
 		    request.HasHeader("x-amz-target") ? string(request.GetHeaderValue("x-amz-target").c_str()) : string();
-		optional_idx status;
-		string error;
 		if (!exception.empty()) {
-			error = exception;
+			entry.error = exception;
 		} else if (!response) {
-			error = "request not made";
+			entry.error = "request not made";
 		} else if (response->HasRequestError()) {
-			error = response->GetRequestError();
+			entry.error = response->GetRequestError();
 		} else {
-			status = static_cast<idx_t>(response->status);
+			entry.status = static_cast<idx_t>(response->status);
 		}
-		auto response_bytes = NumericCast<idx_t>(MaxValue<int64_t>(static_cast<int64_t>(body.tellp()), 0));
-		if (context) {
-			DUCKDB_LOG(*context, GlueRequestLogType, operation, status, duration_ms, response_bytes, error);
-		} else {
-			DUCKDB_LOG(db, GlueRequestLogType, operation, status, duration_ms, response_bytes, error);
+		entry.response_bytes = NumericCast<idx_t>(MaxValue<int64_t>(static_cast<int64_t>(body.tellp()), 0));
+		entry.request_bytes = request_body.size();
+		entry.duration_ms = duration_ms;
+		entry.start_time = start_time;
+		entry.target = GlueRequestTarget(request_body);
+		entry.continuation = JSONValueStart(request_body, "NextToken") != string::npos;
+		entry.attempt = SDKAttempt(request);
+		entry.purpose = GlueTraceTag::CurrentPurpose();
+		if (trace) {
+			entry.phase = trace->Phase();
+			entry.start_ms = trace->ElapsedMs() - duration_ms;
 		}
+		if (log) {
+			logger.WriteLog(GlueRequestLogType::NAME, GlueRequestLogType::LEVEL,
+			                GlueRequestLogType::ConstructLogMessage(entry));
+		}
+		if (trace) {
+			trace->Record(std::move(entry));
+		}
+	}
+
+	//! The position after '"key":' in the JSON the SDK sends (pretty printed), or npos
+	static idx_t JSONValueStart(const string &body, const char *key) {
+		auto needle = string("\"") + key + "\"";
+		auto pos = body.find(needle);
+		if (pos == string::npos) {
+			return pos;
+		}
+		pos = body.find_first_not_of(" \t\r\n", pos + needle.size());
+		if (pos == string::npos || body[pos] != ':') {
+			return string::npos;
+		}
+		return body.find_first_not_of(" \t\r\n", pos + 1);
+	}
+
+	static string JSONField(const string &body, const char *key) {
+		auto pos = JSONValueStart(body, key);
+		if (pos == string::npos || body[pos] != '"') {
+			return string();
+		}
+		auto end = body.find('"', pos + 1);
+		return end == string::npos ? string() : body.substr(pos + 1, end - pos - 1);
+	}
+
+	//! 'database.table', 'database' or the segment of a GetPartitions request: what the request is about
+	static string GlueRequestTarget(const string &body) {
+		auto database = JSONField(body, "DatabaseName");
+		auto table = JSONField(body, "TableName");
+		if (table.empty()) {
+			table = JSONField(body, "Name");
+		}
+		string result = database;
+		if (!table.empty()) {
+			result += result.empty() ? table : "." + table;
+		}
+		auto segment = JSONValueStart(body, "SegmentNumber");
+		if (segment != string::npos) {
+			auto end = body.find_first_not_of("0123456789", segment);
+			result += "#" + body.substr(segment, end - segment);
+		}
+		return result;
+	}
+
+	//! The SDK numbers its attempts in the amz-sdk-request header: 'attempt=2; max=3'
+	static idx_t SDKAttempt(const Aws::Http::HttpRequest &request) {
+		if (!request.HasHeader("amz-sdk-request")) {
+			return 1;
+		}
+		string value = request.GetHeaderValue("amz-sdk-request").c_str();
+		auto pos = value.find("attempt=");
+		if (pos == string::npos) {
+			return 1;
+		}
+		return NumericCast<idx_t>(MaxValue<int64_t>(std::atoll(value.c_str() + pos + 8), 1));
 	}
 
 	DatabaseInstance &db;

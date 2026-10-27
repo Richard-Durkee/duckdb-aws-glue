@@ -1,4 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "core/glue_trace.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
@@ -74,6 +75,7 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 			partitions = make_shared_ptr<const vector<GluePartitionInfo>>();
 		} else {
 			GlueLogTimer timer;
+			GlueTraceTag trace_tag("scan: partitions", database_name, table_name);
 			partitions = GetTablePartitions(context, *this);
 			GlueScanEvent event(Describe(), "partitions");
 			event.partitions = partitions->size();
@@ -359,6 +361,7 @@ bool HiveMultiFileList::ExpandNextPath() const {
 	}
 	auto &job = listing_jobs[next_job++];
 	GlueLogTimer timer;
+	GlueTraceTag trace_tag("scan: listing", scan_info->database_name, scan_info->table_name);
 	auto files_before = expanded_files.size();
 	string mode;
 	if (scan_info->partition_keys.empty()) {

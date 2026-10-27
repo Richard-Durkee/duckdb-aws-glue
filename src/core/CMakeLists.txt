@@ -6,6 +6,7 @@ add_library_unity(
   glue_format.cpp
   glue_info.cpp
   glue_log_types.cpp
+  glue_trace.cpp
   glue_types.cpp
   helpers.cpp)
 set(GLUE_EXTENSION_FILES

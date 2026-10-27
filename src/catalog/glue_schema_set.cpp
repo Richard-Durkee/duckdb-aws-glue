@@ -1,4 +1,5 @@
 #include "catalog/glue_schema_set.hpp"
+#include "core/glue_trace.hpp"
 
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
@@ -25,6 +26,7 @@ void GlueSchemaSet::LoadEntries(ClientContext &context) {
 	if (is_loaded) {
 		return;
 	}
+	GlueTraceTag trace_tag("schema listing");
 	auto databases = GlueAPI::GetDatabases(context, catalog);
 	for (auto &database : databases) {
 		if (entries.find(database.name) != entries.end()) {
@@ -49,6 +51,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	}
 	// not cached, ask Glue for this database directly
 	GlueDatabaseInfo database;
+	GlueTraceTag trace_tag("schema lookup", name);
 	if (!GlueAPI::GetDatabase(context, catalog, name, database)) {
 		return nullptr;
 	}

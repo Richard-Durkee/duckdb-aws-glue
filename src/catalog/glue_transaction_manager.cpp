@@ -16,8 +16,21 @@ GlueTransactionManager::GlueTransactionManager(AttachedDatabase &db_p, GlueCatal
 //! A transaction commits or rolls back after it stopped being the connection's active transaction, but the Glue and S3
 //! calls that apply or undo its writes look up secrets through the active transaction: they run in a transaction of
 //! their own
+//! The undo of a failed statement runs after the error interrupted the connection: interrupts are suppressed meanwhile
+struct SuppressInterruptsScope {
+	explicit SuppressInterruptsScope(ClientContext &context) : context(context), saved(context.interrupt_state.load()) {
+		context.SuppressInterrupts();
+	}
+	~SuppressInterruptsScope() {
+		context.interrupt_state = saved;
+	}
+	ClientContext &context;
+	ClientInterruptState saved;
+};
+
 template <class FUNC>
 static void RunInOwnTransaction(ClientContext &context, FUNC &&fun) {
+	SuppressInterruptsScope suppress(context);
 	if (context.transaction.HasActiveTransaction()) {
 		fun();
 		return;

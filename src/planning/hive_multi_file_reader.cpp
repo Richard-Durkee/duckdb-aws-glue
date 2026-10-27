@@ -3,6 +3,7 @@
 #include "planning/hive_listing_pool.hpp"
 #include "planning/stats/hive_stats.hpp"
 
+#include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
@@ -39,6 +40,8 @@
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "core/glue_types.hpp"
+
+#include <functional>
 
 namespace duckdb {
 
@@ -202,13 +205,22 @@ static idx_t PartitionsListedTogether(ClientContext &context) {
 //! The keys S3 returns per ListObjectsV2 page
 static constexpr idx_t S3_KEYS_PER_LIST_PAGE = 1000;
 
+//! hive_partition_range_listing
+static bool RangeListingEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_partition_range_listing", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return true;
+}
+
 void HiveMultiFileList::PlanListings() const {
 	if (planned) {
 		return;
 	}
 	planned = true;
 	if (scan_info->partition_keys.empty()) {
-		listing_jobs.push_back(ListingJob {true, {}});
+		listing_jobs.push_back(ListingJob {true, {}, {}});
 		return;
 	}
 	// the partitions below the table root can be listed together
@@ -247,8 +259,19 @@ void HiveMultiFileList::PlanListings() const {
 	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
 	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
 	vector<idx_t> separately;
-	if (!below_root.empty() && below_root.size() >= threshold && partition_rounds >= root_pages) {
-		listing_jobs.push_back(ListingJob {true, std::move(below_root)});
+	bool listed_by_ranges = false;
+	if (!below_root.empty() && below_root.size() >= threshold && RangeListingEnabled(client_context)) {
+		// ranges of the partitions below the root, listed by prefix at the same time: the root's pages without
+		// waiting for one page before asking for the next, and without listing the ranges no partition read is in
+		vector<ListingRange> ranges;
+		if (PlanRanges(below_root, ranges) && ranges.size() < below_root.size()) {
+			listing_jobs.push_back(ListingJob {false, {}, std::move(ranges)});
+			listed_by_ranges = true;
+		}
+	}
+	if (listed_by_ranges) {
+	} else if (!below_root.empty() && below_root.size() >= threshold && partition_rounds >= root_pages) {
+		listing_jobs.push_back(ListingJob {true, std::move(below_root), {}});
 	} else {
 		separately = std::move(below_root);
 	}
@@ -256,7 +279,103 @@ void HiveMultiFileList::PlanListings() const {
 	// partitions that need their own listing go in batches, and each batch is listed in parallel
 	for (idx_t start = 0; start < separately.size(); start += listed_together) {
 		auto end = MinValue<idx_t>(start + listed_together, separately.size());
-		listing_jobs.push_back(ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end)});
+		listing_jobs.push_back(
+		    ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end), {}});
+	}
+}
+
+bool HiveMultiFileList::PlanRanges(const vector<idx_t> &reading, vector<ListingRange> &ranges) const {
+	auto root = scan_info->root_location;
+	StringUtil::RTrim(root, "/");
+	auto root_prefix = root + "/";
+	auto partitions = scan_info->Partitions(client_context);
+	// every partition below the root by its path relative to the root, with a trailing '/': S3 lists keys in this
+	// order, so a key prefix covers a contiguous run of them
+	vector<pair<string, idx_t>> entries;
+	for (idx_t i = 0; i < partitions->size(); i++) {
+		auto location = (*partitions)[i].location;
+		StringUtil::RTrim(location, "/");
+		if (location.size() <= root_prefix.size() || !StringUtil::StartsWith(location, root_prefix)) {
+			continue;
+		}
+		entries.emplace_back(location.substr(root_prefix.size()) + "/", i);
+	}
+	std::sort(entries.begin(), entries.end());
+	unordered_set<idx_t> reading_set(reading.begin(), reading.end());
+	auto keys_per_partition = MaxValue<idx_t>(scan_info->keys_per_partition.load(), 1);
+	bool listable = true;
+	auto emit = [&](const string &prefix, idx_t lo, idx_t hi) {
+		vector<idx_t> read;
+		for (idx_t i = lo; i < hi; i++) {
+			if (reading_set.count(entries[i].second)) {
+				read.push_back(entries[i].second);
+			}
+		}
+		if (read.empty()) {
+			return;
+		}
+		if (prefix.find_first_of("*[\\?") != string::npos) {
+			listable = false;
+			return;
+		}
+		// a prefix ending inside a directory name covers the directories starting with it
+		auto glob = root_prefix + prefix + (prefix.empty() || prefix.back() == '/' ? "**" : "*/**");
+		ranges.push_back({std::move(glob), std::move(read)});
+	};
+	// split [lo, hi), whose paths share their first 'depth' characters, until a range fits a listing page
+	std::function<void(idx_t, idx_t, idx_t)> split = [&](idx_t lo, idx_t hi, idx_t depth) {
+		auto &first = entries[lo].first;
+		auto &last = entries[hi - 1].first;
+		while (depth < first.size() && depth < last.size() && first[depth] == last[depth]) {
+			depth++;
+		}
+		if ((hi - lo) * keys_per_partition <= S3_KEYS_PER_LIST_PAGE || first.size() == depth) {
+			// fits, or one partition's directory holds the rest
+			emit(first.substr(0, depth), lo, hi);
+			return;
+		}
+		for (idx_t start = lo; start < hi && listable;) {
+			auto c = entries[start].first[depth];
+			idx_t end = start + 1;
+			while (end < hi && entries[end].first[depth] == c) {
+				end++;
+			}
+			split(start, end, depth + 1);
+			start = end;
+		}
+	};
+	if (!entries.empty()) {
+		split(0, entries.size(), 0);
+	}
+	return listable;
+}
+
+void HiveMultiFileList::ListRanges(const vector<ListingRange> &ranges) const {
+	auto root = scan_info->root_location;
+	StringUtil::RTrim(root, "/");
+	auto root_prefix = root + "/";
+	auto cache = HiveQueryCache::Get(client_context);
+	vector<vector<OpenFileInfo>> listed(ranges.size());
+	RunListingTasks(client_context, ranges.size(), [&](idx_t i) {
+		listed[i] = cache->GetGlobListing(client_context, ranges[i].glob)->GetAllFiles();
+	});
+	unordered_set<idx_t> reading;
+	for (auto &range : ranges) {
+		reading.insert(range.partitions.begin(), range.partitions.end());
+	}
+	BuildPartitionLocations();
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto &files : listed) {
+		for (auto &file : files) {
+			if (!IsDataFile(file, root_prefix)) {
+				continue;
+			}
+			auto owner = OwningPartition(file.path, root_prefix.size());
+			if (!owner.IsValid() || !reading.count(owner.GetIndex())) {
+				continue;
+			}
+			AddFile(std::move(file), owner.GetIndex());
+		}
 	}
 }
 
@@ -395,7 +514,9 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		              expanded_files);
 		return true;
 	}
-	if (job.root) {
+	if (!job.ranges.empty()) {
+		ListRanges(job.ranges);
+	} else if (job.root) {
 		ListRoot(job.partitions);
 	} else {
 		ListPartitions(job.partitions);
@@ -437,7 +558,11 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 	PlanListings();
 	idx_t remaining = 0;
 	for (idx_t i = next_job; i < listing_jobs.size(); i++) {
-		remaining += MaxValue<idx_t>(listing_jobs[i].partitions.size(), 1);
+		auto partitions = listing_jobs[i].partitions.size();
+		for (auto &range : listing_jobs[i].ranges) {
+			partitions += range.partitions.size();
+		}
+		remaining += MaxValue<idx_t>(partitions, 1);
 	}
 	return MultiFileCount(expanded_files.size() + remaining, FileExpansionType::NOT_ALL_FILES_KNOWN);
 }
@@ -451,6 +576,28 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 		return files;
 	}
 	if (listing_jobs.empty()) {
+		return files;
+	}
+	if (!listing_jobs[0].ranges.empty()) {
+		// the first range's listing, which the scan reuses: the files of every partition in it
+		auto root = scan_info->root_location;
+		StringUtil::RTrim(root, "/");
+		auto root_prefix = root + "/";
+		auto listing =
+		    HiveQueryCache::Get(client_context)->GetGlobListing(client_context, listing_jobs[0].ranges[0].glob);
+		BuildPartitionLocations();
+		lock_guard<mutex> guard(scan_info->file_partitions_lock);
+		for (auto &file : listing->GetAllFiles()) {
+			if (!IsDataFile(file, root_prefix)) {
+				continue;
+			}
+			auto owner = OwningPartition(file.path, root_prefix.size());
+			if (!owner.IsValid()) {
+				continue;
+			}
+			scan_info->file_partitions[file.path] = owner.GetIndex();
+			files.push_back(file);
+		}
 		return files;
 	}
 	if (listing_jobs[0].root) {

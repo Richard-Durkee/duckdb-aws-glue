@@ -125,6 +125,25 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 	return entry->listing;
 }
 
+shared_ptr<MultiFileList> HiveQueryCache::GetGlobListing(ClientContext &context, const string &glob) {
+	shared_ptr<HiveDirectoryListingEntry> entry;
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		// a glob always holds a wildcard, which a directory key never does
+		auto &slot = directory_listings[glob];
+		if (!slot) {
+			slot = make_shared_ptr<HiveDirectoryListingEntry>();
+		}
+		entry = slot;
+	}
+	annotated_lock_guard<annotated_mutex> guard(entry->lock);
+	if (!entry->listing) {
+		auto &fs = FileSystem::GetFileSystem(context);
+		entry->listing = shared_ptr<MultiFileList>(fs.GlobFileList(glob, FileGlobOptions::ALLOW_EMPTY));
+	}
+	return entry->listing;
+}
+
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {
 	auto entry = HiveQueryCache::Get(context)->GetGlueTable(
 	    HiveQueryCache::TableKey(info.catalog_name, info.database_name, info.table_name));

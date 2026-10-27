@@ -108,6 +108,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "each. 0 (default) lists them as tasks on DuckDB's threads, as many at a time as there are threads; a larger "
 	    "value lists that many at a time on the extension's listing threads (hive_listing_threads).",
 	    LogicalType::UBIGINT, Value::UBIGINT(0));
+	config.AddExtensionOption("hive_partition_range_listing",
+	                          "List the partitions below the table location in ranges that share a key prefix, all "
+	                          "ranges at the same time, when that takes fewer listings than one per partition. Default "
+	                          "true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 	config.AddExtensionOption("hive_listing_threads",
 	                          "How many threads the extension keeps for listings when hive_partition_listing_concurrency "
 	                          "is not 0. The threads are shared by every database of the process and only ever added. "

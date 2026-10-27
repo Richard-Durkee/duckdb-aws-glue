@@ -34,6 +34,10 @@ SET redact_http_logs = false;
 statement ok
 CALL enable_logging('HTTP', storage := 'memory');
 
+# a background listing after the sample would list the other partitions while EXPLAIN plans
+statement ok
+SET hive_listing_prefetch = 'off';
+
 statement ok
 CALL truncate_duckdb_logs();
 

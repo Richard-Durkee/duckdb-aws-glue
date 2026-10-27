@@ -348,7 +348,11 @@ CREATE TABLE my_datalake.default.pp_orders_twin (id INTEGER, amount DOUBLE, dt V
 statement ok
 INSERT INTO my_datalake.default.pp_orders_twin VALUES (8, 50.0, '2016-05-14', 'IN'), (9, 51.0, '2016-05-14', 'US');
 
-# the same join twice, one common subplan, CommonSubplanOptimizer does not trigger listing
+# the same join twice, one common subplan, CommonSubplanOptimizer does not trigger listing (nor, for these counts, a
+# background listing of the partitions while EXPLAIN plans)
+statement ok
+SET hive_listing_prefetch = 'off';
+
 statement ok
 CALL truncate_duckdb_logs();
 

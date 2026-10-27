@@ -37,6 +37,10 @@ SET redact_http_logs = false;
 statement ok
 CALL enable_logging('HTTP', storage := 'memory');
 
+# requests counted after EXPLAIN are planning's alone: no background listing of the partitions meanwhile
+statement ok
+SET hive_listing_prefetch = 'off';
+
 # S3 ListObjectsV2 requests since the last truncate, split by which branch issued them: a prefix naming a
 # partition directory ('/dt=') is the per-partition branch, anything else is the table root. More requests
 # than branch-jobs means the root listing paginated, which is how the table's size enters the cost.

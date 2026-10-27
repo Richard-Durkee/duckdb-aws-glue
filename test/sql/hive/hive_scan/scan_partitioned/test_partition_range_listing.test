@@ -1,0 +1,140 @@
+# name: test/sql/hive/hive_scan/scan_partitioned/test_partition_range_listing.test
+# description: The partitions below the table location are listed in key prefix ranges of about one page, all at once
+# group: [scan_partitioned]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.rl_events;
+
+statement ok
+CREATE TABLE my_datalake.default.rl_events (v INTEGER, part INTEGER) PARTITIONED BY (part);
+
+# 1100 partitions of two files each
+statement ok
+INSERT INTO my_datalake.default.rl_events SELECT i, i % 1100 FROM range(1100) t(i);
+
+statement ok
+INSERT INTO my_datalake.default.rl_events SELECT i, i % 1100 FROM range(1100, 2200) t(i);
+
+# a directory next to the partitions that no partition registers: listed with its range, never read
+statement ok
+COPY (SELECT 1 AS v) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/rl_events/part=50_stale/f.parquet';
+
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage := 'memory');
+
+statement ok
+CREATE MACRO listed() AS TABLE
+    SELECT regexp_extract(url_decode(regexp_extract(request.url, 'prefix=([^&]*)', 1)), 'rl_events/(.*)$', 1) AS prefix
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.url LIKE '%list-type=2%';
+
+statement ok
+SET hive_listing_prefetch = 'off';
+
+# 40 partitions: the one range holding them, which the sample takes as well
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part BETWEEN 500 AND 539;
+----
+80	85560
+
+query I
+SELECT prefix FROM listed() WHERE prefix NOT LIKE '%/' ORDER BY prefix;
+----
+part=5
+
+query I
+SELECT count(*) FROM listed() WHERE prefix LIKE '%/';
+----
+0
+
+# partitions in two ranges
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part BETWEEN 590 AND 619;
+----
+60	69270
+
+query I
+SELECT prefix FROM listed() WHERE prefix NOT LIKE '%/' ORDER BY prefix;
+----
+part=5
+part=6
+
+# every partition: one range per first digit (part=0 is a directory of its own), at most one page each
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events;
+----
+2200	2418900
+
+query I
+SELECT count(*) FILTER (WHERE prefix NOT LIKE '%/') FROM listed();
+----
+9
+
+# the background listing finds the same files
+statement ok
+SET hive_listing_prefetch = 'all';
+
+statement ok
+SET hive_partition_listing_concurrency = 16;
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part BETWEEN 500 AND 539;
+----
+80	85560
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events;
+----
+2200	2418900
+
+# a join pruning the partitions at run time
+query II
+SELECT count(*), sum(e.v) FROM my_datalake.default.rl_events e JOIN (SELECT range AS p FROM range(100, 120)) d ON e.part = d.p;
+----
+40	26380
+
+# without ranges, the location or every partition is listed as before
+statement ok
+SET hive_partition_range_listing = false;
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.rl_events WHERE part BETWEEN 500 AND 539;
+----
+80	85560
+
+statement ok
+RESET hive_partition_listing_concurrency;
+
+statement ok
+RESET hive_partition_range_listing;
+
+statement ok
+RESET hive_listing_prefetch;
+
+statement ok
+DROP TABLE my_datalake.default.rl_events;

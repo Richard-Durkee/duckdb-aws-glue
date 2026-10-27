@@ -53,6 +53,8 @@
 #include "duckdb/planner/sql_export_helpers.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
+#include "duckdb/function/cast/cast_function_set.hpp"
+#include "catalog/glue_schema_entry.hpp"
 
 namespace duckdb {
 
@@ -197,6 +199,66 @@ void HiveScanInfo::CheckPartitionStorage(const GluePartitionInfo &partition) con
 	auto mismatch = PartitionStorageMismatch(partition);
 	if (!mismatch.empty()) {
 		throw NotImplementedException(mismatch);
+	}
+}
+
+//! Whether values of a partition column of type 'from' can be read as the table's type 'to': the changes the
+//! extension's own DDL allows, and DuckDB's implicit casts. Nested types are left to the reader.
+static bool CanReadPartitionTypeAs(ClientContext &context, const LogicalType &from, const LogicalType &to) {
+	if (from.IsNested() || to.IsNested() || GlueSchemaEntry::IsAllowedHiveTypeChange(from, to)) {
+		return true;
+	}
+	if (from.id() == LogicalTypeId::DECIMAL && to.id() == LogicalTypeId::DECIMAL) {
+		return true;
+	}
+	return CastFunctionSet::ImplicitCastCost(context, from, to) >= 0;
+}
+
+void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
+                                         const vector<idx_t> &column_indexes) const {
+	if (partition.columns.empty() || !table_definition) {
+		return;
+	}
+	auto &table_columns = table_definition->columns;
+	for (auto column_index : column_indexes) {
+		auto &name = names[column_index].GetIdentifierName();
+		optional_ptr<const GlueColumn> partition_column;
+		if (file_format == HiveFileFormat::CSV) {
+			if (column_index < partition.columns.size()) {
+				partition_column = &partition.columns[column_index];
+			}
+		} else {
+			for (auto &column : partition.columns) {
+				if (StringUtil::CIEquals(column.name, name)) {
+					partition_column = &column;
+					break;
+				}
+			}
+		}
+		if (!partition_column) {
+			continue;
+		}
+		LogicalType partition_type;
+		try {
+			partition_type = GlueTypes::ToLogicalType(StringUtil::Lower(partition_column->type));
+		} catch (std::exception &) {
+			// a type the extension can not map is left to the reader
+			continue;
+		}
+		if (CanReadPartitionTypeAs(context, partition_type, types[column_index])) {
+			continue;
+		}
+		auto table_type =
+		    column_index < table_columns.size() ? table_columns[column_index].type : types[column_index].ToString();
+		vector<string> spec;
+		for (idx_t i = 0; i < partition_keys.size() && i < partition.values.size(); i++) {
+			spec.push_back(partition_keys[i] + "=" + partition.values[i]);
+		}
+		throw InvalidInputException("Partition [%s] of Hive table '%s' declares column '%s' as '%s', which can not be "
+		                            "read as the table's column '%s' of type '%s': the table's columns changed after "
+		                            "the partition was created",
+		                            StringUtil::Join(spec, ", "), Describe(), partition_column->name,
+		                            partition_column->type, name, table_type);
 	}
 }
 
@@ -1267,6 +1329,18 @@ void HiveMultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const M
 	optional_ptr<const GluePartitionInfo> partition;
 	if (!info.partition_keys.empty()) {
 		partition = &info.GetPartitionOfFile(reader_data.reader->GetFileName());
+		vector<idx_t> data_columns;
+		for (auto &column_id : global_column_ids) {
+			if (column_id.IsVirtualColumn()) {
+				continue;
+			}
+			auto column_index = column_id.GetPrimaryIndex();
+			if (info.GetPartitionKeyIndex(global_columns[column_index].name.GetIdentifierName()) ==
+			    DConstants::INVALID_INDEX) {
+				data_columns.push_back(column_index);
+			}
+		}
+		info.CheckPartitionColumns(context, *partition, data_columns);
 	}
 	auto &reader = *reader_data.reader;
 	bool file_metadata_read = false;

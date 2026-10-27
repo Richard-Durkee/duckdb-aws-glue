@@ -67,6 +67,10 @@ struct HiveScanInfo : public TableFunctionInfo {
 	void CheckPartitionStorage(const GluePartitionInfo &partition) const;
 	//! The error CheckPartitionStorage throws for the partition, empty when it reads like the table
 	string PartitionStorageMismatch(const GluePartitionInfo &partition) const;
+	//! Throws when a data column the scan reads ('column_indexes' into 'names') is declared by the partition with a
+	//! type its files can not be read as the table's type from: matched by position for csv, by name otherwise
+	void CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
+	                           const vector<idx_t> &column_indexes) const;
 	//! A description of the table for error messages
 	string Describe() const;
 	//! The partitions of the table: given at bind (hive_scan), or fetched from Glue on first use and shared with every

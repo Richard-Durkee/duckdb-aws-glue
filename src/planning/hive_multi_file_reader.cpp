@@ -765,6 +765,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	scan_function.get_table_entry = HiveScanGetTableEntry;
 	scan_info->format_virtual_columns = scan_function.get_virtual_columns;
 	scan_function.get_virtual_columns = HiveScanGetVirtualColumns;
+	// the files are mapped onto the table's types (Bind), which a cast's type pushed into the reader would not change
+	scan_function.projection_expression_pushdown = nullptr;
 	if (IsTextFileFormat(scan_info->file_format)) {
 		// join filters prune partitions; every other filter stays in the plan (HiveTextComplexFilterPushdown), and
 		// the text readers never evaluate table filters (see InitializeReader)

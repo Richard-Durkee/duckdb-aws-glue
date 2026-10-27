@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/enums/file_compression_type.hpp"
+#include "duckdb/common/shared_ptr.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/typedefs.hpp"
 #include "duckdb/common/vector.hpp"
@@ -11,6 +12,9 @@
 #include "core/readers/hive_json_options.hpp"
 
 namespace duckdb {
+
+//! The Glue Table object a GlueTableInfo was converted from (defined in api/, opaque elsewhere)
+struct GlueFetchedTable;
 
 enum class GlueSortOrder : uint8_t { UNSORTED, ASCENDING, DESCENDING };
 
@@ -96,6 +100,10 @@ struct GlueTableInfo {
 	int64_t create_time_ms = 0;
 	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
+	//! The complete Glue object this definition was converted from; null for a definition not fetched from Glue.
+	//! A write that rewrites the table (UpdateTable) or derives from it (partition registration) starts from it
+	//! instead of fetching the table again.
+	shared_ptr<const GlueFetchedTable> fetched;
 
 public:
 	bool IsView() const {

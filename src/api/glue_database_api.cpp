@@ -60,7 +60,7 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 }
 
 void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database.name);
 	CheckWritable(catalog, "CreateDatabase");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -88,7 +88,7 @@ void GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog, const
 }
 
 void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database.name);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	Aws::Glue::Model::GetDatabaseRequest get_request;
@@ -130,7 +130,7 @@ void GlueAPI::UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const
 }
 
 void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name);
 	CheckWritable(catalog, "DeleteDatabase");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);

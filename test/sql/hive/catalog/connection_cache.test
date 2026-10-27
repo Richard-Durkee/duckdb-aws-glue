@@ -148,7 +148,7 @@ SELECT id FROM my_datalake.default.cc_orders ORDER BY id;
 query II
 SELECT glue_calls('GetTable'), glue_calls('GetPartitions');
 ----
-1	1
+0	1
 
 # --- DETACH + re-ATTACH under the same alias must be fresh for every connection: the connection
 # --- states key their caches by the attach identity, so even a connection the DETACH hook could

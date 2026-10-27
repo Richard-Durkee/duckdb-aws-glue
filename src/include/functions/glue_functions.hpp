@@ -24,6 +24,13 @@ TableFunction GetGlueGetDatabaseResponseFunction();
 //! object as VARIANT.
 TableFunction GetGlueGetPartitionResponseFunction();
 
+//! glue_provide_table('<catalog>.<database>', table_json): hand the metadata cache a Glue Table object (JSON, as in
+//! a GetTable response's 'Table') the caller already holds; the transaction uses it instead of calling GetTable
+TableFunction GetGlueProvideTableFunction();
+//! glue_provide_partitions('<catalog>.<database>.<table>', partitions_json): the same for the partitions of a table
+//! (a JSON array of Glue Partition objects), used instead of calling GetPartitions
+TableFunction GetGlueProvidePartitionsFunction();
+
 //! The 'columns' type of the glue_get_*_response functions: LIST(STRUCT(name, type, comment))
 LogicalType GlueColumnsType();
 Value GlueColumnsToValue(const vector<GlueColumn> &columns);

@@ -1,4 +1,5 @@
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_metadata.hpp"
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
 #include "duckdb/catalog/schema_scan_filters.hpp"
@@ -134,7 +135,7 @@ optional_ptr<CatalogEntry> GlueCatalog::CreateSchema(CatalogTransaction transact
 
 	// re-fetch so the cached entry reflects what Glue stored
 	GlueDatabaseInfo created;
-	if (!GlueAPI::GetDatabase(context, *this, schema_name, created)) {
+	if (!GlueMetadata::GetDatabase(context, *this, schema_name, created)) {
 		throw CatalogException("Glue database \"%s\" was created but could not be fetched afterwards", schema_name);
 	}
 	return schemas.CreateEntry(schemas.CreateSchemaEntry(created));
@@ -199,7 +200,7 @@ void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry
 	auto schema_name = schema.Cast<GlueSchemaEntry>().database_info.name;
 	// work on the current Glue definition, not the cached one
 	GlueDatabaseInfo database;
-	if (!GlueAPI::GetDatabase(context, *this, schema_name, database)) {
+	if (!GlueMetadata::GetDatabase(context, *this, schema_name, database)) {
 		throw CatalogException("Schema with name \"%s\" does not exist in Glue catalog \"%s\"", schema_name,
 		                       GetName().GetIdentifierName());
 	}
@@ -231,7 +232,7 @@ void GlueCatalog::AlterSchema(CatalogTransaction transaction, SchemaCatalogEntry
 	GlueAPI::UpdateDatabase(context, *this, database);
 
 	GlueDatabaseInfo updated;
-	if (!GlueAPI::GetDatabase(context, *this, schema_name, updated)) {
+	if (!GlueMetadata::GetDatabase(context, *this, schema_name, updated)) {
 		throw CatalogException("Glue database \"%s\" was updated but could not be fetched afterwards", schema_name);
 	}
 	schemas.CreateEntry(schemas.CreateSchemaEntry(updated));

@@ -12,6 +12,10 @@
 
 namespace duckdb {
 
+struct GlueFetchedTable {
+	Aws::Glue::Model::Table table;
+};
+
 string ToStdString(const Aws::String &input);
 unordered_map<string, string> ToStdMap(const Aws::Map<Aws::String, Aws::String> &input);
 vector<GlueColumn> ToColumns(const Aws::Vector<Aws::Glue::Model::Column> &input);

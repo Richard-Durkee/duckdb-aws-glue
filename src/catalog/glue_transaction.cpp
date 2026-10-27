@@ -71,6 +71,27 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 	ClearHiveListingCache(context);
 }
 
+void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog, const string &database_name,
+                                      const string &table_name, bool partitions_only) {
+	if (database_name.empty()) {
+		Invalidate(context, catalog);
+		return;
+	}
+	GlueTransaction::Get(context, catalog).cache->Forget(database_name, table_name, partitions_only);
+	auto state = context.registered_state->Get<GlueMetadataCacheState>("glue_metadata_cache");
+	if (state) {
+		state->ForgetAll(database_name, table_name, partitions_only);
+	}
+	ClearHiveListingCache(context);
+}
+
+idx_t GlueTransactionCache::CurrentQuery(ClientContext &context) {
+	if (!context.transaction.HasActiveTransaction()) {
+		return 0;
+	}
+	return context.transaction.GetActiveQuery();
+}
+
 bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {
 	Value scope;
 	if (context.TryGetCurrentSetting("glue_metadata_cache_scope", scope) && !scope.IsNull()) {
@@ -91,7 +112,7 @@ void GlueTransactionCache::OnDetach(ClientContext &context, Catalog &catalog) {
 GlueTransactionCache::InvalidateOnExit::~InvalidateOnExit() {
 	// A destructor must not throw: log what went wrong instead, so the swallowed exception is not silent
 	try {
-		Invalidate(context, catalog);
+		Invalidate(context, catalog, database_name, table_name, partitions_only);
 	} catch (std::exception &ex) {
 		ErrorData error(ex);
 		DUCKDB_LOG_WARNING(context, "Could not invalidate the Glue metadata cache of catalog '%s': %s",

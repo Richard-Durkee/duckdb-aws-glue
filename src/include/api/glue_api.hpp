@@ -65,29 +65,32 @@ public:
 	static void CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);
 	static void CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
 	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW)
-	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
+	static GlueTableInfo UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view, optional_ptr<const GlueTableInfo> bound = nullptr);
+	//! The UpdateTable wrappers below rewrite the whole definition and return it as written (see UpdateGlueTable). With 'bound' (a definition fetched by the running
+	//! statement) they start from it instead of fetching the table again, and pass its VersionId so Glue refuses the
+	//! write if another client changed the table in between.
 	//! Replace the (data) columns of a table, keeping everything else of its Glue definition as is. Used for
 	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata.
-	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                               const string &table_name, const vector<GlueColumn> &columns);
+	static GlueTableInfo UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                               const string &table_name, const vector<GlueColumn> &columns, optional_ptr<const GlueTableInfo> bound = nullptr);
 	//! Replace the partition keys of a table, keeping everything else of its Glue definition as is. Only the names,
 	//! types and comments of the partition keys are overwritten; the StorageDescriptor and registered partitions are
 	//! untouched. Used for COMMENT ON COLUMN on a partition key.
-	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                     const string &table_name, const vector<GlueColumn> &partition_keys);
+	static GlueTableInfo UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                     const string &table_name, const vector<GlueColumn> &partition_keys, optional_ptr<const GlueTableInfo> bound = nullptr);
 	//! Replace the description of a table (Glue's Table.Description), keeping everything else of its Glue definition
 	//! as is. An empty description clears it.
-	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                   const string &table_name, const string &description);
+	static GlueTableInfo UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                   const string &table_name, const string &description, optional_ptr<const GlueTableInfo> bound = nullptr);
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
-	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	static GlueTableInfo SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                             const string &table_name, const string &location);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
 	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
-	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	static GlueTableInfo UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                  const string &table_name, const vector<pair<string, string>> &set,
-	                                  const vector<string> &unset);
+	                                  const vector<string> &unset, optional_ptr<const GlueTableInfo> bound = nullptr);
 	//! Point a partition at another location, throws a CatalogException if the partition does not exist
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                                 const string &table_name, const vector<string> &values, const string &location);
@@ -102,7 +105,8 @@ public:
 	//! Register one partition of a Hive table. Returns false if it already exists and 'if_not_exists' is set, throws
 	//! a CatalogException if it already exists otherwise.
 	static bool CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                            const string &table_name, const GluePartitionInput &partition, bool if_not_exists);
+	                            const string &table_name, const GluePartitionInput &partition, bool if_not_exists,
+	                            optional_ptr<const GlueTableInfo> table = nullptr);
 	//! Unregister a partition (the data files are left in place), returns false if it does not exist
 	static bool DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                            const string &table_name, const vector<string> &values);
@@ -117,12 +121,21 @@ public:
 	//! Register partitions of a Hive table (BatchCreatePartition). Partitions that already exist are skipped; throws
 	//! for the first partition Glue refuses, after retrying the errors that may pass.
 	static void BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-	                                  const string &table_name, const vector<GluePartitionInput> &partitions);
+	                                  const string &table_name, const vector<GluePartitionInput> &partitions,
+	                                  optional_ptr<const GlueTableInfo> table = nullptr);
 	//! SET callback of glue_debug_fail_partition_registration: rejects a value that is not '<error code>:<index>'
 	static void CheckDebugFailPartitionRegistration(ClientContext &context, SetScope scope, Value &parameter);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist
 	static void DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                        const string &table_name);
+
+	//! Which of the partitions (by their values) exist, in as few BatchGetPartition calls as Glue allows
+	static vector<bool> PartitionsExist(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+	                                    const string &table_name, const vector<vector<string>> &values);
+	//! The table of a Glue Table object serialized as JSON (Table::Jsonize), as if GetTable had returned it
+	static GlueTableInfo ParseTable(const string &table_json, const string &schema_name);
+	//! The partitions of a JSON array of Glue Partition objects
+	static vector<GluePartitionInfo> ParsePartitions(const string &partitions_json);
 
 private:
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret

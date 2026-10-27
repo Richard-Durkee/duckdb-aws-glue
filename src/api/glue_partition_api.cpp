@@ -13,6 +13,9 @@
 #include <thread>
 
 #include <aws/glue/model/BatchCreatePartitionRequest.h>
+#include <aws/glue/model/BatchGetPartitionRequest.h>
+#include <aws/glue/model/Partition.h>
+#include <aws/core/utils/json/JsonSerializer.h>
 #include <aws/glue/model/CreatePartitionRequest.h>
 #include <aws/glue/model/DeletePartitionRequest.h>
 #include <aws/glue/model/GetPartitionRequest.h>
@@ -25,7 +28,7 @@ namespace duckdb {
 
 void GlueAPI::SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                    const string &table_name, const vector<string> &values, const string &location) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name, true);
 	CheckWritable(catalog, "UpdatePartition");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -109,23 +112,35 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	return true;
 }
 
+//! The StorageDescriptor of the table, to derive a partition's from: the one of 'table' if it was fetched,
+//! otherwise asked from Glue
+static Aws::Glue::Model::StorageDescriptor TableDescriptor(Aws::Glue::GlueClient &client, GlueCatalog &catalog,
+                                                           const string &database_name, const string &table_name,
+                                                           optional_ptr<const GlueTableInfo> table) {
+	if (table && table->fetched) {
+		return table->fetched->table.GetStorageDescriptor();
+	}
+	Aws::Glue::Model::GetTableRequest get_request;
+	SetCatalogId(get_request, catalog);
+	get_request.SetDatabaseName(database_name);
+	get_request.SetName(table_name);
+	auto get_outcome = client.GetTable(get_request);
+	if (!get_outcome.IsSuccess()) {
+		ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
+	}
+	return get_outcome.GetResult().GetTable().GetStorageDescriptor();
+}
+
 bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                              const string &table_name, const GluePartitionInput &partition, bool if_not_exists) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+                              const string &table_name, const GluePartitionInput &partition, bool if_not_exists,
+                              optional_ptr<const GlueTableInfo> table) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name, true);
 	CheckWritable(catalog, "CreatePartition");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 
 	// A partition carries its own StorageDescriptor: the table's, with the partition's location
-	Aws::Glue::Model::GetTableRequest get_request;
-	SetCatalogId(get_request, catalog);
-	get_request.SetDatabaseName(database_name);
-	get_request.SetName(table_name);
-	auto get_outcome = client->GetTable(get_request);
-	if (!get_outcome.IsSuccess()) {
-		ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
-	}
-	auto descriptor = get_outcome.GetResult().GetTable().GetStorageDescriptor();
+	auto descriptor = TableDescriptor(*client, catalog, database_name, table_name, table);
 	descriptor.SetLocation(partition.location);
 
 	Aws::Glue::Model::PartitionInput input;
@@ -153,7 +168,7 @@ bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, cons
 
 bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                               const string &table_name, const vector<string> &values) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name, true);
 	CheckWritable(catalog, "DeletePartition");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -176,7 +191,7 @@ bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, cons
 void GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                               const string &table_name, const vector<string> &values,
                               const vector<string> &new_values) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name, true);
 	CheckWritable(catalog, "UpdatePartition");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -411,8 +426,9 @@ void GlueAPI::CheckDebugFailPartitionRegistration(ClientContext &, SetScope, Val
 }
 
 void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                    const string &table_name, const vector<GluePartitionInput> &partitions) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+                                    const string &table_name, const vector<GluePartitionInput> &partitions,
+                                    optional_ptr<const GlueTableInfo> table) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name, true);
 	CheckWritable(catalog, "BatchCreatePartition");
 	if (partitions.empty()) {
 		return;
@@ -422,15 +438,7 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 	auto injected = InjectedPartitionFailure::FromSettings(context);
 
 	// A partition carries its own StorageDescriptor: the table's, with the partition's location
-	Aws::Glue::Model::GetTableRequest get_request;
-	SetCatalogId(get_request, catalog);
-	get_request.SetDatabaseName(database_name);
-	get_request.SetName(table_name);
-	auto get_outcome = client->GetTable(get_request);
-	if (!get_outcome.IsSuccess()) {
-		ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
-	}
-	auto table_descriptor = get_outcome.GetResult().GetTable().GetStorageDescriptor();
+	auto table_descriptor = TableDescriptor(*client, catalog, database_name, table_name, table);
 
 	// BatchCreatePartition accepts at most 100 partitions per call. The SDK retries a failed request, not the single
 	// partitions a successful response refuses, so those are sent again here when the error may pass.
@@ -510,6 +518,79 @@ void GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog
 			}
 		}
 	}
+}
+
+vector<GluePartitionInfo> GlueAPI::ParsePartitions(const string &partitions_json) {
+	Aws::Utils::Json::JsonValue json(partitions_json);
+	if (!json.WasParseSuccessful() || !json.View().IsListType()) {
+		throw InvalidInputException("Not a JSON array of Glue Partition objects");
+	}
+	vector<GluePartitionInfo> result;
+	auto list = json.View().AsArray();
+	for (size_t i = 0; i < list.GetLength(); i++) {
+		Aws::Glue::Model::Partition partition(list[i]);
+		GluePartitionInfo info;
+		for (auto &value : partition.GetValues()) {
+			info.values.push_back(ToStdString(value));
+		}
+		info.location = ToStdString(partition.GetStorageDescriptor().GetLocation());
+		result.push_back(std::move(info));
+	}
+	return result;
+}
+
+vector<bool> GlueAPI::PartitionsExist(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                      const string &table_name, const vector<vector<string>> &values) {
+	vector<bool> result(values.size(), false);
+	if (values.empty()) {
+		return result;
+	}
+	GlueHttpClientContextScope http_scope(context);
+	auto client = GetClient(context, catalog);
+	map<vector<string>, vector<idx_t>> wanted;
+	for (idx_t i = 0; i < values.size(); i++) {
+		wanted[values[i]].push_back(i);
+	}
+	// BatchGetPartition takes at most 1000 partitions per call
+	constexpr idx_t BATCH_SIZE = 1000;
+	vector<vector<string>> keys;
+	for (auto &entry : wanted) {
+		keys.push_back(entry.first);
+	}
+	for (idx_t start = 0; start < keys.size(); start += BATCH_SIZE) {
+		Aws::Vector<Aws::Glue::Model::PartitionValueList> to_get;
+		for (idx_t i = start; i < MinValue<idx_t>(keys.size(), start + BATCH_SIZE); i++) {
+			Aws::Glue::Model::PartitionValueList value_list;
+			value_list.SetValues(ToAwsValues(keys[i]));
+			to_get.push_back(std::move(value_list));
+		}
+		while (!to_get.empty()) {
+			Aws::Glue::Model::BatchGetPartitionRequest request;
+			SetCatalogId(request, catalog);
+			request.SetDatabaseName(database_name);
+			request.SetTableName(table_name);
+			request.SetPartitionsToGet(to_get);
+			auto outcome = client->BatchGetPartition(request);
+			if (!outcome.IsSuccess()) {
+				ThrowGlueError(outcome, StringUtil::Format("BatchGetPartition '%s.%s'", database_name, table_name));
+			}
+			for (auto &partition : outcome.GetResult().GetPartitions()) {
+				vector<string> found;
+				for (auto &value : partition.GetValues()) {
+					found.push_back(ToStdString(value));
+				}
+				auto entry = wanted.find(found);
+				if (entry != wanted.end()) {
+					for (auto index : entry->second) {
+						result[index] = true;
+					}
+				}
+			}
+			// Glue may leave keys unprocessed (throttling): ask for those again
+			to_get = outcome.GetResult().GetUnprocessedKeys();
+		}
+	}
+	return result;
 }
 
 } // namespace duckdb

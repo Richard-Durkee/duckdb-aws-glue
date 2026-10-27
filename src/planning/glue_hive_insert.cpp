@@ -25,6 +25,7 @@
 #include "duckdb/planner/operator/logical_copy_to_file.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_metadata.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
@@ -146,7 +147,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	}
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
-	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	auto partitions_ptr = GlueMetadata::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	auto &partitions = *partitions_ptr;
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	for (auto &partition : partitions) {
 		if (partition.values.size() != partition_columns.size()) {
@@ -559,7 +561,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
 	if (!state.written_files.empty()) {
 		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
-		GlueTransactionCache::Invalidate(context, catalog);
+		GlueTransactionCache::Invalidate(context, catalog, table_info.schema_name, table_info.name, true);
 	}
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		return SinkFinalizeType::READY;
@@ -604,7 +606,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		to_register.push_back(entry.second);
 	}
 	try {
-		GlueAPI::BatchCreatePartitions(context, catalog, table_info.schema_name, table_info.name, to_register);
+		GlueAPI::BatchCreatePartitions(context, catalog, table_info.schema_name, table_info.name, to_register,
+		                               &table_info);
 	} catch (std::exception &ex) {
 		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.

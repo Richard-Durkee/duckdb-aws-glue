@@ -3,6 +3,7 @@
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/parser/qualified_name.hpp"
@@ -10,6 +11,7 @@
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/glue_metadata.hpp"
 
 namespace duckdb {
 
@@ -159,7 +161,66 @@ void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &dat
 	output.CheckCardinality(1);
 }
 
+//! glue_provide_table / glue_provide_partitions: what the bind handed to the metadata cache, as one row
+struct GlueProvideBindData : public TableFunctionData {
+	Value result;
+};
+
+unique_ptr<FunctionData> GlueProvideTableBind(ClientContext &context, TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto components = QualifiedName::ParseComponents(input.inputs[0].GetValue<string>());
+	if (components.size() != 2) {
+		throw BinderException("glue_provide_table expects a database name '<catalog>.<database>', got '%s'",
+		                      input.inputs[0].GetValue<string>());
+	}
+	auto catalog = Catalog::GetCatalogEntry(context, components[0]);
+	if (!catalog || catalog->GetCatalogType() != "glue") {
+		throw BinderException("glue_provide_table: '%s' is not an attached Glue catalog",
+		                      components[0].GetIdentifierName());
+	}
+	auto table = GlueMetadata::ProvideTable(context, catalog->Cast<GlueCatalog>(), components[1].GetIdentifierName(),
+	                                        input.inputs[1].GetValue<string>());
+	auto result = make_uniq<GlueProvideBindData>();
+	result->result = Value(table.name);
+	names = {"table_name"};
+	return_types = {LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+unique_ptr<FunctionData> GlueProvidePartitionsBind(ClientContext &context, TableFunctionBindInput &input,
+                                                   vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto name = ResolveGlueTableName(context, "glue_provide_partitions", input.inputs[0].GetValue<string>());
+	auto &catalog = Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
+	auto count = GlueMetadata::ProvidePartitions(context, catalog, name.Schema().GetIdentifierName(),
+	                                             name.Name().GetIdentifierName(), input.inputs[1].GetValue<string>());
+	auto result = make_uniq<GlueProvideBindData>();
+	result->result = Value::BIGINT(NumericCast<int64_t>(count));
+	names = {"partitions"};
+	return_types = {LogicalType::BIGINT};
+	return std::move(result);
+}
+
+void GlueProvideScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueGetTableResponseState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	output.data[0].Append(data.bind_data->Cast<GlueProvideBindData>().result);
+	output.CheckCardinality(1);
+}
+
 } // namespace
+
+TableFunction GetGlueProvideTableFunction() {
+	return TableFunction("glue_provide_table", {LogicalType::VARCHAR, LogicalType::VARCHAR}, GlueProvideScan,
+	                     GlueProvideTableBind, GlueGetTableResponseInit);
+}
+
+TableFunction GetGlueProvidePartitionsFunction() {
+	return TableFunction("glue_provide_partitions", {LogicalType::VARCHAR, LogicalType::VARCHAR}, GlueProvideScan,
+	                     GlueProvidePartitionsBind, GlueGetTableResponseInit);
+}
 
 LogicalType GlueColumnsType() {
 	return LogicalType::LIST(LogicalType::STRUCT(

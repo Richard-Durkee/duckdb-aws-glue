@@ -254,7 +254,7 @@ INSERT INTO my_datalake.default.bare_flat VALUES (2);
 statement ok
 CALL truncate_duckdb_logs();
 
-# the INSERT cleared the cache: this bind refetches instead of serving the pre-INSERT entry
+# an INSERT does not change the table definition: the bind keeps it, while the files are listed again
 query I
 SELECT count(*) FROM my_datalake.default.bare_flat;
 ----
@@ -263,7 +263,7 @@ SELECT count(*) FROM my_datalake.default.bare_flat;
 query I
 SELECT glue_calls('GetTable');
 ----
-1
+0
 
 statement ok
 DROP TABLE my_datalake.default.bare_flat;
@@ -282,7 +282,7 @@ CREATE TABLE my_datalake.default.bare_ctas AS SELECT 1 AS id;
 statement ok
 CALL truncate_duckdb_logs();
 
-# the CTAS cleared the cache: this bind refetches instead of serving the pre-CTAS entry
+# the CTAS forgets only the table it creates: the untouched table keeps its cached definition
 query I
 SELECT count(*) FROM my_datalake.default.bare_orders;
 ----
@@ -291,12 +291,12 @@ SELECT count(*) FROM my_datalake.default.bare_orders;
 query I
 SELECT glue_calls('GetTable');
 ----
-1
+0
 
 statement ok
 DROP TABLE my_datalake.default.bare_ctas;
 
-# --- database-level DDL invalidates as well ---
+# --- database-level DDL forgets only that database ---
 
 query I
 SELECT count(*) FROM my_datalake.default.bare_orders;
@@ -317,7 +317,7 @@ SELECT count(*) FROM my_datalake.default.bare_orders;
 query I
 SELECT glue_calls('GetTable');
 ----
-1
+0
 
 statement ok
 DROP SCHEMA my_datalake.bare_schema;

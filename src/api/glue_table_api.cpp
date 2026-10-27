@@ -114,7 +114,7 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 }
 
 void GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, table.schema_name, table.name);
 	CheckWritable(catalog, "CreateTable");
 	if (table.location.empty()) {
 		throw InvalidInputException("Can not create Hive table '%s.%s' without a location", table.schema_name,
@@ -246,12 +246,13 @@ static Aws::Glue::Model::TableInput ToViewTableInput(const GlueViewInfo &view) {
 	return table_input;
 }
 
-static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-                            const string &database_name, const string &table_name,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
+static GlueTableInfo UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                                     const string &database_name, const string &table_name,
+                                     optional_ptr<const GlueTableInfo> bound,
+                                     const std::function<void(Aws::Glue::Model::TableInput &)> &modify);
 
 void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, view.database_name, view.name);
 	CheckWritable(catalog, "CreateView");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -270,14 +271,15 @@ void GlueAPI::CreateView(ClientContext &context, GlueCatalog &catalog, const Glu
 	}
 }
 
-void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+GlueTableInfo GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view,
+                         optional_ptr<const GlueTableInfo> bound) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, view.database_name, view.name);
 	CheckWritable(catalog, "UpdateView");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
 	// CREATE OR REPLACE keeps what is not the definition: the description, owner and parameters other engines or
 	// users set stay, the SQL, the columns and our own parameters are replaced
-	UpdateGlueTable(client, catalog, view.database_name, view.name, [&](Aws::Glue::Model::TableInput &table_input) {
+	return UpdateGlueTable(client, catalog, view.database_name, view.name, bound, [&](Aws::Glue::Model::TableInput &table_input) {
 		SetViewDefinition(table_input, view);
 		auto parameters = table_input.GetParameters();
 		SetViewParameters(parameters, view);
@@ -285,25 +287,30 @@ void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const Glu
 	});
 }
 
-//! UpdateTable replaces the whole definition: fetch the current one, let 'modify' change the TableInput built from
-//! it, and send it back
-static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-                            const string &database_name, const string &table_name,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
-	// UpdateTable replaces the whole definition, so start from the current one and change only the columns
-	Aws::Glue::Model::GetTableRequest get_request;
-	SetCatalogId(get_request, catalog);
-	get_request.SetDatabaseName(database_name);
-	get_request.SetName(table_name);
-	auto get_outcome = client->GetTable(get_request);
-	if (!get_outcome.IsSuccess()) {
-		if (IsEntityNotFound(get_outcome)) {
-			throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
-			                       database_name);
+//! UpdateTable replaces the whole definition: start from the bound one (or fetch the current one), let 'modify'
+//! change the TableInput built from it, and send it back. Returns the definition as written: what the write sent on
+//! top of what it started from, without a VersionId (Glue assigns the new one) and without the Glue object, so a later
+//! lookup that fetches the table replaces it.
+static GlueTableInfo UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                                     const string &database_name, const string &table_name,
+                                     optional_ptr<const GlueTableInfo> bound,
+                                     const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
+	Aws::Glue::Model::GetTableOutcome get_outcome;
+	if (!bound || !bound->fetched) {
+		Aws::Glue::Model::GetTableRequest get_request;
+		SetCatalogId(get_request, catalog);
+		get_request.SetDatabaseName(database_name);
+		get_request.SetName(table_name);
+		get_outcome = client->GetTable(get_request);
+		if (!get_outcome.IsSuccess()) {
+			if (IsEntityNotFound(get_outcome)) {
+				throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
+				                       database_name);
+			}
+			ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
 		}
-		ThrowGlueError(get_outcome, StringUtil::Format("GetTable '%s.%s'", database_name, table_name));
 	}
-	auto &table = get_outcome.GetResult().GetTable();
+	auto &table = bound && bound->fetched ? bound->fetched->table : get_outcome.GetResult().GetTable();
 
 	Aws::Glue::Model::TableInput table_input;
 	table_input.SetName(table.GetName());
@@ -347,43 +354,68 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 	SetCatalogId(update_request, catalog);
 	update_request.SetDatabaseName(database_name);
 	update_request.SetTableInput(table_input);
+	if (bound && bound->fetched && table.VersionIdHasBeenSet()) {
+		// optimistic concurrency: Glue refuses the write if the table is no longer at the version the statement read
+		update_request.SetVersionId(table.GetVersionId());
+	}
 	auto update_outcome = client->UpdateTable(update_request);
 	if (!update_outcome.IsSuccess()) {
+		if (update_outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::CONCURRENT_MODIFICATION) {
+			throw TransactionException("Glue table \"%s.%s\" was changed by another client while this statement ran; "
+			                           "retry the statement",
+			                           database_name, table_name);
+		}
 		ThrowGlueError(update_outcome, StringUtil::Format("UpdateTable '%s.%s'", database_name, table_name));
 	}
+	Aws::Glue::Model::Table written = table;
+	written.SetName(table_input.GetName());
+	written.SetDescription(table_input.GetDescription());
+	written.SetPartitionKeys(table_input.GetPartitionKeys());
+	written.SetViewOriginalText(table_input.GetViewOriginalText());
+	written.SetViewExpandedText(table_input.GetViewExpandedText());
+	written.SetTableType(table_input.GetTableType());
+	written.SetParameters(table_input.GetParameters());
+	written.SetStorageDescriptor(table_input.GetStorageDescriptor());
+	auto result = ToTableInfo(written, database_name);
+	result.version_id.clear();
+	result.fetched = nullptr;
+	return result;
 }
 
-void GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                 const string &table_name, const vector<GlueColumn> &columns) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+GlueTableInfo GlueAPI::UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                 const string &table_name, const vector<GlueColumn> &columns,
+                                 optional_ptr<const GlueTableInfo> bound) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+	return UpdateGlueTable(client, catalog, database_name, table_name, bound, [&](Aws::Glue::Model::TableInput &table_input) {
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetColumns(ToAwsColumns(columns));
 		table_input.SetStorageDescriptor(storage_descriptor);
 	});
 }
 
-void GlueAPI::UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                       const string &table_name, const vector<GlueColumn> &partition_keys) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+GlueTableInfo GlueAPI::UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                       const string &table_name, const vector<GlueColumn> &partition_keys,
+                                 optional_ptr<const GlueTableInfo> bound) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+	return UpdateGlueTable(client, catalog, database_name, table_name, bound, [&](Aws::Glue::Model::TableInput &table_input) {
 		table_input.SetPartitionKeys(ToAwsColumns(partition_keys));
 	});
 }
 
-void GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
-                                     const string &table_name, const string &description) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+GlueTableInfo GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                                     const string &table_name, const string &description,
+                                 optional_ptr<const GlueTableInfo> bound) {
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+	return UpdateGlueTable(client, catalog, database_name, table_name, bound, [&](Aws::Glue::Model::TableInput &table_input) {
 		// Glue has no explicit "unset Description"; set it to the given value (empty clears it on the next GetTable)
 		table_input.SetDescription(description);
 		// Mirror the description in Parameters.comment: the comment lives in both locations
@@ -397,27 +429,28 @@ void GlueAPI::UpdateTableDescription(ClientContext &context, GlueCatalog &catalo
 	});
 }
 
-void GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+GlueTableInfo GlueAPI::SetTableLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                const string &table_name, const string &location) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name);
 	CheckWritable(catalog, "UpdateTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+	return UpdateGlueTable(client, catalog, database_name, table_name, nullptr, [&](Aws::Glue::Model::TableInput &table_input) {
 		auto storage_descriptor = table_input.GetStorageDescriptor();
 		storage_descriptor.SetLocation(location);
 		table_input.SetStorageDescriptor(storage_descriptor);
 	});
 }
 
-void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+GlueTableInfo GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                                     const string &table_name, const vector<pair<string, string>> &set,
-                                    const vector<string> &unset) {
+                                    const vector<string> &unset,
+                                    optional_ptr<const GlueTableInfo> bound) {
 	// Reached only through ALTER TABLE, which the binder refuses on a read-only attach before it gets here.
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name);
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
-	UpdateGlueTable(client, catalog, database_name, table_name, [&](Aws::Glue::Model::TableInput &table_input) {
+	return UpdateGlueTable(client, catalog, database_name, table_name, bound, [&](Aws::Glue::Model::TableInput &table_input) {
 		auto parameters = table_input.GetParameters();
 		for (auto &key : unset) {
 			parameters.erase(key);
@@ -431,7 +464,7 @@ void GlueAPI::UpdateTableParameters(ClientContext &context, GlueCatalog &catalog
 
 void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
                           const string &table_name) {
-	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog, database_name, table_name);
 	CheckWritable(catalog, "DeleteTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
@@ -447,6 +480,18 @@ void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const st
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeleteTable '%s.%s'", database_name, table_name));
 	}
+}
+
+GlueTableInfo GlueAPI::ParseTable(const string &table_json, const string &schema_name) {
+	Aws::Utils::Json::JsonValue json(table_json);
+	if (!json.WasParseSuccessful()) {
+		throw InvalidInputException("Not a Glue Table object: %s", ToStdString(json.GetErrorMessage()));
+	}
+	Aws::Glue::Model::Table table(json.View());
+	if (!table.NameHasBeenSet()) {
+		throw InvalidInputException("Not a Glue Table object: it has no Name");
+	}
+	return ToTableInfo(table, schema_name);
 }
 
 } // namespace duckdb

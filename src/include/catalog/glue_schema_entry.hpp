@@ -80,6 +80,8 @@ public:
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
 	//! Replace the cached entry of an altered table with what Glue stored
 	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
+	//! Replace the cached entry of an altered table with the definition the write returned
+	GlueTable &ReplaceTable(const GlueTableInfo &written);
 	//! The database definition, asked from Glue first if the entry was created from the name alone
 	const GlueDatabaseInfo &GetDatabaseInfo(ClientContext &context);
 	//! Take the definition of a database known by name alone from a listing; no-op once it is loaded

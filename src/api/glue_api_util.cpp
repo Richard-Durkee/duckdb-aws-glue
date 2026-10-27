@@ -43,6 +43,9 @@ GlueDatabaseInfo ToDatabaseInfo(const Aws::Glue::Model::Database &database) {
 
 GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &schema_name) {
 	GlueTableInfo result;
+	auto fetched = make_shared_ptr<GlueFetchedTable>();
+	fetched->table = table;
+	result.fetched = std::move(fetched);
 	result.name = ToStdString(table.GetName());
 	result.schema_name = schema_name;
 	result.glue_database_name = ToStdString(table.GetDatabaseName());

@@ -102,6 +102,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "When a scan reads at least this many partitions below the table location, the location "
 	                          "is listed once (recursively) instead of one listing per partition. Default 10.",
 	                          LogicalType::UBIGINT, Value::UBIGINT(10));
+	config.AddExtensionOption(
+	    "hive_partition_listing_concurrency",
+	    "How many partition directories are listed at the same time when a scan lists its partitions one directory "
+	    "each. 0 (default) lists them as tasks on DuckDB's threads, as many at a time as there are threads; a larger "
+	    "value lists that many at a time on threads of their own.",
+	    LogicalType::UBIGINT, Value::UBIGINT(0));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

@@ -168,6 +168,7 @@ struct GlueViewInfo {
 	//! The bound output columns
 	vector<GlueColumn> columns;
 	bool secure = false;
+	bool has_column_alias_list = false;
 };
 
 //! A partition of a Hive table to register: the partition values (in partition key order) and its location

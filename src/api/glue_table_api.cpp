@@ -222,6 +222,11 @@ static void SetViewParameters(Aws::Map<Aws::String, Aws::String> &parameters, co
 	} else {
 		parameters.erase("duckdb_view_secure");
 	}
+	if (view.has_column_alias_list) {
+		parameters["duckdb_view_column_alias_list"] = "true";
+	} else {
+		parameters.erase("duckdb_view_column_alias_list");
+	}
 }
 
 //! Glue's (Hive's) two view fields: the SQL as written (shown) and the SQL with every table as db.t (executed)

@@ -3,6 +3,7 @@
 #include "catalog/glue_view_names.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -549,7 +550,14 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
 	vector<LogicalType> types;
 	vector<Identifier> names;
-	Binder::BindView(context, *check, catalog.GetName(), name, nullptr, info.aliases, types, names);
+	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
+	// if its new query would read itself under this alias (not when a path reaches it under another alias)
+	LogicalDependencyList reads;
+	Binder::BindView(context, *check, catalog.GetName(), name, &reads, info.aliases, types, names);
+	if (existing && reads.Contains(*existing)) {
+		throw BinderException("Glue view \"%s.%s\" can not be created: its query reads the view itself",
+		                      database_info.name, view_name);
+	}
 	if (types != info.types) {
 		throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the view "
 		                      "query:\n%s",

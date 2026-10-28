@@ -259,13 +259,15 @@ CREATE SECURE VIEW cv_secure AS SELECT id FROM cv_orders;
 statement ok
 CREATE VIEW my_datalake.default.cv_recursive AS SELECT 1 AS x;
 
-statement ok
-CREATE OR REPLACE VIEW my_datalake.default.cv_recursive AS SELECT x FROM cv_recursive;
-
 statement error
+CREATE OR REPLACE VIEW my_datalake.default.cv_recursive AS SELECT x FROM cv_recursive;
+----
+Glue view "default.cv_recursive" can not be created: its query reads the view itself
+
+query I
 SELECT * FROM my_datalake.default.cv_recursive;
 ----
-recursive
+1
 
 query I
 SELECT count(*) FROM duckdb_views() WHERE database_name = 'my_datalake' AND view_name LIKE 'cv_%';

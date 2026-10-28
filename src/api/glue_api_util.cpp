@@ -85,6 +85,7 @@ GlueTableInfo ToTableInfo(const Aws::Glue::Model::Table &table, const string &sc
 		result.sort_columns.push_back(std::move(sort_column));
 	}
 	result.parameters = ToStdMap(table.GetParameters());
+	result.fetched = make_shared_ptr<const GlueFetchedTable>(table);
 	return result;
 }
 

@@ -1,5 +1,5 @@
 # name: test/sql/hive/logging/glue_log_types.test
-# description: The GlueRequest and GlueScan log types record each Glue request and what each scan loads and lists
+# description: glue_requests() lists the Glue requests in the HTTP log, and the GlueScan log type records what each scan loads and lists
 # group: [logging]
 
 require httpfs
@@ -36,8 +36,12 @@ CREATE TABLE my_datalake.default.glog_flat AS SELECT range AS id FROM range(5);
 statement ok
 CREATE TABLE my_datalake.default.glog_avro WITH (format = 'avro') AS SELECT range AS id FROM range(4);
 
+# the operation is the X-Amz-Target header, which the HTTP log redacts unless redact_http_logs is off
 statement ok
-CALL enable_logging(['GlueRequest', 'GlueScan'], storage := 'memory');
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
 
 # a cold catalog: every request of the lookup and the partition load is logged
 statement ok
@@ -51,14 +55,14 @@ SELECT count(*) FROM glog_cold.default.glog_parts WHERE dt = 'b';
 ----
 1
 
-query IIIIIII
-SELECT "table", event, partitions, partitions_read, listings, files, detail FROM duckdb_logs_parsed('GlueScan')
-ORDER BY event;
+query IIIIIIII
+SELECT "table", scan_id, event, partitions, partitions_read, listings, files, detail
+FROM duckdb_logs_parsed('GlueScan') ORDER BY event;
 ----
-default.glog_parts	listing	NULL	1	NULL	1	partition
-default.glog_parts	partitions	3	NULL	NULL	NULL	NULL
-default.glog_parts	plan	3	1	1	NULL	partitions
-default.glog_parts	sample	NULL	NULL	NULL	1	NULL
+default.glog_parts	1	listing	NULL	1	NULL	1	partition
+default.glog_parts	1	partitions	3	NULL	NULL	NULL	NULL
+default.glog_parts	1	plan	3	1	1	NULL	partitions
+default.glog_parts	1	sample	NULL	NULL	NULL	1	NULL
 
 query I
 SELECT bool_and(duration_ms >= 0) FROM duckdb_logs_parsed('GlueScan') WHERE event != 'plan';
@@ -70,13 +74,30 @@ SELECT count(*) FROM duckdb_logs_parsed('GlueScan') WHERE event = 'plan' AND dur
 ----
 0
 
-query IIII
-SELECT operation, status, bool_and(duration_ms >= 0 AND response_bytes > 0), bool_and(error IS NULL)
-FROM duckdb_logs_parsed('GlueRequest') GROUP BY ALL ORDER BY operation;
+query III
+SELECT operation, status, bool_and(duration_ms >= 0 AND query_id IS NOT NULL) FROM glue_requests()
+GROUP BY ALL ORDER BY operation;
 ----
-AWSGlue.GetDatabase	200	true	true
-AWSGlue.GetPartitions	200	true	true
-AWSGlue.GetTable	200	true	true
+AWSGlue.GetDatabase	OK_200	true
+AWSGlue.GetPartitions	OK_200	true
+AWSGlue.GetTable	OK_200	true
+
+# each scan of a query has its own scan_id, numbered from 1 in every query; the second scan of a table reuses its
+# sample
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*) FROM glog_cold.default.glog_flat a JOIN glog_cold.default.glog_flat b USING (id);
+----
+5
+
+query III
+SELECT scan_id, count(*) FILTER (event = 'listing'), count(*) FILTER (event = 'sample')
+FROM duckdb_logs_parsed('GlueScan') GROUP BY scan_id ORDER BY scan_id;
+----
+1	1	1
+2	1	0
 
 # from hive_partition_listing_threshold partitions on, the table location is listed once
 statement ok
@@ -140,9 +161,9 @@ SELECT * FROM glog_cold.default.glog_missing;
 <REGEX>:Catalog Error: Table with name glog_missing does not exist.*
 
 query II
-SELECT DISTINCT operation, status FROM duckdb_logs_parsed('GlueRequest') WHERE operation = 'AWSGlue.GetTable';
+SELECT DISTINCT operation, status FROM glue_requests() WHERE operation = 'AWSGlue.GetTable';
 ----
-AWSGlue.GetTable	400
+AWSGlue.GetTable	BadRequest_400
 
 # nothing is logged with the log types off
 statement ok
@@ -159,10 +180,10 @@ SELECT count(*) FROM glog_quiet.default.glog_parts;
 ----
 3
 
-query I
-SELECT count(*) FROM duckdb_logs WHERE type IN ('GlueRequest', 'GlueScan');
+query II
+SELECT (SELECT count(*) FROM glue_requests()), count(*) FROM duckdb_logs WHERE type = 'GlueScan';
 ----
-0
+0	0
 
 statement ok
 DROP TABLE my_datalake.default.glog_parts;

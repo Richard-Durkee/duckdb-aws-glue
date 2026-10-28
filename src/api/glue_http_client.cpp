@@ -1,15 +1,12 @@
 #include "api/glue_http_client.hpp"
 
 #include "duckdb/common/http_util.hpp"
-#include "duckdb/logging/logger.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/value.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/http/http_transport_manager.hpp"
-
-#include "core/glue_log_types.hpp"
 
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
@@ -124,7 +121,6 @@ public:
 	MakeRequest(const std::shared_ptr<Aws::Http::HttpRequest> &request, Aws::Utils::RateLimits::RateLimiterInterface *,
 	            Aws::Utils::RateLimits::RateLimiterInterface *) const override {
 		auto aws_response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("GlueDuckDBHttp", request);
-		GlueLogTimer timer;
 		try {
 			string url = EnsureUrlHasPath(request->GetUri().GetURIString(true).c_str());
 
@@ -197,8 +193,6 @@ public:
 				break;
 			}
 
-			LogRequest(context, *request, response.get(), string(), timer.ElapsedMillis(),
-			           aws_response->GetResponseBody());
 			if (!response) {
 				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
 				return aws_response;
@@ -224,8 +218,6 @@ public:
 				                                      NumericCast<int64_t>(response->body.size()));
 			}
 		} catch (std::exception &ex) {
-			LogRequest(GlueHttpClientContextScope::Current(), *request, nullptr, ex.what(), timer.ElapsedMillis(),
-			           aws_response->GetResponseBody());
 			aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
 			aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
 			aws_response->SetClientErrorMessage(ex.what());
@@ -234,30 +226,6 @@ public:
 	}
 
 private:
-	void LogRequest(optional_ptr<ClientContext> context, const Aws::Http::HttpRequest &request,
-	                optional_ptr<HTTPResponse> response, const string &exception, double duration_ms,
-	                Aws::IOStream &body) const {
-		auto operation =
-		    request.HasHeader("x-amz-target") ? string(request.GetHeaderValue("x-amz-target").c_str()) : string();
-		optional_idx status;
-		string error;
-		if (!exception.empty()) {
-			error = exception;
-		} else if (!response) {
-			error = "request not made";
-		} else if (response->HasRequestError()) {
-			error = response->GetRequestError();
-		} else {
-			status = static_cast<idx_t>(response->status);
-		}
-		auto response_bytes = NumericCast<idx_t>(MaxValue<int64_t>(static_cast<int64_t>(body.tellp()), 0));
-		if (context) {
-			DUCKDB_LOG(*context, GlueRequestLogType, operation, status, duration_ms, response_bytes, error);
-		} else {
-			DUCKDB_LOG(db, GlueRequestLogType, operation, status, duration_ms, response_bytes, error);
-		}
-	}
-
 	DatabaseInstance &db;
 };
 

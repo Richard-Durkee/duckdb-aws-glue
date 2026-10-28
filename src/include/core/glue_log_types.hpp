@@ -7,31 +7,18 @@
 
 namespace duckdb {
 class DatabaseInstance;
-
-//! One HTTP request to the Glue (or STS) endpoint, logged by the HTTP bridge: with glue_network_calls_via_duckdb off
-//! the SDK's own transport sends the requests and nothing is logged
-class GlueRequestLogType : public LogType {
-public:
-	static constexpr const char *NAME = "GlueRequest";
-	static constexpr LogLevel LEVEL = LogLevel::LOG_INFO;
-
-	GlueRequestLogType();
-
-	static LogicalType GetLogType();
-	//! 'operation' is the X-Amz-Target header (AWSGlue.GetTable, ...); 'status' is invalid for a request that did not
-	//! reach the service
-	static string ConstructLogMessage(const string &operation, optional_idx status, double duration_ms,
-	                                  idx_t response_bytes, const string &error);
-};
+struct CreateMacroInfo;
 
 //! What a scan of a Glue Hive table spends its time on, one entry per 'event': 'partitions' (loading them),
-//! 'plan' (the listings to do), 'listing' (one of them) and 'sample' (the cardinality sample). Fields an event does
-//! not set are NULL.
+//! 'plan' (the listings to do), 'listing' (one of them) and 'sample' (the cardinality sample). 'scan_id' tells the
+//! scans of one query apart. Fields an event does not set are NULL.
 struct GlueScanEvent {
-	GlueScanEvent(string table_p, string event_p) : table(std::move(table_p)), event(std::move(event_p)) {
+	GlueScanEvent(string table_p, idx_t scan_id_p, string event_p)
+	    : table(std::move(table_p)), scan_id(scan_id_p), event(std::move(event_p)) {
 	}
 
 	string table;
+	idx_t scan_id;
 	string event;
 	optional_idx partitions;
 	optional_idx partitions_read;
@@ -53,6 +40,8 @@ public:
 };
 
 void RegisterGlueLogTypes(DatabaseInstance &db);
+//! The Glue requests in the HTTP log: glue_requests()
+unique_ptr<CreateMacroInfo> GetGlueRequestsMacro();
 
 class GlueLogTimer {
 public:

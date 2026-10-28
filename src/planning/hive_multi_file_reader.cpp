@@ -72,7 +72,7 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 		} else {
 			GlueLogTimer timer;
 			partitions = GetTablePartitions(context, *this);
-			GlueScanEvent event(Describe(), "partitions");
+			GlueScanEvent event(Describe(), scan_id, "partitions");
 			event.partitions = partitions->size();
 			event.duration_ms = timer.ElapsedMillis();
 			DUCKDB_LOG(context, GlueScanLogType, event);
@@ -230,7 +230,7 @@ void HiveMultiFileList::PlanListings() const {
 	for (auto partition_index : elsewhere) {
 		listing_jobs.push_back(ListingJob {false, {partition_index}});
 	}
-	GlueScanEvent event(scan_info->Describe(), "plan");
+	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "plan");
 	event.partitions = partitions->size();
 	event.partitions_read = indexes->size();
 	event.listings = listing_jobs.size();
@@ -372,7 +372,7 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		ListPartition(job.partitions[0]);
 		mode = "partition";
 	}
-	GlueScanEvent event(scan_info->Describe(), "listing");
+	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "listing");
 	if (!scan_info->partition_keys.empty()) {
 		event.partitions_read = job.partitions.size();
 	}
@@ -617,6 +617,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, BoundTableFunction &function) {
 	auto &context = deserializer.Get<ClientContext &>();
 	auto info = make_shared_ptr<HiveScanInfo>();
+	info->scan_id = HiveQueryCache::Get(context)->NextScanId();
 	info->root_location = deserializer.ReadProperty<string>(103, "location");
 	info->table_name = info->root_location;
 	auto partitions = deserializer.ReadProperty<vector<vector<string>>>(104, "partitions");

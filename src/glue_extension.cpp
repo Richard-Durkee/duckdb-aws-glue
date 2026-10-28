@@ -134,6 +134,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	loader.RegisterFunction(GetGlueSetTableLocationFunction());
 	loader.RegisterFunction(GetGlueReplaceColumnsFunction());
 	loader.RegisterFunction(GetGlueAlterTableFunction());
+	loader.RegisterFunction(*GetGlueRequestsMacro());
 	// ALTER TABLE ... ADD / DROP PARTITION etc., switched on with SET active_grammar_extensions = ['glue_hive_ddl']
 	RegisterGlueGrammarExtension(instance);
 	loader.RegisterFunction(GetHiveScanFunction(instance));

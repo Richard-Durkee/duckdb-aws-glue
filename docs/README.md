@@ -361,26 +361,29 @@ SELECT request.type, request.url, request.headers['x-amz-target'], response.stat
 
 `SET glue_network_calls_via_duckdb = false` switches back to the SDK's own HTTP client.
 
-Two `INFO` log types record where a query's catalog time goes, without the headers the `HTTP` log redacts:
+`glue_requests()` lists the Glue requests in the `HTTP` log, retries and pages included: `operation` (the
+`X-Amz-Target`, e.g. `AWSGlue.GetPartitions`), `status`, `reason`, `start_time`, `duration_ms` and the
+`connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
+logged, and DuckDB versions that redact the `X-Amz-Target` header in the `HTTP` log need `redact_http_logs` off.
 
-- `GlueRequest`: one entry per request to Glue, retries and pages included: `operation` (the `X-Amz-Target`, e.g.
-  `AWSGlue.GetPartitions`), `status`, `duration_ms`, `response_bytes`, and `error` for a request that did not reach
-  Glue. Only requests sent through DuckDB's HTTP layer are logged.
-- `GlueScan`: what each scan of a Hive table does, one entry per `event`:
-  - `partitions`: the table's `partitions` were loaded, taking `duration_ms`;
-  - `plan`: of `partitions`, `partitions_read` are read, with `listings` S3 listings; `detail` is `root` when they
-    are listed in one listing of the table location, else `partitions`;
-  - `listing`: one listing (`detail`: `table`, `root` or `partition`) of `partitions_read` partitions found `files`
-    data files in `duration_ms`;
-  - `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when
-    nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
-    directory then takes next to no time.
+The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
+`scan_id` that numbers the scans of a query from 1:
+
+- `partitions`: the table's `partitions` were loaded, taking `duration_ms`;
+- `plan`: of `partitions`, `partitions_read` are read, with `listings` S3 listings; `detail` is `root` when they are
+  listed in one listing of the table location, else `partitions`;
+- `listing`: one listing (`detail`: `table`, `root` or `partition`) of `partitions_read` partitions found `files`
+  data files in `duration_ms`;
+- `sample`: the cardinality sample listed `files` files and measured one in `duration_ms` (`files` is NULL when
+  nothing was listed: avro tables are not sampled). The scan reuses that listing, so a `listing` of the same
+  directory then takes next to no time. Every scan of the table in the query shares the one sample.
 
 ```sql
-CALL enable_logging(['GlueRequest', 'GlueScan'], storage='memory');
+SET redact_http_logs = false;
+CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
 -- ... run queries ...
-SELECT operation, count(*), sum(duration_ms) FROM duckdb_logs_parsed('GlueRequest') GROUP BY operation;
-SELECT "table", event, partitions, partitions_read, listings, files, duration_ms, detail
+SELECT operation, count(*), sum(duration_ms) FROM glue_requests() GROUP BY operation;
+SELECT "table", scan_id, event, partitions, partitions_read, listings, files, duration_ms, detail
 FROM duckdb_logs_parsed('GlueScan');
 ```
 

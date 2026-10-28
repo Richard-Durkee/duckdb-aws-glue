@@ -268,7 +268,7 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	if (!entry->sample) {
 		GlueLogTimer timer;
 		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
-		GlueScanEvent event(info.Describe(), "sample");
+		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
 		if (entry->sample->listed) {
 			event.files = entry->sample->files;
 		}

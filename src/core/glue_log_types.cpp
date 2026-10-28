@@ -50,7 +50,7 @@ void RegisterGlueLogTypes(DatabaseInstance &db) {
 	log_manager.RegisterLogType(make_uniq<GlueScanLogType>());
 }
 
-// The operation is the X-Amz-Target header, which redact_http_logs keeps
+// The operation is the X-Amz-Target header, which the HTTP log does not redact
 unique_ptr<CreateMacroInfo> GetGlueRequestsMacro() {
 	static const DefaultTableMacro macro = {DEFAULT_SCHEMA, "glue_requests", {nullptr}, {{nullptr, nullptr}}, R"(
 SELECT timestamp, connection_id, transaction_id, query_id, thread_id,

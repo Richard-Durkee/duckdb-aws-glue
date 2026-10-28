@@ -36,10 +36,6 @@ CREATE TABLE my_datalake.default.glog_flat AS SELECT range AS id FROM range(5);
 statement ok
 CREATE TABLE my_datalake.default.glog_avro WITH (format = 'avro') AS SELECT range AS id FROM range(4);
 
-# the operation is the X-Amz-Target header, which the HTTP log redacts unless redact_http_logs is off
-statement ok
-SET redact_http_logs = false;
-
 statement ok
 CALL enable_logging(['HTTP', 'GlueScan'], storage := 'memory');
 

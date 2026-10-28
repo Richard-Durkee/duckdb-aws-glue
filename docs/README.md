@@ -364,7 +364,7 @@ SELECT request.type, request.url, request.headers['x-amz-target'], response.stat
 `glue_requests()` lists the Glue requests in the `HTTP` log, retries and pages included: `operation` (the
 `X-Amz-Target`, e.g. `AWSGlue.GetPartitions`), `status`, `reason`, `start_time`, `duration_ms` and the
 `connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
-logged, and DuckDB versions that redact the `X-Amz-Target` header in the `HTTP` log need `redact_http_logs` off.
+logged.
 
 The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
 `scan_id` that numbers the scans of a query from 1:
@@ -379,7 +379,6 @@ The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, on
   directory then takes next to no time. Every scan of the table in the query shares the one sample.
 
 ```sql
-SET redact_http_logs = false;
 CALL enable_logging(['HTTP', 'GlueScan'], storage = 'memory');
 -- ... run queries ...
 SELECT operation, count(*), sum(duration_ms) FROM glue_requests() GROUP BY operation;

@@ -104,8 +104,7 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 	// unbound on purpose: the binder derives names and types from the query on first use; the stored columns
 	// carry the column alias list of CREATE VIEW
 	CreateViewInfo info(schema, Identifier(table.name));
-	bool has_column_alias_list =
-	    StringUtil::CIEquals(table.GetParameter("duckdb_view_column_alias_list"), "true");
+	bool has_column_alias_list = StringUtil::CIEquals(table.GetParameter("duckdb_view_column_alias_list"), "true");
 	string alias_list;
 	for (auto &column : table.columns) {
 		if (!has_column_alias_list) {
@@ -121,8 +120,7 @@ unique_ptr<GlueView> GlueView::FromTableInfo(Catalog &catalog, SchemaCatalogEntr
 		info.security_type = ViewSecurityType::SECURE_VIEW;
 	}
 	string header = string("CREATE ") + (info.security_type == ViewSecurityType::SECURE_VIEW ? "SECURE " : "") +
-	                "VIEW " + SQLIdentifier::ToString(table.schema_name) + "." +
-	                SQLIdentifier::ToString(table.name);
+	                "VIEW " + SQLIdentifier::ToString(table.schema_name) + "." + SQLIdentifier::ToString(table.name);
 	if (!alias_list.empty()) {
 		header += " (" + alias_list + ")";
 	}

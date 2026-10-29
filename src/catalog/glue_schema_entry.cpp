@@ -3,6 +3,7 @@
 #include "catalog/glue_view_names.hpp"
 
 #include "duckdb/catalog/catalog_transaction.hpp"
+#include "duckdb/catalog/dependency_list.hpp"
 #include "duckdb/parser/parsed_data/comment_on_column_info.hpp"
 #include "duckdb/parser/parsed_data/alter_info.hpp"
 #include "duckdb/parser/parsed_data/alter_table_info.hpp"
@@ -387,7 +388,7 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 
 	GlueTableInfo table;
 	table.name = table_name;
-	table.database_name = database_info.name;
+	table.schema_name = database_info.name;
 	// Table description: `WITH (comment = '...')` is the primary spelling (DuckDB's parser accepts a trailing
 	// `COMMENT '...'` only on CREATE SCHEMA, not CREATE TABLE); CreateInfo::comment is a Value and set by a
 	// future parser or an engine wrapper, so honor it too and let the WITH value override when both are given.
@@ -483,7 +484,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	}
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
-	D_ASSERT(table.database_name == database_info.name);
+	D_ASSERT(table.schema_name == database_info.name);
 	GlueAPI::CreateHiveTable(context, glue_catalog, table);
 
 	// re-fetch so the entry reflects what Glue stored
@@ -528,6 +529,9 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 			break;
 		}
 	}
+	if (info.binding_mode == CreateViewBindingMode::SKIP_BINDING) {
+		throw NotImplementedException("Glue views can not be created WITH (DEFER_BINDING) yet");
+	}
 
 	GlueViewInfo view;
 	view.database_name = database_info.name;
@@ -535,25 +539,29 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 	// a DuckDB view's ViewOriginalText: the user's SQL; ViewExpandedText: tables of this catalog as db.t, of other
 	// catalogs by their Glue catalog id or "external:<type>:<alias>"
 	view.sql = GlueView::RenderViewSql(info);
-	auto defer_binding = info.binding_mode == CreateViewBindingMode::SKIP_BINDING;
 	auto expanded = unique_ptr_cast<SQLStatement, SelectStatement>(info.query->Copy());
-	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node, defer_binding);
+	GlueViewNames::QualifyForStorage(context, glue_catalog, name, *expanded->node);
 	view.expanded_sql = expanded->ToString();
-	if (!defer_binding) {
-		// names were resolved by lookups, not the binder: check they bind to the same column types (not names:
-		// an unaliased expression is named after its text, which the rewrite changes)
-		auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
-		auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
-		GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
-		GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
-		vector<LogicalType> types;
-		vector<Identifier> names;
-		Binder::BindView(context, *check, catalog.GetName(), name, nullptr, info.aliases, types, names);
-		if (types != info.types) {
-			throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the "
-			                      "view query:\n%s",
-			                      view_name, view.expanded_sql);
-		}
+	// names were resolved by lookups, not the binder: check they bind to the same column types (not names: an
+	// unaliased expression is named after its text, which the rewrite changes)
+	auto check = unique_ptr_cast<SQLStatement, SelectStatement>(expanded->Copy());
+	auto aliases = GlueViewNames::AttachedAliases(glue_catalog, GlueViewNames::ReferencedCatalogIds(*check->node));
+	GlueViewNames::ResolveForReading(glue_catalog, database_info.name + "." + view_name, aliases, *check->node);
+	GlueViewNames::PinToCatalog(*check->node, catalog.GetName());
+	vector<LogicalType> types;
+	vector<Identifier> names;
+	// the entries the query reads in this catalog, through other views too: the view being replaced is among them
+	// if its new query would read itself under this alias (not when a path reaches it under another alias)
+	LogicalDependencyList reads;
+	Binder::BindView(context, *check, catalog.GetName(), name, &reads, info.aliases, types, names);
+	if (existing && reads.Contains(*existing)) {
+		throw BinderException("Glue view \"%s.%s\" can not be created: its query reads the view itself",
+		                      database_info.name, view_name);
+	}
+	if (types != info.types) {
+		throw BinderException("The ViewExpandedText of Glue view \"%s\" binds to other column types than the view "
+		                      "query:\n%s",
+		                      view_name, view.expanded_sql);
 	}
 	for (auto &text : {view.sql, view.expanded_sql}) {
 		try {

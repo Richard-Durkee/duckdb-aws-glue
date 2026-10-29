@@ -3,6 +3,8 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/mutex.hpp"
+#include "duckdb/common/named_parameter_map.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/open_file_info.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -46,11 +48,19 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! The virtual columns function of the bound file format reader, which BindHiveScan extends with the metadata
 	//! columns
 	table_function_get_virtual_columns_t format_virtual_columns = nullptr;
+	//! The pushdown_complex_filter of the bound file format reader. For text formats BindHiveScan wraps it so filters
+	//! stay in the plan while filter_pushdown stays enabled for the join filters that prune partitions. Null when the
+	//! reader has none.
+	table_function_pushdown_complex_filter_t format_pushdown_complex_filter = nullptr;
+	//! The named parameters BindHiveScan bound the file format reader with, which read any of the data files
+	named_argument_map_t reader_parameters;
 
 	//! The index of a partition key by name, or DConstants::INVALID_INDEX
 	idx_t GetPartitionKeyIndex(const string &name) const;
 	//! The partition (index into 'partitions') the file at 'path' belongs to
 	idx_t GetPartitionIndexOfFile(const string &path) const;
+	//! The same, or nothing when the file list has not listed 'path'
+	optional_idx FindPartitionIndexOfFile(const string &path) const;
 	const GluePartitionInfo &GetPartitionOfFile(const string &path) const;
 	//! A description of the table for error messages
 	string Describe() const;
@@ -64,6 +74,10 @@ private:
 	mutable annotated_mutex partitions_lock;
 	mutable shared_ptr<const vector<GluePartitionInfo>> partitions DUCKDB_GUARDED_BY(partitions_lock);
 };
+
+//! Whether a listed file below 'prefix' is a data file of a Hive table: not hidden (a path component starting with
+//! '_' or '.', as Spark's _SUCCESS), not a directory marker (_$folder$) and not empty
+bool IsDataFile(const OpenFileInfo &file, const string &prefix);
 
 //! The data files of a Hive table, listed lazily: nothing is listed until the scan asks for files, and the filters on
 //! the partition columns are applied to the partition values first (HiveMultiFileReader::ComplexFilterPushdown), so

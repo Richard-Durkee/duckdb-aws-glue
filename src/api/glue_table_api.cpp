@@ -291,11 +291,7 @@ void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const Glu
 static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
                             const GlueTableInfo &bound,
                             const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
-	if (!bound.fetched) {
-		throw InternalException("UpdateTable '%s.%s': the table definition was not fetched from Glue",
-		                        bound.schema_name, bound.name);
-	}
-	auto &table = bound.fetched->raw;
+	auto &table = FetchedTable(bound);
 
 	Aws::Glue::Model::TableInput table_input;
 	table_input.SetName(table.GetName());

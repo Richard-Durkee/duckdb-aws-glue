@@ -14,6 +14,26 @@ HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) con
 	if (false_unless_true && type.id() == LogicalTypeId::BOOLEAN) {
 		return HiveFieldConversion::FALSE_UNLESS_TRUE;
 	}
+	if (lazy_simple_values) {
+		switch (type.id()) {
+		case LogicalTypeId::TINYINT:
+		case LogicalTypeId::SMALLINT:
+		case LogicalTypeId::INTEGER:
+		case LogicalTypeId::BIGINT:
+			return HiveFieldConversion::LAZY_SIMPLE_INTEGER;
+		case LogicalTypeId::FLOAT:
+		case LogicalTypeId::DOUBLE:
+			return HiveFieldConversion::LAZY_SIMPLE_FLOAT;
+		case LogicalTypeId::BOOLEAN:
+			return HiveFieldConversion::LAZY_SIMPLE_BOOLEAN;
+		case LogicalTypeId::DATE:
+			return HiveFieldConversion::LAZY_SIMPLE_DATE;
+		case LogicalTypeId::TIMESTAMP:
+			return HiveFieldConversion::LAZY_SIMPLE_TIMESTAMP;
+		default:
+			break;
+		}
+	}
 	return null_for_invalid_data ? HiveFieldConversion::TRY_CAST : HiveFieldConversion::CAST;
 }
 
@@ -26,6 +46,7 @@ void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(105, "serde_fields", serde_fields);
 	serializer.WritePropertyWithDefault<bool>(106, "null_for_invalid_data", null_for_invalid_data, true);
 	serializer.WritePropertyWithDefault<bool>(107, "false_unless_true", false_unless_true, false);
+	serializer.WritePropertyWithDefault<bool>(108, "lazy_simple_values", lazy_simple_values, false);
 }
 
 HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
@@ -39,6 +60,7 @@ HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
 	result.null_for_invalid_data =
 	    deserializer.ReadPropertyWithExplicitDefault<bool>(106, "null_for_invalid_data", true);
 	result.false_unless_true = deserializer.ReadPropertyWithExplicitDefault<bool>(107, "false_unless_true", false);
+	result.lazy_simple_values = deserializer.ReadPropertyWithExplicitDefault<bool>(108, "lazy_simple_values", false);
 	return result;
 }
 

@@ -18,7 +18,13 @@ enum class HiveFieldConversion : uint8_t {
 	//! a field that does not parse is NULL
 	TRY_CAST,
 	//! lower(text) = 'true': true for 'true' in any case and false otherwise, never an error
-	FALSE_UNLESS_TRUE
+	FALSE_UNLESS_TRUE,
+	//! LazySimpleSerDe's parse of an integer, a float or double, a boolean, a date or a timestamp; NULL when it fails
+	LAZY_SIMPLE_INTEGER,
+	LAZY_SIMPLE_FLOAT,
+	LAZY_SIMPLE_BOOLEAN,
+	LAZY_SIMPLE_DATE,
+	LAZY_SIMPLE_TIMESTAMP
 };
 
 //! How the files of a csv table are read
@@ -35,6 +41,8 @@ struct HiveCSVOptions {
 	bool null_for_invalid_data = true;
 	//! With serde_fields: a boolean field is true when it is 'true' in any case and false otherwise, never an error
 	bool false_unless_true = false;
+	//! With serde_fields: integers, floats, booleans, dates and timestamps are parsed as LazySimpleSerDe parses them
+	bool lazy_simple_values = false;
 
 public:
 	//! With serde_fields: how a field becomes a value of a column of 'type', in the scan and in its reader call

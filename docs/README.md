@@ -56,10 +56,16 @@ Text tables are read the way their SerDe reads them:
   broken rows, a difference this extension does not reproduce. A boolean field is true when it is `true` in any
   case and false otherwise.
 - Short rows are padded with NULL, extra fields are ignored, and a value that does not parse as its column type is
-  NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`. Fields
-  are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
-  details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
-  (Hive: a row of NULLs).
+  NULL, except in OpenCSVSerde tables, where it fails the query unless `use.null.for.invalid.data` is `true`.
+- LazySimpleSerDe parses fields as Hive does. An integer is digits with an optional sign and nothing around them; a
+  fraction is dropped (`'12.9'` is 12, `'.5'` is 0), so `' 9'`, `'1e3'`, `'0x1'` and `'1_000'` are NULL. A `float` or
+  `double` is what Java's `Double.parseDouble` reads: spaces around it are ignored, `NaN`, `Infinity` and an `f` or
+  `d` suffix are taken, `inf` is NULL. A `boolean` is `true` or `false` in any case. A `date` is `y-M-d` (cut at the
+  first space) and a `timestamp` `y-M-d H:m:s[.f]` or ISO `yyyy-MM-ddTHH:mm[:ss[.f]]`, resolved leniently:
+  `2024-02-30` is 2024-03-01 and `25:00:00` is 01:00:00 the next day; a timestamp without a time is NULL. Fractions
+  of a second are cut to microseconds. Other types are converted with `TRY_CAST`. Blank lines are skipped (Hive: a
+  row of NULLs).
+- OpenCSVSerde fields are converted with `TRY_CAST`, or `CAST` without `use.null.for.invalid.data`.
 - `skip.header.line.count` lines are skipped at the start of every file.
 - OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
   `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
@@ -287,7 +293,8 @@ of a Glue table or of a `hive_scan()` call, using only core DuckDB types:
   bound the reader with (a text table's dialect, header lines and NULL spelling, `hive_csv_parallel` as the planning
   session had it), plus the data columns as `schema` for Parquet and Avro and `hive_partitioning := false`. A column
   of a SerDe text table is the field read as text and converted with `TRY_CAST` (`CAST` without
-  `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde boolean), of the
+  `use.null.for.invalid.data` in an OpenCSVSerde table, `lower(field) = 'true'` for an OpenCSVSerde boolean, the
+  LazySimpleSerDe parse above, in core functions, for a LazySimpleSerDe number, boolean, date or timestamp), of the
   field wrapped in `__internal_barrier`, so the caller's optimizer does not push the conversion into `read_csv`,
   which would convert the text itself and strictly.
 - `HiveScanGetFilePartitionValues(get, path)`: the values of the partition a listed file belongs to, as constants of

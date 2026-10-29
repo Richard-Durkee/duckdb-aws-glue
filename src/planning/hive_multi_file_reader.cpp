@@ -53,6 +53,7 @@
 #include "duckdb/planner/sql_export_helpers.hpp"
 #include "core/glue_types.hpp"
 #include "functions/hive_reader_call.hpp"
+#include "planning/hive_field_conversion.hpp"
 
 namespace duckdb {
 
@@ -1301,6 +1302,19 @@ static void MakeFalseUnlessTrue(ClientContext &context, unique_ptr<Expression> &
 	                                         make_uniq<BoundConstantExpression>(Value("true")));
 }
 
+//! Replace the cast of a field's text to its column's type with LazySimpleSerDe's parse of the text
+static void ParseAsLazySimple(ClientContext &context, HiveFieldConversion conversion, unique_ptr<Expression> &expr) {
+	if (!expr || !BoundCastExpression::IsCast(*expr)) {
+		return;
+	}
+	auto &cast = expr->Cast<BoundFunctionExpression>();
+	auto &field = BoundCastExpression::Child(cast);
+	if (field.GetReturnType().id() != LogicalTypeId::VARCHAR) {
+		return;
+	}
+	expr = BindHiveFieldConversion(context, conversion, cast.GetReturnType(), field);
+}
+
 ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &reader_data,
                                                            const MultiFileBindData &bind_data,
                                                            const vector<MultiFileColumnDefinition> &global_columns,
@@ -1337,7 +1351,8 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 		if (!expr) {
 			continue;
 		}
-		switch (csv_options.FieldConversion(expr->GetReturnType())) {
+		auto conversion = csv_options.FieldConversion(expr->GetReturnType());
+		switch (conversion) {
 		case HiveFieldConversion::NONE:
 		case HiveFieldConversion::CAST:
 			break;
@@ -1346,6 +1361,13 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 			break;
 		case HiveFieldConversion::FALSE_UNLESS_TRUE:
 			MakeFalseUnlessTrue(context, expr);
+			break;
+		case HiveFieldConversion::LAZY_SIMPLE_INTEGER:
+		case HiveFieldConversion::LAZY_SIMPLE_FLOAT:
+		case HiveFieldConversion::LAZY_SIMPLE_BOOLEAN:
+		case HiveFieldConversion::LAZY_SIMPLE_DATE:
+		case HiveFieldConversion::LAZY_SIMPLE_TIMESTAMP:
+			ParseAsLazySimple(context, conversion, expr);
 			break;
 		}
 	}
@@ -1440,6 +1462,13 @@ static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const
 		                                         ConstantExpression::FromValue(Value("true")));
 		break;
 	}
+	case HiveFieldConversion::LAZY_SIMPLE_INTEGER:
+	case HiveFieldConversion::LAZY_SIMPLE_FLOAT:
+	case HiveFieldConversion::LAZY_SIMPLE_BOOLEAN:
+	case HiveFieldConversion::LAZY_SIMPLE_DATE:
+	case HiveFieldConversion::LAZY_SIMPLE_TIMESTAMP:
+		column = HiveFieldConversionExpression(info.csv_options.FieldConversion(type), type, *BarredField(name));
+		break;
 	}
 	column->SetAlias(name);
 	return column;

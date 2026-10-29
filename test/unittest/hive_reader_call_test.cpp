@@ -504,8 +504,13 @@ TEST_CASE("Glue tables of every SerDe are restated", "[hive_reader_call][glue_ca
 		REQUIRE(Parameter(call, "nullstr") == "'NA'");
 		REQUIRE(Parameter(call, "null_padding") == "true");
 		REQUIRE(Parameter(call, "strict_mode") == "false");
-		REQUIRE(Columns(call) == vector<string> {"TRY_CAST(__internal_barrier(id) AS INTEGER)", "\"name\"",
-		                                         "TRY_CAST(__internal_barrier(amount) AS DOUBLE)"});
+		auto columns = Columns(call);
+		REQUIRE(columns.size() == 3);
+		REQUIRE(StringUtil::StartsWith(columns[0], "CASE  WHEN (regexp_full_match(__internal_barrier(id), "));
+		REQUIRE(StringUtil::EndsWith(columns[0], " AS INTEGER)) ELSE NULL END"));
+		REQUIRE(columns[1] == "\"name\"");
+		REQUIRE(StringUtil::StartsWith(columns[2], "CASE  WHEN ((regexp_full_match(__internal_barrier(amount), "));
+		REQUIRE(StringUtil::EndsWith(columns[2], " AS DOUBLE)) ELSE NULL END"));
 	}
 	read = Restate(con, query);
 	REQUIRE(Rows(con, read) == 5);

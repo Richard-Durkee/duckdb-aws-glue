@@ -595,6 +595,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		}
 	}
 	view.secure = info.security_type == ViewSecurityType::SECURE_VIEW;
+	view.has_column_alias_list = !info.aliases.empty();
 	// the stored columns carry the column alias list of CREATE VIEW: an alias replaces the query's own name
 	for (idx_t i = 0; i < info.types.size(); i++) {
 		GlueColumn column;

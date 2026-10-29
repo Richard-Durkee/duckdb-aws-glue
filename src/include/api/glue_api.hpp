@@ -29,6 +29,9 @@ public:
 	bool access_denied;
 };
 
+//! How a create call ended: the object exists afterwards either way, another client may have created it first
+enum class GlueCreateOutcome : uint8_t { CREATED, ALREADY_EXISTED };
+
 //! Thin wrapper around the AWS SDK Glue client
 class GlueAPI {
 public:
@@ -54,16 +57,17 @@ public:
 	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                     const string &table_name, GlueTableInfo &result, string *raw_json = nullptr);
 
-	//! Create a database, throws a CatalogException if it already exists
-	static void CreateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database);
+	//! Create a database
+	static GlueCreateOutcome CreateDatabase(ClientContext &context, GlueCatalog &catalog,
+	                                        const GlueDatabaseInfo &database);
 	//! Replace the description, location and parameters of a database, keeping everything else of its Glue definition
 	static void UpdateDatabase(ClientContext &context, GlueCatalog &catalog, const GlueDatabaseInfo &database);
 	//! Delete a database (and all of its tables), throws a CatalogException if it does not exist
 	static void DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const string &database_name);
 	//! Create a standard (Hive style) Glue table storing parquet files at 'table.location', with the columns and
 	//! partition keys in 'table'
-	static void CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);
-	static void CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
+	static GlueCreateOutcome CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table);
+	static GlueCreateOutcome CreateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view);
 	//! Replace the definition of an existing view (CREATE OR REPLACE VIEW). 'bound' is the view as fetched; the
 	//! definition is rewritten from the Table it carries, nothing is fetched again.
 	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view,

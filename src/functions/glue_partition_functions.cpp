@@ -8,6 +8,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/query_result.hpp"
 
 #include "api/glue_api.hpp"
 #include "core/glue_types.hpp"
@@ -234,6 +235,10 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 		return_types.push_back(type);
 	}
 	names.emplace_back("location");
+	// location_1 (or the next free number) when a partition key is called location; the keys keep their names
+	auto deduplicated = names;
+	QueryResult::DeduplicateColumns(deduplicated);
+	names.back() = deduplicated.back();
 	return_types.emplace_back(LogicalType::VARCHAR);
 	auto load_partitions = [&]() {
 		return make_shared_ptr<const vector<GluePartitionInfo>>(

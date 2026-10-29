@@ -249,6 +249,15 @@ static idx_t ListingConcurrency(ClientContext &context) {
 	return 0;
 }
 
+//! hive_partition_listing_threshold: the partitions read from which the table location is listed, when set
+static optional_idx ListingThreshold(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_partition_listing_threshold", setting) && !setting.IsNull()) {
+		return setting.GetValue<idx_t>();
+	}
+	return optional_idx();
+}
+
 //! How many partition directories are listed at the same time when each partition gets its own listing
 static idx_t PartitionsListedTogether(ClientContext &context) {
 	auto concurrency = ListingConcurrency(context);
@@ -260,6 +269,9 @@ static idx_t PartitionsListedTogether(ClientContext &context) {
 
 //! The keys S3 returns per ListObjectsV2 page
 static constexpr idx_t S3_KEYS_PER_LIST_PAGE = 1000;
+//! When the root and the partitions take as many rounds, how many times its requests the partitions must make for the
+//! root to be listed
+static constexpr idx_t ROOT_REQUESTS_SAVED = 10;
 
 void HiveMultiFileList::PlanListings() const {
 	if (planned) {
@@ -286,14 +298,11 @@ void HiveMultiFileList::PlanListings() const {
 			elsewhere.push_back(partition_index);
 		}
 	}
-	idx_t threshold = 10;
-	Value setting;
-	if (client_context.TryGetCurrentSetting("hive_partition_listing_threshold", setting) && !setting.IsNull()) {
-		threshold = setting.GetValue<idx_t>();
-	}
 	// The root's listing pages through every partition below it one page after another, while the partitions read are
-	// listed together: list the root only when that takes no fewer round trips. Each partition holds at least one
-	// file, so the partitions below the root bound its pages from below
+	// listed together: list the root when that takes fewer rounds of requests, or as many rounds and a tenth of the
+	// requests (on a one page root: ten partitions read). Each partition holds at least one file, so the partitions
+	// below the root bound its pages from below. hive_partition_listing_threshold replaces this with a fixed count of
+	// partitions read
 	auto listed_together = PartitionsListedTogether(client_context);
 	idx_t partitions_below_root = 0;
 	for (auto &partition : *partitions) {
@@ -305,8 +314,17 @@ void HiveMultiFileList::PlanListings() const {
 	}
 	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
 	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
+	auto partition_requests = below_root.size();
+	bool list_root;
+	auto threshold = ListingThreshold(client_context);
+	if (threshold.IsValid()) {
+		list_root = below_root.size() >= threshold.GetIndex();
+	} else {
+		list_root = root_pages < partition_rounds ||
+		            (root_pages == partition_rounds && partition_requests >= ROOT_REQUESTS_SAVED * root_pages);
+	}
 	vector<idx_t> separately;
-	if (!below_root.empty() && below_root.size() >= threshold && partition_rounds >= root_pages) {
+	if (!below_root.empty() && list_root) {
 		listing_jobs.push_back(ListingJob {true, std::move(below_root)});
 	} else {
 		separately = std::move(below_root);

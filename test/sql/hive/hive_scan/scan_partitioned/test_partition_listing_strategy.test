@@ -1,5 +1,5 @@
 # name: test/sql/hive/hive_scan/scan_partitioned/test_partition_listing_strategy.test
-# description: The table location is listed only when listing the partitions read would take as many rounds of requests
+# description: The table location is listed only when listing the partitions read would take more rounds of requests, unless hive_partition_listing_threshold fixes the choice
 # group: [scan_partitioned]
 
 require httpfs
@@ -106,8 +106,29 @@ SELECT * FROM listings();
 statement ok
 RESET hive_partition_listing_concurrency;
 
+# hive_partition_listing_threshold fixes the choice instead: 12 partitions read are at least 10
+statement ok
+SET hive_partition_listing_threshold = 10;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query II
+SELECT count(*), sum(v) FROM my_datalake.default.ls_events WHERE part BETWEEN 500 AND 511;
+----
+24	25332
+
+query II
+SELECT * FROM listings();
+----
+0	2
+
+statement ok
+RESET hive_partition_listing_threshold;
+
 statement ok
 RESET threads;
 
 statement ok
 DROP TABLE my_datalake.default.ls_events;
+

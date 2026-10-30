@@ -1,0 +1,58 @@
+# name: test/sql/hive/dml/formats/csv/test_csv_filter_cast.test
+# description: complementary FILTER aggregates over a CAST to VARCHAR of a column the text readers cast from VARCHAR
+# group: [csv]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_csv_filter_cast;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.formats_opencsv_filter_cast;
+
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_filter_cast (id INTEGER, d DATE, s VARCHAR) WITH (format = 'csv');
+
+statement ok
+CREATE TABLE my_datalake.default.formats_opencsv_filter_cast (id INTEGER, d DATE, s VARCHAR) WITH (format = 'csv', quote = '"');
+
+foreach table formats_csv_filter_cast formats_opencsv_filter_cast
+
+statement ok
+INSERT INTO my_datalake.default.{table} VALUES (1, DATE '2024-01-01', 'a'), (2, DATE '2024-01-02', 'b'), (3, DATE '2024-01-03', 'c');
+
+query II
+SELECT count(*) FILTER (WHERE CAST(id AS VARCHAR) = '1'), count(*) FILTER (WHERE NOT (CAST(id AS VARCHAR) = '1'))
+FROM my_datalake.default.{table};
+----
+1	2
+
+query II
+SELECT count(*) FILTER (WHERE CAST(d AS VARCHAR) = '2024-01-02'), count(*) FILTER (WHERE NOT (CAST(d AS VARCHAR) = '2024-01-02'))
+FROM my_datalake.default.{table};
+----
+1	2
+
+query I
+SELECT count(*) FROM my_datalake.default.{table};
+----
+3
+
+endloop
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_filter_cast;
+
+statement ok
+DROP TABLE my_datalake.default.formats_opencsv_filter_cast;

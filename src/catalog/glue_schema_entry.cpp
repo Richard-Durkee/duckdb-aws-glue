@@ -97,6 +97,48 @@ static string BucketingOptionFor(const string &key) {
 	return string();
 }
 
+//! What to write instead of another engine's CTAS property, which stored as a table parameter would do nothing; empty
+//! for any other key
+static string CreateTableSpellingFor(const string &key) {
+	static const pair<const char *, const char *> SPELLINGS[] = {{"partitioned_by", "PARTITIONED BY (col, ...)"},
+	                                                             {"partitioning", "PARTITIONED BY (col, ...)"},
+	                                                             {"external_location", "option 'location'"},
+	                                                             {"field_delimiter", "option 'delimiter'"},
+	                                                             {"parquet_compression", "option 'write_compression'"},
+	                                                             {"orc_compression", "option 'write_compression'"}};
+	for (auto &spelling : SPELLINGS) {
+		if (StringUtil::CIEquals(key, spelling.first)) {
+			return spelling.second;
+		}
+	}
+	return string();
+}
+
+//! A SerDe key given as a CREATE TABLE option goes to the SerDe: next to a different SerDe value of the same key,
+//! readers refuse every query on the table. The LazySimpleSerDe delimiter is both field.delim and serialization.format.
+static void MoveSerdeOptions(GlueTableInfo &table) {
+	auto &serde = table.serde_parameters;
+	auto &params = table.parameters;
+	auto delimiter = params.find("field.delim");
+	if (delimiter == params.end()) {
+		delimiter = params.find("serialization.format");
+	}
+	if (serde.find("field.delim") != serde.end() && delimiter != params.end()) {
+		auto value = delimiter->second;
+		serde["field.delim"] = value;
+		serde["serialization.format"] = value;
+		params.erase("field.delim");
+		params.erase("serialization.format");
+	}
+	for (auto &entry : serde) {
+		auto param = params.find(entry.first);
+		if (param != params.end()) {
+			entry.second = param->second;
+			params.erase(param);
+		}
+	}
+}
+
 static void CheckBucketedTablesEnabled(ClientContext &context, const string &key) {
 	Value enabled;
 	if (context.TryGetCurrentSetting("glue_create_bucketed_tables", enabled) && !enabled.IsNull() &&
@@ -303,6 +345,13 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			// stored as a table parameter this would silently leave the table unbucketed
 			throw BinderException("Unknown CREATE TABLE option '%s', a bucketed Glue table is created with option '%s'",
 			                      key, BucketingOptionFor(key));
+		} else if (!CreateTableSpellingFor(key).empty()) {
+			throw BinderException("Unknown CREATE TABLE option '%s' for a Hive table, use %s", key,
+			                      CreateTableSpellingFor(key));
+		} else if (GlueTableFormat::IsParameter(key)) {
+			throw BinderException("CREATE TABLE option '%s' decides how the table is read and can not be set: only "
+			                      "Hive tables can be created",
+			                      key);
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
@@ -449,6 +498,7 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 			table.serde_parameters["quoteChar"] = quote;
 			table.serde_parameters["escapeChar"] = options.csv_escape.empty() ? quote : options.csv_escape;
 		}
+		MoveSerdeOptions(table);
 	}
 	table.bucket_columns = options.bucket_columns;
 	table.number_of_buckets = options.number_of_buckets;
@@ -948,6 +998,15 @@ void GlueSchemaEntry::Alter(CatalogTransaction transaction, AlterInfo &info) {
 			                       "files keep their types, only widening changes (e.g. INTEGER to BIGINT, FLOAT to "
 			                       "DOUBLE, anything to VARCHAR) are supported for Hive tables",
 			                       name, table_name, from.ToString(), change.target_type.ToString());
+		}
+		// other engines fail on a parquet or avro file's numbers, dates and binaries under a string column
+		auto file_format = current.GetFileFormat();
+		if (change.target_type.id() == LogicalTypeId::VARCHAR && from.id() != LogicalTypeId::VARCHAR &&
+		    (file_format == HiveFileFormat::PARQUET || file_format == HiveFileFormat::AVRO)) {
+			throw CatalogException(
+			    "Can not change column \"%s\" of table \"%s\" from %s to VARCHAR: other engines can not "
+			    "read the existing %s files as text",
+			    name, table_name, from.ToString(), HiveFileFormatToString(file_format));
 		}
 		column->type = GlueTypes::FromLogicalType(change.target_type);
 		break;

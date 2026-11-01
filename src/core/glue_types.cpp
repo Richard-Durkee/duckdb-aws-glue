@@ -252,14 +252,14 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 		return "binary";
 	case LogicalTypeId::DATE:
 		return "date";
-	case LogicalTypeId::TIME:
-		return "time";
 	case LogicalTypeId::TIMESTAMP:
 		return "timestamp";
+	case LogicalTypeId::TIME:
 	case LogicalTypeId::TIMESTAMP_TZ:
-		return "timestamptz";
 	case LogicalTypeId::UUID:
-		return "uuid";
+		// Glue would store 'time', 'timestamptz' or 'uuid', and other engines then fail every query on the table
+		throw NotImplementedException("DuckDB type '%s' has no Hive type, cast it to %s", type.ToString(),
+		                              type.id() == LogicalTypeId::TIMESTAMP_TZ ? "TIMESTAMP" : "VARCHAR");
 	case LogicalTypeId::VARIANT:
 		return "variant";
 	case LogicalTypeId::LIST:

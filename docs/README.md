@@ -149,7 +149,11 @@ their codec themselves.
   without any of these the statement fails. Partition keys must be plain column names; they become Glue
   PartitionKeys and are listed last in the table's columns. Generated columns, column defaults and collated columns
   (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
-  parameters. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
+  parameters, except other engines' CTAS properties, which would do nothing there and are refused with the option to use
+  instead (`partitioned_by`, `external_location`, `field_delimiter`, `parquet_compression`, ...), and the parameters
+  that decide a table's format (`table_type`, `metadata_location`, `spark.sql.sources.provider`). A SerDe key given as
+  a `WITH` key of a csv table (`field.delim`, `separatorChar`, ...) is stored with the SerDe. Column types are stored as
+  Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT`, `TIME`, `TIMESTAMPTZ`, `UUID` and
   `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
@@ -183,7 +187,8 @@ their codec themselves.
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.
   Existing data files keep their types, so only widening type changes are allowed: integer widening (TINYINT to
-  BIGINT), FLOAT to DOUBLE, and anything to VARCHAR; partition keys can not be retyped. `ALTER COLUMN ... TYPE ...
+  BIGINT), FLOAT to DOUBLE, and anything to VARCHAR for csv and json tables (other engines can not read parquet or
+  avro numbers as text); partition keys can not be retyped. `ALTER COLUMN ... TYPE ...
   USING <expr>` is refused, since the data files can not be rewritten.
 - Written files are compressed the way the table says: parquet with `parquet.compression` (and `compression_level`
   for zstd), csv and json with the codec the table records (gzip or zstd), named `.csv.gz` / `.json.zst`, and avro

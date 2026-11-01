@@ -59,6 +59,9 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
+	//! CTAS: throws, after deleting the files written and the table created, when the location holds data files of
+	//! another writer
+	void ThrowIfLocationShared(ClientContext &context, const vector<string> &written_files) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).
@@ -67,6 +70,8 @@ public:
 	GlueTableInfo table_info;
 	//! The directories of existing partitions not laid out as <key=value>, with their Glue values.
 	unordered_map<string, vector<string>> partition_directories;
+	//! A CREATE TABLE AS, whose copy created the table when it started
+	bool create_table_as = false;
 };
 
 } // namespace duckdb

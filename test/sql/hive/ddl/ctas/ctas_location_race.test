@@ -1,0 +1,77 @@
+# name: test/sql/hive/ddl/ctas/ctas_location_race.test
+# description: A CREATE TABLE AS whose location another writer writes to while it runs is rolled back, so that neither table reads the other's rows
+# group: [ctas]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# the fault proxy follows a CreateTable on a fault_concurrent_ctas* database with another writer's
+# other-writer.parquet in the table's location: what a second CREATE TABLE AS into the same location writes once
+# both have checked that it is empty
+statement ok
+attach '{GLUE_CATALOG_ID}' as raced_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_concurrent_ctas CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_concurrent_ctas;
+
+statement error
+CREATE TABLE raced_dl.fault_concurrent_ctas.t PARTITIONED BY (p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_race_partitioned')
+AS SELECT range AS id, (range % 2)::VARCHAR AS p FROM range(10);
+----
+<REGEX>:.*CREATE TABLE AS for Hive table 'fault_concurrent_ctas.t' was rolled back: another statement wrote '.*/ctas_race_partitioned/other-writer.parquet' to its location.*
+
+# the table is gone, and only the other writer's file is left
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND schema_name = 'fault_concurrent_ctas';
+----
+0
+
+query I
+SELECT list(parse_filename(file)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_race_partitioned/**');
+----
+[other-writer.parquet]
+
+statement error
+CREATE TABLE raced_dl.fault_concurrent_ctas.u WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_race_plain')
+AS SELECT range AS id FROM range(10);
+----
+<REGEX>:.*CREATE TABLE AS for Hive table 'fault_concurrent_ctas.u' was rolled back: another statement wrote.*
+
+query I
+SELECT list(parse_filename(file)) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_race_plain/**');
+----
+[other-writer.parquet]
+
+# without another writer the same statement keeps its table and files
+statement ok
+CREATE TABLE my_datalake.fault_concurrent_ctas.t PARTITIONED BY (p)
+WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ctas_race_alone')
+AS SELECT range AS id, (range % 2)::VARCHAR AS p FROM range(10);
+
+query II
+SELECT count(*), count(DISTINCT p) FROM my_datalake.fault_concurrent_ctas.t;
+----
+10	2
+
+statement ok
+DROP SCHEMA my_datalake.fault_concurrent_ctas CASCADE;

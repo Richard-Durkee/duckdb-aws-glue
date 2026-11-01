@@ -12,19 +12,26 @@
 
 namespace duckdb {
 
+vector<string> ListLocationDataFiles(ClientContext &context, const string &location) {
+	auto &fs = FileSystem::GetFileSystem(context);
+	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
+	vector<string> result;
+	for (auto &file : listing->Files()) {
+		if (IsDataFile(file, location + "/")) {
+			result.push_back(file.path);
+		}
+	}
+	return result;
+}
+
 //! A CREATE TABLE AS writes only to a location without data files: the files of a dropped table there would read as
 //! rows of the new one. Files a scan skips (_SUCCESS, directory markers, empty files) do not count.
 static void ThrowIfLocationHoldsFiles(ClientContext &context, const GlueTableInfo &table_info, const string &location) {
-	auto &fs = FileSystem::GetFileSystem(context);
-	auto listing = fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
-	for (auto &file : listing->Files()) {
-		if (!IsDataFile(file, location + "/")) {
-			continue;
-		}
+	for (auto &file : ListLocationDataFiles(context, location)) {
 		throw InvalidInputException("CREATE TABLE AS for Hive table '%s.%s' is not supported: its location '%s' "
 		                            "already holds files (e.g. '%s'), such as those of a dropped table, which would "
 		                            "read as rows of the new table. Delete them, or give the table another location",
-		                            table_info.schema_name, table_info.name, location, file.path);
+		                            table_info.schema_name, table_info.name, location, file);
 	}
 }
 

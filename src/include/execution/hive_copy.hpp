@@ -9,6 +9,9 @@
 namespace duckdb {
 class GlueSchemaEntry;
 
+//! The data files below 'location' (no trailing slash) that a scan of the table would read
+vector<string> ListLocationDataFiles(ClientContext &context, const string &location);
+
 //! The COPY of INSERT and CTAS into a Hive table; CTAS creates the Glue table when the sink starts, like PhysicalInsert
 class GlueHiveCopy final : public PhysicalCopyToFile {
 public:

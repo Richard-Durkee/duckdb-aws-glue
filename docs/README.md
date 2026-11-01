@@ -171,7 +171,10 @@ their codec themselves.
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
-  (empty) table stays. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
+  (empty) table stays. `CREATE TABLE ... AS` refuses a location that already holds data files (such as those of a
+  dropped table), and lists the location again once its own files are written: when another statement wrote data
+  files there in the meantime (a second `CREATE TABLE ... AS` into the same location), it deletes its files and the
+  table it created and fails, so neither table reads the other's rows. Writes to bucketed (clustered) tables, i.e. tables with `BucketColumns`, are refused;
   they can be read. `CREATE TABLE ... AS` with the bucketing options is refused before the table is created. Like
   Athena, JSON tables are written only with the Hive JsonSerDe (`org.apache.hive.hcatalog.data.JsonSerDe`, what
   `CREATE TABLE ... WITH (format = 'json')` creates): `INSERT` into a table with the OpenX JSON SerDe

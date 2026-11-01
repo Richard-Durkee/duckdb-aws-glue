@@ -7,9 +7,12 @@ the description 'created by another client', a table one more column 'created_by
 'SELECT 2 AS one'. An UpdateTable on a fault_concurrent_update* database is preceded by another client's update,
 which sets the table parameter 'changed_by_another_client', and is then refused with ConcurrentModificationException
 if its VersionId is not the table's current one, as Glue does (moto ignores VersionId); without a VersionId it is
-forwarded and overwrites the other client's change."""
+forwarded and overwrites the other client's change. A CreateTable on a fault_concurrent_ctas* database is forwarded,
+then another writer puts the object other-writer.parquet into the table's location, as a CREATE TABLE AS into the
+same location would once both have checked it is empty."""
 
 import argparse
+import boto3
 import http.client
 import json
 import urllib.parse
@@ -21,6 +24,8 @@ LISTING_FAULTS = {"fault_access_denied": "AccessDeniedException", "fault_invalid
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
+# CreateTable on a database with this prefix is followed by another writer's file in the table's location
+RACED_LOCATION_PREFIX = "fault_concurrent_ctas"
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -68,6 +73,10 @@ def is_raced_update(target, database):
     return target == "AWSGlue.UpdateTable" and database.startswith(RACED_UPDATE_PREFIX)
 
 
+def is_raced_location(target, database):
+    return target == "AWSGlue.CreateTable" and database.startswith(RACED_LOCATION_PREFIX)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -95,6 +104,8 @@ class Handler(BaseHTTPRequestHandler):
         if raced:
             body = as_other_clients_object(target, request)
         status, headers, data = self.forward(target, body)
+        if is_raced_location(target, database) and status == 200:
+            self.write_as_other_writer(request["TableInput"]["StorageDescriptor"]["Location"])
         if raced and status == 200:
             # the object exists now, but as far as this client can tell another client created it first
             self.reply_error("AlreadyExistsException")
@@ -132,6 +143,10 @@ class Handler(BaseHTTPRequestHandler):
             raise RuntimeError(f"UpdateTable {database}.{name} failed: {data!r}")
         return self.get_table(database, name)["VersionId"]
 
+    def write_as_other_writer(self, location):
+        bucket, _, prefix = location.removeprefix("s3://").partition("/")
+        self.server.s3.put_object(Bucket=bucket, Key=prefix.rstrip("/") + "/other-writer.parquet", Body=b"rows")
+
     def reply_error(self, error):
         payload = json.dumps({"__type": error, "Message": "injected by glue_fault_proxy"}).encode()
         self.reply(400, [("Content-Type", "application/x-amz-json-1.1"), ("x-amzn-ErrorType", error)], payload)
@@ -152,9 +167,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=5556)
     parser.add_argument("--upstream", default="http://localhost:5555")
+    parser.add_argument("--s3-endpoint", default="http://localhost:9100")
     args = parser.parse_args()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     server.upstream = urllib.parse.urlsplit(args.upstream)
+    server.s3 = boto3.client("s3", endpoint_url=args.s3_endpoint, aws_access_key_id="minio",
+                             aws_secret_access_key="minio123", region_name="us-east-1")
     server.serve_forever()
 
 

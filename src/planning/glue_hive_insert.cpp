@@ -4,6 +4,7 @@
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -517,6 +518,7 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 		types.push_back(column.Type());
 	}
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
+	insert.create_table_as = true;
 	PlanWrite(context, planner, op, insert, nullptr, table_info, plan, names, types, schema, std::move(op.info));
 	return insert;
 }
@@ -554,9 +556,45 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 //! Case sensitive, like S3 paths
 using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 
+//! Two CTAS into one location can both pass ThrowIfLocationHoldsFiles; of two that list again after writing, the one
+//! listing last sees the other's files, so at most one keeps its table
+void GlueHiveInsert::ThrowIfLocationShared(ClientContext &context, const vector<string> &written_files) const {
+	auto location = table_info.location;
+	StringUtil::RTrim(location, "/");
+	unordered_set<string> own(written_files.begin(), written_files.end());
+	string other;
+	for (auto &file : ListLocationDataFiles(context, location)) {
+		if (own.find(file) == own.end()) {
+			other = file;
+			break;
+		}
+	}
+	if (other.empty()) {
+		return;
+	}
+	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
+	try {
+		FileSystem::GetFileSystem(context).RemoveFiles(written_files);
+		GlueAPI::DeleteTable(context, catalog, table_info.schema_name, table_info.name);
+	} catch (std::exception &ex) {
+		throw IOException("CREATE TABLE AS for Hive table '%s.%s' failed: another statement wrote '%s' to its location "
+		                  "'%s' while it ran. Deleting the %llu files it wrote and the table failed (%s); remove "
+		                  "them, then run it again with another location",
+		                  table_info.schema_name, table_info.name, other, location, written_files.size(),
+		                  ErrorData(ex).RawMessage());
+	}
+	throw IOException("CREATE TABLE AS for Hive table '%s.%s' was rolled back: another statement wrote '%s' to its "
+	                  "location '%s' while it ran, whose rows the table would read. The files it wrote and the table "
+	                  "were deleted; run it again with another location",
+	                  table_info.schema_name, table_info.name, other, location);
+}
+
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
+	if (create_table_as) {
+		ThrowIfLocationShared(context, state.written_files);
+	}
 	if (!state.written_files.empty()) {
 		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
 		GlueTransactionCache::Invalidate(context, catalog);

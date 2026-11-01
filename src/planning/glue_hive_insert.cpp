@@ -274,6 +274,8 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		if (codec == "zstd" && !level.empty()) {
 			copy_options[Identifier("compression_level")] = {Value(level)};
 		}
+		// a reader probing bloom filters with the table type's hash would skip older files after INT to BIGINT
+		copy_options[Identifier("write_bloom_filter")] = {Value::BOOLEAN(false)};
 		break;
 	}
 	case HiveFileFormat::AVRO:

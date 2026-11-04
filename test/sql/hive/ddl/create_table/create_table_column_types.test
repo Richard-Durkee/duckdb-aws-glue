@@ -44,7 +44,7 @@ CREATE TABLE my_datalake.default.ddl_types (
   struct_col STRUCT(city VARCHAR, zip INTEGER)
 ) WITH (location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/ddl_types');
 
-# the Hive types in Glue (char(n) and varchar(n) are plain VARCHAR in DuckDB, so they become string)
+# the Hive types in Glue
 query II
 SELECT c.name, c.type FROM (SELECT unnest(columns) AS c FROM glue_get_table_response('my_datalake.default.ddl_types'));
 ----
@@ -57,8 +57,8 @@ double_col	double
 float_col	float
 decimal_col	decimal(11,5)
 decimal_default_scale_col	decimal(15,0)
-char_col	string
-varchar_col	string
+char_col	char(10)
+varchar_col	varchar(10)
 string_col	string
 binary_col	binary
 date_col	date
@@ -113,9 +113,9 @@ SELECT boolean_col, tinyint_col, smallint_col, int_col, bigint_col, double_col, 
 true	127	32767	2147483647	9223372036854775807	1.5	2.5
 
 query IIIII
-SELECT decimal_col, decimal_default_scale_col, char_col, varchar_col, string_col FROM verify_datalake.default.ddl_types;
+SELECT decimal_col, decimal_default_scale_col, '[' || char_col || ']', varchar_col, string_col FROM verify_datalake.default.ddl_types;
 ----
-123456.12345	123456789012345	char	varchar	string
+123456.12345	123456789012345	[char      ]	varchar	string
 
 query III
 SELECT hex(binary_col), date_col, timestamp_col FROM verify_datalake.default.ddl_types;

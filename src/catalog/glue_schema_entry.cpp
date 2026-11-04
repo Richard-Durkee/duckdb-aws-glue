@@ -20,6 +20,9 @@
 #include "duckdb/parser/parsed_data/create_table_info.hpp"
 #include "duckdb/parser/expression/cast_expression.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
+#include "duckdb/parser/parsed_data/create_type_info.hpp"
+#include "duckdb/function/type_constructor.hpp"
+#include "duckdb/planner/expression_binder.hpp"
 
 #include "core/glue_types.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -32,10 +35,54 @@
 
 namespace duckdb {
 
+static LogicalType BindGlueVarcharType(BindLogicalTypeInput &input) {
+	return LogicalType::VARCHAR;
+}
+
+static int64_t CharacterTypeLength(BindLogicalTypeInput &input) {
+	return input.modifiers[0].GetValue().GetValue<int64_t>();
+}
+
+static LogicalType BindGlueVarcharLengthType(BindLogicalTypeInput &input) {
+	return GlueTypes::CharacterLogicalType(false, CharacterTypeLength(input));
+}
+
+static LogicalType BindGlueCharLengthType(BindLogicalTypeInput &input) {
+	return GlueTypes::CharacterLogicalType(true, CharacterTypeLength(input));
+}
+
+static LogicalType BindGlueCollatedVarcharType(BindLogicalTypeInput &input) {
+	auto &collation = StringValue::Get(input.modifiers[0].GetValue());
+	if (input.context) {
+		ExpressionBinder::TestCollation(*input.context, collation);
+	}
+	return LogicalType::VARCHAR_COLLATION(collation);
+}
+
+//! DuckDB's VARCHAR / BPCHAR constructors, but for a length, which DuckDB drops
+static unique_ptr<TypeCatalogEntry> CreateCharacterType(Catalog &catalog, SchemaCatalogEntry &schema,
+                                                        const string &name, bool fixed_length) {
+	TypeConstructorSet constructors;
+	constructors.AddFunction(TypeConstructor(TypeConstructor::Signature(), BindGlueVarcharType));
+	auto length_signature = TypeConstructor::Signature();
+	length_signature.AddParameter("length", LogicalType::BIGINT);
+	constructors.AddFunction(TypeConstructor(std::move(length_signature),
+	                                         fixed_length ? BindGlueCharLengthType : BindGlueVarcharLengthType));
+	auto collation_signature = TypeConstructor::Signature();
+	collation_signature.AddParameter("collation", LogicalType::VARCHAR);
+	constructors.AddFunction(TypeConstructor(std::move(collation_signature), BindGlueCollatedVarcharType));
+	CreateTypeInfo info(name, LogicalType::VARCHAR, std::move(constructors));
+	// a table using the type does not depend on it
+	info.internal = true;
+	return make_uniq<TypeCatalogEntry>(catalog, schema, info);
+}
+
 GlueSchemaEntry::GlueSchemaEntry(Catalog &catalog, CreateSchemaInfo &info, GlueDatabaseInfo database_info_p,
                                  bool schema_info_loaded)
     : SchemaCatalogEntry(catalog, info), tables(*this), database_info(std::move(database_info_p)),
       schema_info_loaded(schema_info_loaded) {
+	varchar_type = CreateCharacterType(catalog, *this, "varchar", false);
+	char_type = CreateCharacterType(catalog, *this, "bpchar", true);
 }
 
 GlueSchemaEntry::~GlueSchemaEntry() {
@@ -1069,6 +1116,16 @@ void GlueSchemaEntry::SetSchemaInfo(const GlueDatabaseInfo &database) {
 
 optional_ptr<CatalogEntry> GlueSchemaEntry::LookupEntry(CatalogTransaction transaction,
                                                         const EntryLookupInfo &lookup_info) {
+	if (lookup_info.GetCatalogType() == CatalogType::TYPE_ENTRY) {
+		auto &name = lookup_info.GetEntryName();
+		if (StringUtil::CIEquals(name, varchar_type->name.GetIdentifierName())) {
+			return varchar_type.get();
+		}
+		if (StringUtil::CIEquals(name, char_type->name.GetIdentifierName())) {
+			return char_type.get();
+		}
+		return nullptr;
+	}
 	if (!CatalogTypeIsSupported(lookup_info.GetCatalogType())) {
 		return nullptr;
 	}

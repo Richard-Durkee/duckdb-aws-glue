@@ -162,7 +162,8 @@ their codec themselves.
   PartitionKeys and are listed last in the table's columns. Generated columns, column defaults and collated columns
   (`COLLATE`, also from a `CREATE TABLE ... AS` query) are refused. Unknown `WITH` keys are stored as Glue table
   parameters. Column types are stored as Hive types; DuckDB types without one are refused, e.g. `UBIGINT`, `HUGEINT` and
-  `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds).
+  `TIMESTAMP_NS`/`_MS`/`_S` (Hive's `timestamp` is `TIMESTAMP`, in microseconds). `VARCHAR(n)` and `CHAR(n)` are
+  stored as `varchar(n)` (n up to 65535) and `char(n)` (n up to 255); a `VARCHAR` without a length is `string`.
   For csv, `delimiter = '|'` sets the field delimiter (`field.delim`), `header = true` makes every file start with a
   header line (`skip.header.line.count`), and `quote = '"'` / `escape = '\'` switch the table to OpenCSVSerde with
   `separatorChar` / `quoteChar` / `escapeChar` (the escape character defaults to the quote character).
@@ -181,7 +182,11 @@ their codec themselves.
   other partitions can still be inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
   still refuses a partition, the write is rolled back by deleting the files it wrote (the partitions it registered
   stay, empty), so the statement can be run again without adding its
-  rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
+  rows twice. A value of a `varchar(n)` or `char(n)` column (data column or partition key) longer than n characters
+  fails the statement, unless only trailing spaces are beyond n, which are cut; `char(n)` values are padded with
+  spaces to n. Reading does not pad: a `char(n)` column reads as the strings in the files. With the Glue catalog
+  in the search path (`USE`), `CAST(x AS VARCHAR(n))` in a query is typed `varchar(n)`, but the cast does not cut the
+  value. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
   before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing); if the query fails the
   (empty) table stays. It is refused when the location already holds data files, such as those of a dropped table,

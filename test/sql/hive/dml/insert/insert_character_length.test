@@ -1,0 +1,155 @@
+# name: test/sql/hive/dml/insert/insert_character_length.test
+# description: VARCHAR(n) and CHAR(n) columns keep their length in Glue, and a write checks it
+# group: [insert]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.char_len;
+
+statement ok
+CREATE TABLE my_datalake.default.char_len (
+  v VARCHAR(3),
+  c CHAR(3),
+  s VARCHAR,
+  nv CHARACTER VARYING(4),
+  p VARCHAR(2)
+) PARTITIONED BY (p);
+
+query II
+SELECT c.name, c.type FROM (
+  SELECT unnest(columns) AS c FROM glue_get_table_response('my_datalake.default.char_len')
+  UNION ALL
+  SELECT unnest(partition_keys) FROM glue_get_table_response('my_datalake.default.char_len')
+);
+----
+v	varchar(3)
+c	char(3)
+s	string
+nv	varchar(4)
+p	varchar(2)
+
+# values that fit are written as given, a CHAR(n) value padded with spaces to n
+statement ok
+INSERT INTO my_datalake.default.char_len VALUES ('abc', 'ab', 'a long string', 'wxyz', 'p1'), (NULL, NULL, NULL, NULL, 'p1');
+
+query IIIII
+SELECT v, '[' || c || ']', s, nv, p FROM my_datalake.default.char_len ORDER BY v NULLS LAST;
+----
+abc	[ab ]	a long string	wxyz	p1
+NULL	NULL	NULL	NULL	p1
+
+# a value longer than the column's length fails the statement, and nothing is written
+statement error
+INSERT INTO my_datalake.default.char_len VALUES ('abcd', 'a', 'x', 'w', 'p1');
+----
+Writing to Glue table 'default.char_len' failed: a value of column 'v' is longer than its type varchar(3) allows
+
+statement error
+INSERT INTO my_datalake.default.char_len VALUES ('a', 'abcd', 'x', 'w', 'p1');
+----
+Writing to Glue table 'default.char_len' failed: a value of column 'c' is longer than its type char(3) allows
+
+statement error
+INSERT INTO my_datalake.default.char_len VALUES ('a', 'a', 'x', 'w', 'p12');
+----
+Writing to Glue table 'default.char_len' failed: a value of column 'p' is longer than its type varchar(2) allows
+
+# the length counts characters, not bytes
+statement ok
+INSERT INTO my_datalake.default.char_len VALUES ('äöü', '€', 'x', '😀😀😀😀', 'p2');
+
+# only trailing spaces beyond the length are cut
+statement ok
+INSERT INTO my_datalake.default.char_len VALUES ('xy    ', 'z     ', 'x', 'w', 'p3');
+
+query IIII
+SELECT '[' || v || ']', '[' || c || ']', nv, p FROM my_datalake.default.char_len WHERE p <> 'p1' ORDER BY p;
+----
+[äöü]	[€  ]	😀😀😀😀	p2
+[xy ]	[z  ]	w	p3
+
+query I
+SELECT count(*) FROM my_datalake.default.char_len;
+----
+4
+
+# a length the Glue type can not hold
+statement error
+CREATE TABLE my_datalake.default.char_len_bad (c CHAR(256));
+----
+CHAR(256) can not be stored in a Glue table: the length of a CHAR must be between 1 and 255
+
+statement error
+CREATE TABLE my_datalake.default.char_len_bad (v VARCHAR(65536));
+----
+VARCHAR(65536) can not be stored in a Glue table: the length of a VARCHAR must be between 1 and 65535
+
+# CREATE TABLE AS takes the length of a cast, and checks it too
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.char_len_ctas;
+
+statement ok
+USE my_datalake.default;
+
+statement error
+CREATE TABLE my_datalake.default.char_len_ctas AS SELECT 'abcd'::VARCHAR(3) AS v;
+----
+Writing to Glue table 'default.char_len_ctas' failed: a value of column 'v' is longer than its type varchar(3) allows
+
+# the table itself is created before its rows are written, as for any CREATE TABLE AS that fails while it runs
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.char_len_ctas;
+
+statement ok
+CREATE TABLE my_datalake.default.char_len_ctas AS SELECT 'ab'::VARCHAR(3) AS v, 'a'::CHAR(2) AS c;
+
+query II
+SELECT c.name, c.type FROM (SELECT unnest(columns) AS c FROM glue_get_table_response('my_datalake.default.char_len_ctas'));
+----
+v	varchar(3)
+c	char(2)
+
+query II
+SELECT v, '[' || c || ']' FROM my_datalake.default.char_len_ctas;
+----
+ab	[a ]
+
+# a table read back has plain VARCHAR columns
+query II
+SELECT column_name, data_type FROM duckdb_columns() WHERE database_name = 'my_datalake' AND table_name = 'char_len' ORDER BY column_index;
+----
+v	VARCHAR
+c	VARCHAR
+s	VARCHAR
+nv	VARCHAR
+p	VARCHAR
+
+# ALTER TABLE ADD COLUMN keeps the length
+statement ok
+ALTER TABLE my_datalake.default.char_len ADD COLUMN extra VARCHAR(7);
+
+query I
+SELECT c.type FROM (SELECT unnest(columns) AS c FROM glue_get_table_response('my_datalake.default.char_len')) WHERE c.name = 'extra';
+----
+varchar(7)
+
+statement ok
+USE memory;
+
+statement ok
+DROP TABLE my_datalake.default.char_len;
+
+statement ok
+DROP TABLE my_datalake.default.char_len_ctas;

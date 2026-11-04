@@ -49,13 +49,16 @@ public:
 	string GetCatalogType() override {
 		return "glue";
 	}
-	//! Functions are never looked up in a Glue catalog
+	//! Functions are never looked up in a Glue catalog. Types are looked up here before DuckDB's built-in ones, so
+	//! VARCHAR(n) and CHAR(n) of a Glue table keep their length (GlueSchemaEntry::LookupEntry).
 	CatalogLookupBehavior CatalogTypeLookupRule(CatalogType type) const override {
 		switch (type) {
 		case CatalogType::TABLE_FUNCTION_ENTRY:
 		case CatalogType::SCALAR_FUNCTION_ENTRY:
 		case CatalogType::AGGREGATE_FUNCTION_ENTRY:
 			return CatalogLookupBehavior::NEVER_LOOKUP;
+		case CatalogType::TYPE_ENTRY:
+			return CatalogLookupBehavior::HIGHER_PRIORITY;
 		default:
 			return CatalogLookupBehavior::STANDARD;
 		}

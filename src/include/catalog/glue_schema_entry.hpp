@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/catalog/catalog_entry/schema_catalog_entry.hpp"
+#include "duckdb/catalog/catalog_entry/type_catalog_entry.hpp"
 #include "duckdb/common/case_insensitive_map.hpp"
 #include "duckdb/common/enums/on_entry_not_found.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
@@ -113,6 +114,10 @@ private:
 	//! Guards the fields of 'database_info' other than the name, which never changes
 	mutex schema_info_lock;
 	bool schema_info_loaded;
+	//! VARCHAR and CHAR (BPCHAR), found before DuckDB's own (GlueCatalog::CatalogTypeLookupRule): they keep the length
+	//! of VARCHAR(n) / CHAR(n), which Glue stores as varchar(n) / char(n)
+	unique_ptr<TypeCatalogEntry> varchar_type;
+	unique_ptr<TypeCatalogEntry> char_type;
 };
 
 } // namespace duckdb

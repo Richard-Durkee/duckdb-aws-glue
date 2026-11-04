@@ -5,6 +5,8 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/decimal.hpp"
 
+#include <algorithm>
+
 namespace duckdb {
 
 namespace {
@@ -213,6 +215,50 @@ private:
 
 } // namespace
 
+//! Hive's limits on the declared length of varchar(n) and char(n)
+static constexpr idx_t MAX_VARCHAR_LENGTH = 65535;
+static constexpr idx_t MAX_CHAR_LENGTH = 255;
+
+string GlueCharacterType::ToString() const {
+	return StringUtil::Format("%s(%d)", fixed_length ? "char" : "varchar", length);
+}
+
+bool GlueTypes::TryGetCharacterType(const string &glue_type, GlueCharacterType &result) {
+	auto type = StringUtil::Lower(glue_type);
+	StringUtil::Trim(type);
+	auto open = type.find('(');
+	if (open == string::npos || type.back() != ')') {
+		return false;
+	}
+	auto name = type.substr(0, open);
+	StringUtil::RTrim(name);
+	if (name != "varchar" && name != "char") {
+		return false;
+	}
+	auto digits = type.substr(open + 1, type.size() - open - 2);
+	StringUtil::Trim(digits);
+	if (digits.empty() || digits.size() > 9 ||
+	    !std::all_of(digits.begin(), digits.end(), [](char c) { return c >= '0' && c <= '9'; })) {
+		return false;
+	}
+	result.fixed_length = name == "char";
+	result.length = std::stoul(digits);
+	return result.length > 0;
+}
+
+LogicalType GlueTypes::CharacterLogicalType(bool fixed_length, int64_t length) {
+	auto max_length = fixed_length ? MAX_CHAR_LENGTH : MAX_VARCHAR_LENGTH;
+	auto name = fixed_length ? "CHAR" : "VARCHAR";
+	if (length < 1 || static_cast<idx_t>(length) > max_length) {
+		throw BinderException("%s(%d) can not be stored in a Glue table: the length of a %s must be between 1 and %d",
+		                      name, length, name, max_length);
+	}
+	GlueCharacterType type;
+	type.fixed_length = fixed_length;
+	type.length = static_cast<idx_t>(length);
+	return LogicalType(LogicalTypeId::VARCHAR).WithAlias(type.ToString());
+}
+
 LogicalType GlueTypes::ToLogicalType(const string &glue_type) {
 	GlueTypeParser parser(glue_type);
 	return parser.Parse();
@@ -246,8 +292,14 @@ string GlueTypes::FromLogicalType(const LogicalType &type) {
 		type.GetDecimalProperties(width, scale);
 		return StringUtil::Format("decimal(%d,%d)", width, scale);
 	}
-	case LogicalTypeId::VARCHAR:
+	case LogicalTypeId::VARCHAR: {
+		// CharacterLogicalType: a varchar(n) / char(n) column keeps its Glue type
+		GlueCharacterType character_type;
+		if (type.HasAlias() && TryGetCharacterType(type.GetAlias(), character_type)) {
+			return character_type.ToString();
+		}
 		return "string";
+	}
 	case LogicalTypeId::BLOB:
 		return "binary";
 	case LogicalTypeId::DATE:

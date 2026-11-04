@@ -18,6 +18,7 @@
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/function/copy_function.hpp"
 #include "duckdb/main/database.hpp"
@@ -91,6 +92,111 @@ static unique_ptr<Expression> CheckedTextField(ClientContext &context, unique_pt
 	}
 	raise = BoundCastExpression::AddCastToType(context, std::move(raise), LogicalType::VARCHAR);
 	return make_uniq<BoundCaseExpression>(std::move(refused), std::move(raise), std::move(text));
+}
+
+static unique_ptr<Expression> BindStringFunction(ClientContext &context, const char *name,
+                                                 vector<unique_ptr<Expression>> children) {
+	FunctionBinder function_binder(context);
+	ErrorData error;
+	auto result =
+	    function_binder.BindScalarFunction(Identifier::DefaultSchema(), Identifier(name), std::move(children), error);
+	if (!result) {
+		error.Throw();
+	}
+	return result;
+}
+
+static unique_ptr<Expression> BindStringFunction(ClientContext &context, const char *name,
+                                                 const unique_ptr<Expression> &text, Value argument) {
+	vector<unique_ptr<Expression>> children;
+	children.push_back(text->Copy());
+	children.push_back(make_uniq<BoundConstantExpression>(std::move(argument)));
+	return BindStringFunction(context, name, std::move(children));
+}
+
+//! length(text) <= length, or text IS NULL
+static unique_ptr<Expression> FitsLength(ClientContext &context, unique_ptr<Expression> text, idx_t length) {
+	vector<unique_ptr<Expression>> length_children;
+	length_children.push_back(text->Copy());
+	auto text_length = BindStringFunction(context, "length", std::move(length_children));
+	auto fits = BoundComparisonExpression::Create(
+	    ExpressionType::COMPARE_LESSTHANOREQUALTO, std::move(text_length),
+	    make_uniq<BoundConstantExpression>(Value::BIGINT(NumericCast<int64_t>(length))));
+	auto is_null = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
+	is_null->GetChildrenMutable().push_back(std::move(text));
+	auto conjunction = make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_OR);
+	conjunction->GetChildrenMutable().push_back(std::move(is_null));
+	conjunction->GetChildrenMutable().push_back(std::move(fits));
+	return std::move(conjunction);
+}
+
+//! A value of a varchar(n) / char(n) column, as it is written: a value longer than n fails the statement unless
+//! only spaces are cut, and a char(n) value is padded with spaces to n
+static unique_ptr<Expression> CheckedCharacterValue(ClientContext &context, unique_ptr<Expression> value,
+                                                    const GlueCharacterType &type, const string &error_message) {
+	auto text = BoundCastExpression::AddCastToType(context, std::move(value), LogicalType::VARCHAR);
+	auto length = Value::BIGINT(NumericCast<int64_t>(type.length));
+	auto trimmed = BindStringFunction(context, "rtrim", text, Value(" "));
+	auto fits_trimmed = FitsLength(context, std::move(trimmed), type.length);
+	vector<unique_ptr<Expression>> error_children;
+	error_children.push_back(make_uniq<BoundConstantExpression>(Value(error_message)));
+	auto raise = BindStringFunction(context, "error", std::move(error_children));
+	raise = BoundCastExpression::AddCastToType(context, std::move(raise), LogicalType::VARCHAR);
+	if (type.fixed_length) {
+		vector<unique_ptr<Expression>> pad_children;
+		pad_children.push_back(text->Copy());
+		pad_children.push_back(make_uniq<BoundConstantExpression>(length));
+		pad_children.push_back(make_uniq<BoundConstantExpression>(Value(" ")));
+		auto padded = BindStringFunction(context, "rpad", std::move(pad_children));
+		return make_uniq<BoundCaseExpression>(std::move(fits_trimmed), std::move(padded), std::move(raise));
+	}
+	auto cut = BindStringFunction(context, "left", text, length);
+	auto trailing_spaces_cut =
+	    make_uniq<BoundCaseExpression>(std::move(fits_trimmed), std::move(cut), std::move(raise));
+	auto fits = FitsLength(context, text->Copy(), type.length);
+	return make_uniq<BoundCaseExpression>(std::move(fits), std::move(text), std::move(trailing_spaces_cut));
+}
+
+//! Puts a projection over 'plan' that checks the values of the table's varchar(n) / char(n) columns
+//! (CheckedCharacterValue). Those columns become plain VARCHAR in 'types'. Returns 'plan' if the table has none.
+static PhysicalOperator &CheckCharacterLengths(ClientContext &context, PhysicalPlanGenerator &planner,
+                                               LogicalOperator &op, const GlueTableInfo &table_info,
+                                               PhysicalOperator &plan, const vector<Identifier> &names,
+                                               vector<LogicalType> &types) {
+	auto glue_type_of = [&](const string &name) -> optional_ptr<const GlueColumn> {
+		for (auto columns : {&table_info.columns, &table_info.partition_keys}) {
+			for (auto &column : *columns) {
+				if (StringUtil::CIEquals(column.name, name)) {
+					return &column;
+				}
+			}
+		}
+		return nullptr;
+	};
+	vector<unique_ptr<Expression>> select_list;
+	bool checked = false;
+	for (idx_t i = 0; i < names.size(); i++) {
+		unique_ptr<Expression> column = make_uniq<BoundReferenceExpression>(types[i], i);
+		auto glue_column = glue_type_of(names[i].GetIdentifierName());
+		GlueCharacterType character_type;
+		if (glue_column && GlueTypes::TryGetCharacterType(glue_column->type, character_type)) {
+			auto message = StringUtil::Format("Writing to Glue table '%s.%s' failed: a value of column '%s' is longer "
+			                                  "than its type %s allows",
+			                                  table_info.schema_name, table_info.name, names[i].GetIdentifierName(),
+			                                  character_type.ToString());
+			column = CheckedCharacterValue(context, std::move(column), character_type, message);
+			types[i] = LogicalType::VARCHAR;
+			checked = true;
+		}
+		select_list.push_back(std::move(column));
+	}
+	if (!checked) {
+		return plan;
+	}
+	auto &projection =
+	    planner.Make<PhysicalProjection>(vector<LogicalType>(types), std::move(select_list), op.estimated_cardinality);
+	projection.children.push_back(plan);
+	return projection;
 }
 
 static optional_ptr<CopyFunctionCatalogEntry> TryGetCopyFunction(DatabaseInstance &db, const string &name) {
@@ -517,8 +623,9 @@ PhysicalOperator &GlueHiveInsert::PlanInsert(ClientContext &context, PhysicalPla
 		types.push_back(column.Type());
 	}
 	auto &catalog = table.catalog.Cast<GlueCatalog>();
+	auto &checked = CheckCharacterLengths(context, planner, op, table_info, *plan, names, types);
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
-	PlanWrite(context, planner, op, insert, table, table_info, *plan, names, types, nullptr, nullptr);
+	PlanWrite(context, planner, op, insert, table, table_info, checked, names, types, nullptr, nullptr);
 	return insert;
 }
 
@@ -563,8 +670,9 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 		names.push_back(column.Name());
 		types.push_back(column.Type());
 	}
+	auto &checked = CheckCharacterLengths(context, planner, op, table_info, plan, names, types);
 	auto &insert = planner.Make<GlueHiveInsert>(op, catalog, table_info).Cast<GlueHiveInsert>();
-	PlanWrite(context, planner, op, insert, nullptr, table_info, plan, names, types, schema, std::move(op.info));
+	PlanWrite(context, planner, op, insert, nullptr, table_info, checked, names, types, schema, std::move(op.info));
 	return insert;
 }
 

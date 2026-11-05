@@ -122,6 +122,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "ranges at the same time, when the location takes more than one listing page and the "
 	                          "ranges take fewer listings than one per partition. Default true.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
+	config.AddExtensionOption("hive_listing_measure_keys",
+	                          "Size the listings of a partitioned table by the keys the sampled partition holds rather "
+	                          "than one per partition. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

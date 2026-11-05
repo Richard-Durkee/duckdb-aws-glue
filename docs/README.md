@@ -123,8 +123,9 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   listed in whichever way takes fewer rounds of requests: the location once, recursively (one S3 request per 1000
   keys, one after another), with the files matched to their partitions by prefix, or each partition on its own,
   several at the same time. On a tie the location is listed when that makes a tenth of the requests, so a table
-  of up to 1000 partitions lists its location from 10 partitions read (or fewer, when they take more than one round). The estimate assumes one file per partition;
-  `SET hive_partition_listing_threshold = n` replaces it with a fixed rule (the location from n partitions read).
+  of up to 1000 partitions lists its location from 10 partitions read (or fewer, when they take more than one round). The estimate assumes one file per partition
+  until the cardinality sample has listed some, whose keys per partition then size it
+  (`SET hive_listing_measure_keys = false` keeps one); `SET hive_partition_listing_threshold = n` replaces it with a fixed rule (the location from n partitions read).
   When the location takes more than one page, the partitions below it are instead listed in ranges that share a key
   prefix (`part=24*`), about one page each and all at the same time, skipping the ranges that hold no partition read,
   when that takes fewer listings than one per partition (`SET hive_partition_range_listing = false` turns it off).

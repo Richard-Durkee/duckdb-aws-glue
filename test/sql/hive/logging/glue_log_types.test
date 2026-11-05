@@ -147,7 +147,11 @@ SELECT event, files, detail FROM duckdb_logs_parsed('GlueScan') ORDER BY event;
 listing	1	table
 sample	NULL	NULL
 
-# a request Glue answers with an error is logged with its status
+# a request Glue answers with an error is logged with its status. Without batched lookups the missing table is asked
+# for directly: a GetTables page holding the whole database would answer it without an error
+statement ok
+SET glue_batch_table_lookup = false;
+
 statement ok
 CALL truncate_duckdb_logs();
 
@@ -160,6 +164,9 @@ query II
 SELECT DISTINCT operation, status FROM glue_requests() WHERE operation = 'AWSGlue.GetTable';
 ----
 AWSGlue.GetTable	BadRequest_400
+
+statement ok
+RESET glue_batch_table_lookup;
 
 # nothing is logged with the log types off
 statement ok

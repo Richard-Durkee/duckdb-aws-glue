@@ -82,8 +82,8 @@ public:
 	static bool IsBucketingOption(const string &key);
 	//! Type changes Hive can read back from the existing parquet files: widening only
 	static bool IsAllowedHiveTypeChange(const LogicalType &from, const LogicalType &to);
-	//! Replace the cached entry of an altered table with what Glue stored
-	GlueTable &RefreshTable(ClientContext &context, const string &table_name);
+	//! Replace the cached entry of an altered table with the definition the write returned
+	GlueTable &ReplaceTable(const GlueTableInfo &written);
 	//! The definition a write rewrites: the bound entry's. Under a connection-scoped metadata cache the entry may
 	//! predate a change by another connection, so it is fetched again first.
 	const GlueTableInfo &DefinitionForWrite(ClientContext &context, const CatalogEntry &entry);

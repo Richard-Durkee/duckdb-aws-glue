@@ -77,28 +77,30 @@ public:
 	//! definition is rewritten from the Table it carries, nothing is fetched again.
 	static void UpdateView(ClientContext &context, GlueCatalog &catalog, const GlueViewInfo &view,
 	                       const GlueTableInfo &bound);
+	//! The UpdateTable wrappers below return the definition as written (see UpdateGlueTable), so the altering
+	//! statement need not fetch the table again.
 	//! Replace the (data) columns of a table, keeping everything else of its Glue definition as is. Used for
 	//! ALTER TABLE on Hive tables; open table formats keep their schema in their own metadata. 'bound' is the table
 	//! as fetched; the definition is rewritten from the Table it carries, nothing is fetched again.
-	static void UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
-	                               const vector<GlueColumn> &columns);
+	static GlueTableInfo UpdateTableColumns(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	                                        const vector<GlueColumn> &columns);
 	//! Replace the partition keys of a table, keeping everything else of its Glue definition as is. Only the names,
 	//! types and comments of the partition keys are overwritten; the StorageDescriptor and registered partitions are
 	//! untouched. Used for COMMENT ON COLUMN on a partition key.
-	static void UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
-	                                     const vector<GlueColumn> &partition_keys);
+	static GlueTableInfo UpdateTablePartitionKeys(ClientContext &context, GlueCatalog &catalog,
+	                                              const GlueTableInfo &bound, const vector<GlueColumn> &partition_keys);
 	//! Replace the description of a table (Glue's Table.Description), keeping everything else of its Glue definition
 	//! as is. An empty description clears it.
-	static void UpdateTableDescription(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
-	                                   const string &description);
+	static GlueTableInfo UpdateTableDescription(ClientContext &context, GlueCatalog &catalog,
+	                                            const GlueTableInfo &bound, const string &description);
 	//! Move the table (StorageDescriptor.Location); existing partitions keep their own locations
-	static void SetTableLocation(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
-	                             const string &location);
+	static GlueTableInfo SetTableLocation(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	                                      const string &location);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
 	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
-	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
-	                                  const vector<pair<string, string>> &set, const vector<string> &unset);
+	static GlueTableInfo UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
+	                                           const vector<pair<string, string>> &set, const vector<string> &unset);
 	//! Point a partition at another location. 'partition' is the partition as fetched; it is rewritten from the
 	//! Partition it carries, nothing is fetched again.
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -160,6 +162,10 @@ public:
 	//! table does not exist, 0 if Glue gave none. Tells a table apart from one created again under its name.
 	static optional_idx GetTableCreateTime(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
 	                                       const string &database_name, const string &table_name);
+	//! The table of a Glue Table object serialized as JSON (Table::Jsonize), as if GetTable had returned it
+	static GlueTableInfo ParseTable(const string &table_json, const string &schema_name);
+	//! The partitions of a JSON array of Glue Partition objects
+	static vector<GluePartitionInfo> ParsePartitions(const string &partitions_json);
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret. Public
 	//! for the undo of a CREATE TABLE AS, which takes the client while the secret can still be looked up
 	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);

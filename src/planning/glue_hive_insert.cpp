@@ -27,6 +27,7 @@
 #include "duckdb/planner/operator/logical_copy_to_file.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_metadata.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "catalog/glue_table.hpp"
@@ -275,7 +276,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	}
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
-	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	auto partitions_ptr = GlueMetadata::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	auto &partitions = *partitions_ptr;
 	// matched as the scan matches the files' columns: by position in csv files, by name otherwise
 	auto columns_by_position = table_info.GetFileFormat() == HiveFileFormat::CSV;
 	vector<string> keys;
@@ -804,7 +806,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
 	if (!state.written_files.empty()) {
 		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
-		GlueTransactionCache::Invalidate(context, catalog);
+		GlueTransactionCache::Invalidate(context, catalog, table_info.schema_name, table_info.name, true);
 	}
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
@@ -854,13 +856,15 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
 		// it was about to create, so the table is fetched as created
 		optional_ptr<const GlueTableInfo> registered = &table_info;
-		GlueTableInfo created;
+		shared_ptr<const GlueTableInfo> created;
 		if (!table_info.fetched) {
-			if (!GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, created)) {
+			created = GlueMetadata::GetTable(context, catalog, table_info.schema_name, table_info.name,
+			                                 GlueMetadata::Freshness::THIS_QUERY);
+			if (!created) {
 				throw CatalogException("Table \"%s.%s\" was created but could not be fetched afterwards",
 				                       table_info.schema_name, table_info.name);
 			}
-			registered = &created;
+			registered = created.get();
 		}
 		// a cancel or timeout during registration would fail the statement with its rows in the table: undo the write
 		// instead. BlockingInterruptCheck: InterruptCheck only looks at the deadline every 256 calls

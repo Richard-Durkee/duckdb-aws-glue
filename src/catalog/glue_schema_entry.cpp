@@ -1,4 +1,5 @@
 #include "catalog/glue_schema_entry.hpp"
+#include "core/glue_trace.hpp"
 #include "catalog/glue_view.hpp"
 #include "catalog/glue_view_names.hpp"
 #include "catalog/scan_filter_equality.hpp"
@@ -538,6 +539,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
+	GlueTraceTag trace_tag("create table", database_info.name, table_name);
 	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
 		// another client created the table since the lookup above: take its entry
 		auto raced = tables.GetEntry(context, lookup);
@@ -634,6 +636,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateView(CatalogTransaction transa
 		column.type = info.types[i].ToString();
 		view.columns.push_back(std::move(column));
 	}
+	GlueTraceTag trace_tag("create view", database_info.name, view_name);
 	// re-fetch so the entry reflects what Glue stored
 	auto fetch_stored = [&]() {
 		tables.RemoveEntry(view_name);
@@ -1037,6 +1040,7 @@ void GlueSchemaEntry::DropEntry(ClientContext &context, DropInfo &info) {
 		throw CatalogException("Glue view \"%s\" was not written by DuckDB; drop it from the engine that wrote it",
 		                       table_name);
 	}
+	GlueTraceTag trace_tag("drop table", database_info.name, table_name);
 	GlueAPI::DeleteTable(context, glue_catalog, database_info.name, table_name);
 	tables.RemoveEntry(table_name);
 }

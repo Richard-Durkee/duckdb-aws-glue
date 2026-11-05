@@ -1,4 +1,5 @@
 #include "catalog/glue_table_set.hpp"
+#include "core/glue_trace.hpp"
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/numeric_utils.hpp"
@@ -66,6 +67,7 @@ void GlueTableSet::LoadEntries(ClientContext &context) {
 	if (is_loaded) {
 		return;
 	}
+	GlueTraceTag trace_tag("catalog listing", schema.GetDatabaseName());
 	auto tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName());
 	auto cache = GlueTransactionCache::Of(context, catalog);
 	for (auto &table : tables) {
@@ -106,6 +108,7 @@ void GlueTableSet::BulkLoadTableInfo(ClientContext &context, GlueTransactionCach
 	bool has_more = false;
 	vector<GlueTableInfo> tables;
 	try {
+		GlueTraceTag trace_tag("catalog bulk lookup", schema.GetDatabaseName());
 		tables = GlueAPI::GetTables(context, catalog, schema.GetDatabaseName(), true, &has_more);
 	} catch (const GlueException &ex) {
 		// A failed bulk fetch must not fail a lookup that never needed GetTables: log it and let the caller
@@ -159,6 +162,7 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	bool asked_glue = false;
 	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
 		asked_glue = true;
+		GlueTraceTag trace_tag("catalog lookup", schema.GetDatabaseName(), glue_name);
 		GlueTableInfo table;
 		if (!GlueAPI::GetTable(context, catalog, schema.GetDatabaseName(), glue_name, table)) {
 			return nullptr;

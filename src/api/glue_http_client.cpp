@@ -8,6 +8,8 @@
 #include "duckdb/main/database.hpp"
 #include "duckdb/main/http/http_transport_manager.hpp"
 
+#include "core/glue_trace.hpp"
+
 #include <aws/core/http/HttpClient.h>
 #include <aws/core/http/HttpClientFactory.h>
 #include <aws/core/http/HttpRequest.h>
@@ -128,6 +130,41 @@ public:
 	std::shared_ptr<Aws::Http::HttpResponse>
 	MakeRequest(const std::shared_ptr<Aws::Http::HttpRequest> &request, Aws::Utils::RateLimits::RateLimiterInterface *,
 	            Aws::Utils::RateLimits::RateLimiterInterface *) const override {
+		auto context = GlueHttpClientContextScope::Current();
+		auto trace = context ? GlueTraceState::GetActive(*context) : nullptr;
+		if (!trace) {
+			return Send(request);
+		}
+		GlueTraceRequest entry;
+		entry.phase = trace->Phase();
+		entry.purpose = GlueTraceTag::CurrentPurpose();
+		entry.start_time = Timestamp::GetCurrentTimestamp();
+		entry.start_ms = trace->ElapsedMs();
+		auto response = Send(request);
+		entry.duration_ms = trace->ElapsedMs() - entry.start_ms;
+		entry.operation =
+		    request->HasHeader("x-amz-target") ? string(request->GetHeaderValue("x-amz-target").c_str()) : string();
+		if (response->GetResponseCode() == Aws::Http::HttpResponseCode::REQUEST_NOT_MADE) {
+			entry.error = response->HasClientError() ? string(response->GetClientErrorMessage().c_str()) : string();
+			if (entry.error.empty()) {
+				entry.error = "request not made";
+			}
+		} else {
+			entry.status = static_cast<idx_t>(response->GetResponseCode());
+		}
+		auto body = ReadRequestBody(request);
+		entry.request_bytes = body.size();
+		entry.response_bytes =
+		    NumericCast<idx_t>(MaxValue<int64_t>(static_cast<int64_t>(response->GetResponseBody().tellp()), 0));
+		entry.target = GlueRequestTarget(body);
+		entry.continuation = JSONValueStart(body, "NextToken") != string::npos;
+		entry.attempt = SDKAttempt(*request);
+		trace->Record(std::move(entry));
+		return response;
+	}
+
+private:
+	std::shared_ptr<Aws::Http::HttpResponse> Send(const std::shared_ptr<Aws::Http::HttpRequest> &request) const {
 		auto aws_response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("GlueDuckDBHttp", request);
 		try {
 			string url = EnsureUrlHasPath(request->GetUri().GetURIString(true).c_str());
@@ -233,7 +270,61 @@ public:
 		return aws_response;
 	}
 
-private:
+	//! The position after '"key":' in the JSON the SDK sends (pretty printed), or npos
+	static idx_t JSONValueStart(const string &body, const char *key) {
+		auto needle = string("\"") + key + "\"";
+		auto pos = body.find(needle);
+		if (pos == string::npos) {
+			return pos;
+		}
+		pos = body.find_first_not_of(" \t\r\n", pos + needle.size());
+		if (pos == string::npos || body[pos] != ':') {
+			return string::npos;
+		}
+		return body.find_first_not_of(" \t\r\n", pos + 1);
+	}
+
+	static string JSONField(const string &body, const char *key) {
+		auto pos = JSONValueStart(body, key);
+		if (pos == string::npos || body[pos] != '"') {
+			return string();
+		}
+		auto end = body.find('"', pos + 1);
+		return end == string::npos ? string() : body.substr(pos + 1, end - pos - 1);
+	}
+
+	//! 'database.table', 'database' or the segment of a GetPartitions request: what the request is about
+	static string GlueRequestTarget(const string &body) {
+		auto database = JSONField(body, "DatabaseName");
+		auto table = JSONField(body, "TableName");
+		if (table.empty()) {
+			table = JSONField(body, "Name");
+		}
+		string result = database;
+		if (!table.empty()) {
+			result += result.empty() ? table : "." + table;
+		}
+		auto segment = JSONValueStart(body, "SegmentNumber");
+		if (segment != string::npos) {
+			auto end = body.find_first_not_of("0123456789", segment);
+			result += "#" + body.substr(segment, end - segment);
+		}
+		return result;
+	}
+
+	//! The SDK numbers its attempts in the amz-sdk-request header: 'attempt=2; max=3'
+	static idx_t SDKAttempt(const Aws::Http::HttpRequest &request) {
+		if (!request.HasHeader("amz-sdk-request")) {
+			return 1;
+		}
+		string value = request.GetHeaderValue("amz-sdk-request").c_str();
+		auto pos = value.find("attempt=");
+		if (pos == string::npos) {
+			return 1;
+		}
+		return NumericCast<idx_t>(MaxValue<int64_t>(std::atoll(value.c_str() + pos + 8), 1));
+	}
+
 	DatabaseInstance &db;
 };
 

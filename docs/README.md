@@ -542,6 +542,21 @@ SELECT "table", scan_id, event, partitions, partitions_read, listings, files, du
 FROM duckdb_logs_parsed('GlueScan');
 ```
 
+`SET glue_trace = true` traces the Glue requests of every statement on the connection by the phase it sent them in
+(`bind`, `optimize`, `physical_plan`, `execute`) and what they were for. After a statement, `glue_trace()` lists its
+requests (`phase`, `operation`, `target` such as `database.table` or `database.table#segment`, `purpose` such as
+`catalog lookup` or `scan: partitions`, `start_ms`, `duration_ms`, `status`, `attempt`, `continuation`, request and
+response bytes) and `glue_trace_phases()` sums them per phase, with the time at least one Glue request was in flight
+and the other HTTP requests of the phase. Reading the trace does not replace it. `EXPLAIN ANALYZE` shows the same
+summary, and the `GlueTrace` log type gets one entry per phase.
+
+```sql
+SET glue_trace = true;
+SELECT count(*) FROM cat.db.tbl WHERE dt = 'b';
+SELECT phase, operation, target, purpose, duration_ms FROM glue_trace();
+SELECT phase, duration_ms, glue_requests, glue_wall_ms, glue_operations FROM glue_trace_phases();
+```
+
 ## Testing
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:

@@ -1,4 +1,5 @@
 #include "planning/stats/hive_stats.hpp"
+#include "core/glue_trace.hpp"
 
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/file_system.hpp"
@@ -286,6 +287,7 @@ static shared_ptr<const HiveTableSample> SampleTable(ClientContext &context, con
 	auto entry = HiveQueryCache::Get(context)->GetSample(info.catalog_name + "." + info.Describe());
 	annotated_lock_guard<annotated_mutex> guard(entry->lock);
 	if (!entry->sample) {
+		GlueTraceTag trace_tag("scan: sample", info.database_name, info.table_name);
 		GlueScanEvent event(info.Describe(), info.scan_id, "sample");
 		entry->sample = make_shared_ptr<const HiveTableSample>(MeasureTable(context, bind_data, hive_list));
 		if (entry->sample->listed) {

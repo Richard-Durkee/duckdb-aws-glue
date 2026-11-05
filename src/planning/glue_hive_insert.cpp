@@ -1,4 +1,5 @@
 #include "planning/glue_hive_insert.hpp"
+#include "core/glue_trace.hpp"
 
 #include "api/glue_api_util.hpp"
 
@@ -206,6 +207,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	}
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
+	GlueTraceTag trace_tag("insert: existing partitions", table_info.schema_name, table_info.name);
 	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	vector<pair<string, vector<string>>> custom_directories;
@@ -706,6 +708,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	for (auto &entry : partitions) {
 		to_register.push_back(entry.second);
 	}
+	GlueTraceTag trace_tag("insert: register partitions", table_info.schema_name, table_info.name);
 	try {
 		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
 		// it was about to create, so the table is fetched as created

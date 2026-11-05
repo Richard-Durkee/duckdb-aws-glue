@@ -1,11 +1,28 @@
 #include "core/readers/hive_csv_options.hpp"
 
+#include "core/serde_policy.hpp"
+
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
 #include "re2/re2.h"
 #include "duckdb/common/types.hpp"
 
 namespace duckdb {
+
+HiveCSVOptions HiveCSVOptions::FromSerDeProperties(const SerDeProperties &properties) {
+	HiveCSVOptions options;
+	options.delimiter = properties.Get(SerDeOption::DELIMITER);
+	options.quote = properties.Get(SerDeOption::QUOTE);
+	options.escape = properties.Get(SerDeOption::ESCAPE);
+	options.skip_lines = properties.GetCount(SerDeOption::HEADER_LINES);
+	options.null_string = properties.Get(SerDeOption::NULL_STRING);
+	options.serde_fields = true;
+	options.null_for_invalid_data = properties.GetBool(SerDeOption::NULL_FOR_INVALID_DATA);
+	options.false_unless_true = properties.GetBool(SerDeOption::FALSE_UNLESS_TRUE);
+	options.field_escape = properties.Get(SerDeOption::FIELD_ESCAPE);
+	options.epoch_fields = properties.GetBool(SerDeOption::EPOCH_FIELDS);
+	return options;
+}
 
 HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) const {
 	// the whole type, not the id: an alias of VARCHAR such as JSON keeps its own conversion

@@ -7,7 +7,7 @@ namespace duckdb {
 
 class Serializer;
 class Deserializer;
-struct GlueTableInfo;
+struct SerDeProperties;
 
 //! How the files of a json table are read
 struct HiveJSONOptions {
@@ -17,12 +17,10 @@ struct HiveJSONOptions {
 	//! Match object keys to the columns ignoring case, as the Hive and the OpenX JsonSerDe do; OpenX
 	//! case.insensitive=false matches them exactly
 	bool case_insensitive_keys = true;
-	//! SerDe properties set on the table that change how its files are read but are not applied; logged at bind
-	vector<string> unsupported_properties;
 
 public:
-	//! The options for the table's SerDe and SerDe properties
-	static HiveJSONOptions FromTable(const GlueTableInfo &table);
+	//! The options a JSON table's resolved SerDe properties give its reader
+	static HiveJSONOptions FromSerDeProperties(const SerDeProperties &properties);
 	void Serialize(Serializer &serializer) const;
 	static HiveJSONOptions Deserialize(Deserializer &deserializer);
 };

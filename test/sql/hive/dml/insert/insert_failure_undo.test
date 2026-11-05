@@ -150,15 +150,27 @@ statement ok
 DROP TABLE my_datalake.default.undo_ctas_marker;
 
 #---------------------------------------------------------------------------
-# an INSERT in an explicit transaction is refused before it writes, so a COMMIT finds no write to undo
+# an INSERT in an explicit transaction is undone by ROLLBACK and applied by COMMIT
 #---------------------------------------------------------------------------
 statement ok
 BEGIN;
 
-statement error
+statement ok
 INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(10) t(i);
+
+statement ok
+ROLLBACK;
+
+query I
+SELECT count(*) FROM my_datalake.default.undo_write;
 ----
-Transaction support is not
+18
+
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO my_datalake.default.undo_write SELECT i, i % 3 FROM range(10) t(i);
 
 statement ok
 COMMIT;
@@ -166,7 +178,7 @@ COMMIT;
 query I
 SELECT count(*) FROM my_datalake.default.undo_write;
 ----
-18
+28
 
 #---------------------------------------------------------------------------
 # a partitioned CREATE TABLE AS whose query fails after it has written files drops the table and deletes the files

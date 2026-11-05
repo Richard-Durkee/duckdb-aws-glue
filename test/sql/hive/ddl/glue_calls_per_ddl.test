@@ -97,7 +97,7 @@ FROM glue_calls();
 ----
 BatchCreatePartition	1
 CreateTable	1
-GetTable	4
+GetTable	3
 GetTables	1
 
 statement ok

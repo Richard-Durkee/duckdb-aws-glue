@@ -31,7 +31,7 @@ SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/reg_fail/**'
 10
 
 #---------------------------------------------------------------------------
-# Glue refuses the 151st of 250 partitions: the files are deleted, the 150 partitions registered before stay, empty
+# Glue refuses the 151st of 250 partitions: the files are deleted and the 150 partitions registered before too
 #---------------------------------------------------------------------------
 statement ok
 SET glue_debug_fail_partition_registration = 'InvalidInputException:150';
@@ -39,7 +39,7 @@ SET glue_debug_fail_partition_registration = 'InvalidInputException:150';
 statement error
 INSERT INTO my_datalake.default.reg_fail SELECT i, i FROM range(250) t(i);
 ----
-<REGEX>:.*INSERT into Hive table 'default.reg_fail' was rolled back: Glue BatchCreatePartition 'default.reg_fail' failed for partition \[.*\]: InvalidInputException: injected.*so it can be run again.*
+<REGEX>:.*Hive write was rolled back at commit: Glue BatchCreatePartition 'default.reg_fail' failed for partition \[.*\]: InvalidInputException: injected.*so it can be run again.*
 
 query II
 SELECT count(*), sum(id) FROM my_datalake.default.reg_fail;
@@ -49,7 +49,7 @@ SELECT count(*), sum(id) FROM my_datalake.default.reg_fail;
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
 ----
-160
+10
 
 query I
 SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/reg_fail/**');
@@ -68,7 +68,7 @@ was rolled back
 query I
 SELECT count(*) FROM glue_partitions('my_datalake.default.reg_fail');
 ----
-160
+10
 
 #---------------------------------------------------------------------------
 # a transient error passes when the partitions are sent again
@@ -79,7 +79,7 @@ SET glue_debug_fail_partition_registration = 'ThrottlingException:150';
 statement ok
 INSERT INTO my_datalake.default.reg_fail SELECT i, i FROM range(250) t(i);
 
-# running it again adds its rows once, also to the partitions the failed attempt left registered
+# running it again adds its rows once
 query II
 SELECT count(*), count(DISTINCT p) FROM my_datalake.default.reg_fail;
 ----

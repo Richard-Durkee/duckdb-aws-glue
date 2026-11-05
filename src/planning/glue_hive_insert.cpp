@@ -7,6 +7,7 @@
 #include "duckdb/catalog/catalog_entry/copy_function_catalog_entry.hpp"
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/uuid.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -510,11 +511,21 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	auto types_to_write = LogicalCopyToFile::GetTypesWithoutPartitions(copy_types, partition_columns, false);
 	auto function_data = copy_function->function.copy_to_bind(context, bind_input, names_to_write, types_to_write);
 
+	// staged: every file goes below a hidden directory of the location, and is copied into place at commit
+	string staging_root;
+	Value staging;
+	if (context.TryGetCurrentSetting("glue_write_staging", staging) && !staging.IsNull() &&
+	    BooleanValue::Get(staging)) {
+		staging_root = location + "/.duckdb-staging-" + UUID::ToString(UUID::GenerateRandomUUID());
+	}
 	auto return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST);
 	auto &copy = planner
 	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
-	                                     op.estimated_cardinality, create_schema, std::move(create_info), table_info)
+	                                     op.estimated_cardinality, create_schema, std::move(create_info), table_info,
+	                                     staging_root)
 	                 .Cast<GlueHiveCopy>();
+	copy.table_catalog = &insert.catalog;
+	auto write_root = staging_root.empty() ? location : staging_root;
 	// as the COPY binder does: without it every chunk becomes a batch of its own (a 2048-row parquet row group)
 	if (copy.function.desired_batch_size) {
 		copy.batch_size = copy.function.desired_batch_size(context, *copy.bind_data);
@@ -524,7 +535,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	copy.filename_pattern.SetFilenamePattern("{uuid}");
 	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
-		copy.file_path = location;
+		copy.file_path = write_root;
 		copy.partition_output = true;
 		copy.partition_columns = partition_columns;
 		copy.write_partition_columns = false;
@@ -535,7 +546,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		copy.write_empty_file = true;
 		copy.per_thread_output = false;
 	} else {
-		copy.file_path = location;
+		copy.file_path = write_root;
 		copy.partition_output = false;
 		// false makes the first Sink open a writer at the location itself, leaving an object at the table key
 		copy.write_empty_file = true;
@@ -589,6 +600,8 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 		}
 	}
 
+	// the table is created when the statement commits, which DDL in a transaction would defer to COMMIT
+	GlueCatalog::ThrowIfInExplicitTransaction(context);
 	// no Glue call here: PREPARE and prepared statement rebinds plan more than once, the copy creates the table
 	auto &schema = op.schema.Cast<GlueSchemaEntry>();
 	if (op.info->Base().on_conflict == OnCreateConflict::REPLACE_ON_CONFLICT &&
@@ -660,18 +673,22 @@ using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, ClientContext &context,
                                           OperatorSinkFinalizeInput &input) const {
 	auto &state = input.global_state.Cast<GlueHiveInsertGlobalState>();
-	if (!state.written_files.empty()) {
-		// an unpartitioned INSERT still changes files, so invalidate even with no new partition
+	auto &write = children[0].get().Cast<GlueHiveCopy>().CurrentWrite();
+	write.files = state.written_files;
+	if (!state.written_files.empty() && write.staging_root.empty()) {
+		// files written in place into existing partitions or an unpartitioned table are listed already
 		GlueTransactionCache::Invalidate(context, catalog);
 	}
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
+		write.complete = true;
 		return SinkFinalizeType::READY;
 	}
 
-	// Register the partition directories the files were written to: the locations of existing partitions, or
-	// <key>=<value> directories in partition key order below the table location
+	// The partition directories the files were written to (once published): the locations of existing partitions,
+	// or <key>=<value> directories in partition key order below the table location
 	FilePathToGluePartition partitions;
-	for (auto &file : state.written_files) {
+	for (auto &written_file : state.written_files) {
+		auto file = write.FinalPath(written_file);
 		auto directory = file.substr(0, file.find_last_of('/'));
 		if (partitions.find(directory) != partitions.end()) {
 			continue;
@@ -702,39 +719,11 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		}
 		partitions.emplace(directory, std::move(partition));
 	}
-	vector<GluePartitionInput> to_register;
 	for (auto &entry : partitions) {
-		to_register.push_back(entry.second);
+		write.partitions.push_back(entry.second);
 	}
-	try {
-		// an INSERT registers against the table definition it bound; a CREATE TABLE AS planned from the definition
-		// it was about to create, so the table is fetched as created
-		optional_ptr<const GlueTableInfo> registered = &table_info;
-		GlueTableInfo created;
-		if (!table_info.fetched) {
-			if (!GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, created)) {
-				throw CatalogException("Table \"%s.%s\" was created but could not be fetched afterwards",
-				                       table_info.schema_name, table_info.name);
-			}
-			registered = &created;
-		}
-		GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
-	} catch (std::exception &ex) {
-		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
-		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.
-		ErrorData error(ex);
-		try {
-			FileSystem::GetFileSystem(context).RemoveFiles(state.written_files);
-		} catch (std::exception &remove_ex) {
-			throw IOException("INSERT into Hive table '%s.%s' failed: %s. Deleting the %llu files it wrote failed too "
-			                  "(%s); remove them before running it again",
-			                  table_info.schema_name, table_info.name, error.RawMessage(), state.written_files.size(),
-			                  ErrorData(remove_ex).RawMessage());
-		}
-		throw IOException("INSERT into Hive table '%s.%s' was rolled back: %s. The files it wrote were deleted, so it "
-		                  "can be run again",
-		                  table_info.schema_name, table_info.name, error.RawMessage());
-	}
+	// registered when the transaction commits
+	write.complete = true;
 	return SinkFinalizeType::READY;
 }
 

@@ -144,9 +144,11 @@ public:
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped and returned, wherever
 	//! they are registered; throws for the first partition Glue refuses, after retrying the errors that may pass.
+	//! 'created' receives the indexes of the partitions this call created, also when it throws.
 	static vector<GluePartitionInput> BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
 	                                                        const GlueTableInfo &table,
-	                                                        const vector<GluePartitionInput> &partitions);
+	                                                        const vector<GluePartitionInput> &partitions,
+	                                                        vector<idx_t> *created = nullptr);
 	//! SET callback of glue_debug_fail_partition_registration: rejects a value that is not '<error code>:<index>'
 	static void CheckDebugFailPartitionRegistration(ClientContext &context, SetScope scope, Value &parameter);
 	//! Delete a table (the data files are left in place), throws a CatalogException if it does not exist

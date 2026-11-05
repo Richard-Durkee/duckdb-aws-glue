@@ -16,6 +16,47 @@
 
 namespace duckdb {
 
+string GlueHiveWrite::FinalPath(const string &file) const {
+	if (staging_root.empty() || !StringUtil::StartsWith(file, staging_root + "/")) {
+		return file;
+	}
+	return location + file.substr(staging_root.size());
+}
+
+void GlueHiveWrite::CheckExistingPartitionLocations(ClientContext &context, GlueCatalog &catalog,
+                                                    const vector<GluePartitionInput> &already_existing) const {
+	auto check = [&](const GluePartitionInput &partition, const string &registered) {
+		if (ComparableLocation(registered) != ComparableLocation(partition.location)) {
+			throw IOException("rows of partition [%s] were written to '%s', but the partition is registered at '%s'",
+			                  StringUtil::Join(partition.values, ", "), partition.location, registered);
+		}
+	};
+	vector<reference<const GluePartitionInput>> unplanned;
+	vector<vector<string>> unplanned_values;
+	for (auto &partition : already_existing) {
+		auto planned = planned_locations.find(partition.values);
+		if (planned != planned_locations.end()) {
+			check(partition, planned->second);
+		} else {
+			unplanned.push_back(partition);
+			unplanned_values.push_back(partition.values);
+		}
+	}
+	if (unplanned.empty()) {
+		return;
+	}
+	auto locations = GlueAPI::PartitionLocations(context, catalog, database_name, table_name, unplanned_values);
+	for (auto &entry : unplanned) {
+		auto &partition = entry.get();
+		auto registered = locations.find(partition.values);
+		if (registered == locations.end()) {
+			throw IOException("partition [%s] existed when its files were registered, but no longer does",
+			                  StringUtil::Join(partition.values, ", "));
+		}
+		check(partition, registered->second);
+	}
+}
+
 void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 	auto table = database_name + "." + table_name;
 	// CREATE TABLE AS: whether the location holds data files of another writer, which a dropped table would leave
@@ -28,7 +69,7 @@ void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 		                   "Could not list the location of Hive table '%s' to undo a failed write: '%s' contains a "
 		                   "glob character",
 		                   table, location);
-	} else if (!files_deleted || created_table) {
+	} else {
 		try {
 			// the database's file system, not one that stops at the interrupt the failed query set to end its pipelines
 			auto &fs = DatabaseInstance::GetDatabase(context).GetFileSystem();
@@ -46,7 +87,7 @@ void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 				}
 			}
 			listed = true;
-			if (!files_deleted && !written_files.empty()) {
+			if (!written_files.empty()) {
 				fs.RemoveFiles(written_files);
 			}
 		} catch (std::exception &ex) {

@@ -3,6 +3,7 @@
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/map.hpp"
+#include "duckdb/common/set.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/unordered_set.hpp"
@@ -489,7 +490,8 @@ void GlueAPI::CheckDebugFailPartitionRegistration(ClientContext &, SetScope, Val
 
 vector<GluePartitionInput> GlueAPI::BatchCreatePartitions(ClientContext &context, GlueCatalog &catalog,
                                                           const GlueTableInfo &table,
-                                                          const vector<GluePartitionInput> &partitions) {
+                                                          const vector<GluePartitionInput> &partitions,
+                                                          vector<idx_t> *created) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "BatchCreatePartition");
 	vector<GluePartitionInput> already_existing;
@@ -552,6 +554,7 @@ vector<GluePartitionInput> GlueAPI::BatchCreatePartitions(ClientContext &context
 					ThrowGlueError(outcome,
 					               StringUtil::Format("BatchCreatePartition '%s.%s'", database_name, table_name));
 				}
+				set<idx_t> refused;
 				for (auto &error : outcome.GetResult().GetErrors()) {
 					vector<string> values;
 					for (auto &value : error.GetPartitionValues()) {
@@ -565,12 +568,20 @@ vector<GluePartitionInput> GlueAPI::BatchCreatePartitions(ClientContext &context
 						                  "among the partitions sent: %s (%s)",
 						                  database_name, table_name, PartitionValuesToString(values), message, code);
 					}
+					refused.insert(entry->second);
 					if (code == "AlreadyExistsException") {
 						// appending to an existing partition, or to one registered elsewhere: the caller tells
 						already_existing.push_back(partitions[entry->second]);
 						continue;
 					}
 					errors.push_back({entry->second, code, message});
+				}
+				if (created) {
+					for (auto &entry : sent) {
+						if (refused.find(entry.second) == refused.end()) {
+							created->push_back(entry.second);
+						}
+					}
 				}
 			}
 			pending.clear();

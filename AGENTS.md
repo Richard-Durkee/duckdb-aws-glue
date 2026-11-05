@@ -100,15 +100,16 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   partition filters are pushed down to Glue's partition values before any S3 listing. The `hive_scan` table function
   (`src/functions/hive_scan_function.cpp`) reuses the same reader with schema/partitions given as arguments.
 - **Writing** `src/planning/glue_hive_insert.cpp`: INSERT and CTAS plan a `PhysicalCopyToFile` in the table's format
-  with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. The copy is
-  `GlueHiveCopy` (`src/execution/hive_copy.cpp`); for CTAS it carries the bound CREATE TABLE and creates the Glue table
-  when the sink starts, before any output is initialized, as `PhysicalInsert` does. Each write gets a write id that
-  prefixes its file names; the copy adds it to the `GlueTransaction` (with the created table) and
-  `GlueHiveInsert::Finalize` completes it once the partitions are registered. A write still registered when the
-  transaction ends belongs to a failed statement: `GlueTransaction::Rollback` undoes it (`UndoHiveWrite`,
-  `src/execution/hive_write_undo.cpp`), deleting its files (by prefix) and the table a CTAS created, unless another
-  writer's data files are there or the table was created again since. A failed partition registration deletes its
-  files itself, in Finalize (the partitions it registered stay, empty).
+  with hive partition directories. The copy is `GlueHiveCopy` (`src/execution/hive_copy.cpp`). Each execution gets a
+  write id that prefixes its file names; the copy adds a `GlueHiveWrite` (`src/execution/glue_hive_write.cpp`) to the
+  transaction's `GlueWriteTransaction` (`src/catalog/glue_write_transaction.cpp`) before anything is written, and
+  `GlueHiveInsert::Finalize` records its files and new partitions. The writes are applied when the transaction
+  commits (`GlueTransactionManager::CommitTransaction`): CTAS overwrite deletes the old files, staged files
+  (`glue_write_staging`) are copied into place, the CTAS table is created and the partitions are registered with
+  `BatchCreatePartition`. A rollback, or a failed commit, undoes every write: the partitions the commit registered
+  are deleted, the files are deleted by their write id prefix and the table a CTAS created is dropped, unless another
+  writer's data files are there or the table was created again since. INSERT works in explicit transactions; CTAS
+  does not.
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition

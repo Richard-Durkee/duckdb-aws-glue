@@ -492,7 +492,7 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
 //===--------------------------------------------------------------------===//
 PhysicalOperator &GlueCatalog::PlanInsert(ClientContext &context, PhysicalPlanGenerator &planner, LogicalInsert &op,
                                           optional_ptr<PhysicalOperator> plan) {
-	ThrowIfInExplicitTransaction(context);
+	// the write is applied when the transaction commits, and undone when it rolls back
 	GlueTableInfo table_info;
 	auto &glue_table = GetHiveTableForDML(context, op.table, "INSERT", table_info);
 	// an INSERT writes by path, without the credentials the table's scans read with

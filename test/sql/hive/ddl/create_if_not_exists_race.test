@@ -101,13 +101,13 @@ SELECT response.ViewOriginalText FROM glue_get_table_response('my_datalake.fault
 ----
 SELECT 1 AS one
 
-# ---- CREATE TABLE AS creates the table when execution starts; losing the race there is reported as the table
-# having appeared since planning, not as a plain "already exists"
+# ---- CREATE TABLE AS creates the table when the statement commits; losing the race there is reported as the table
+# having been created by another client since, not as a plain "already exists"
 
 statement error
 CREATE TABLE IF NOT EXISTS raced_dl.fault_already_exists_race.c AS SELECT 1 AS id;
 ----
-Table with name "c" appeared between planning and execution; retry CREATE TABLE IF NOT EXISTS
+Table with name "c" was created by another client before this statement committed; retry CREATE TABLE IF NOT EXISTS
 
 # ---- the objects the other client created are all there. The listings below enumerate every attached catalog, so
 # the raced attach goes first: through the proxy a fault_* database another test left behind would fail them

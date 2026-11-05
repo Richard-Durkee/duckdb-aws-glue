@@ -203,16 +203,18 @@ their codec themselves.
   its registered location, which may be any directory below the table location (e.g. `<table>/2024/01`). Inserting
   into a partition whose location is not below the table location, or whose location has an empty or `.` segment (`//`, `/./`) DuckDB
   can not write, fails, and so does inserting rows whose directory is the location of another partition; the rows of
-  other partitions can still be inserted. Glue errors on single partitions that may pass (throttling, internal errors) are retried; when Glue
-  still refuses a partition, the write is rolled back by deleting the files it wrote (the partitions it registered
-  stay, empty), so the statement can be run again without adding its
-  rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
-  column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
-  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing). It is refused when the
-  location already holds data files, such as those of a dropped table, which would read as rows of the new table.
-  `WITH (overwrite = true)` deletes those files instead, in one
-  `RemoveFiles` call when the statement starts executing and before the table is created: they stay deleted if the
-  statement then fails, and a failed delete may leave some of them (the table is then not created). It is refused
+  other partitions can still be inserted. A write is applied when its transaction commits: the new partitions are
+  registered, and the table of a `CREATE TABLE ... AS` created, only then, so no reader sees a partition or a table
+  of a statement that has not committed. Glue errors on single partitions that may pass (throttling, internal errors)
+  are retried; when Glue still refuses a partition, or the statement fails or is rolled back, the write is undone: the
+  files it wrote are deleted, and the partitions and the table it created at commit are removed again, so the
+  statement can be run again without adding its rows twice. Files written into existing partitions or an
+  unpartitioned table are visible as soon as they are written; with `SET glue_write_staging = true` every file is
+  written below a hidden staging directory of the table location and copied into place at commit instead. Because
+  the partition keys are the last columns of the table, `INSERT ... VALUES` without a column list must list them
+  last. `CREATE TABLE ... AS` is refused when the location already holds data files, such as those of a dropped
+  table, which would read as rows of the new table. `WITH (overwrite = true)` deletes those files instead, when the
+  statement commits and before the table is created: they stay if the statement fails before. It is refused
   when the location is, holds or lies inside the location of another table in the same Glue database, or of a
   partition of one (a partition can lie outside its table's location); tables in other databases, catalogs or
   accounts are not checked. `CREATE OR REPLACE` refuses `overwrite`. Files a scan skips
@@ -226,13 +228,13 @@ their codec themselves.
   csv and json, `AvroContainerInputFormat`) or empty: another engine's InputFormat means a layout DuckDB does not
   know, and files written into it could corrupt the table.
 - The files of one `INSERT` or `CREATE TABLE ... AS` are named `<write id>_<file id>.<extension>`, with a new write
-  id (a UUIDv7) per statement. The write is registered with the Glue transaction when it starts and completed when
-  its partitions are registered; a write that is still registered when the transaction ends belongs to a statement
-  that failed, and the rollback deletes the files named after its write and, for `CREATE TABLE ... AS`, the Glue
-  table it created, so the statement can be run again. To find the files, the rollback lists every object below the
+  id (a UUIDv7) per statement. The write is added to the Glue transaction when it starts; a transaction that rolls
+  back, or whose commit fails, deletes the files named after each of its writes, the partitions its commit registered
+  and, for `CREATE TABLE ... AS`, the Glue table its commit created, so the statements can be run again. To find the
+  files, the rollback lists every object below the
   table's location, which takes one LIST request per 1,000 objects; it lists nothing, and deletes nothing, if the
   location contains a glob character (`*`, `?`, `[`). A table `CREATE TABLE ... AS` created is kept if it holds files
-  of another writer, or if another client dropped and created it again while the statement ran. This is best effort:
+  of another writer, or if another client dropped and created it again since. This is best effort:
   a step that fails is logged as a warning (`CALL enable_logging(level := 'warning')` shows it). If the process
   dies, nothing is cleaned up: the files stay, and the rows in them appear once their partition is registered, by a
   later `INSERT`, `MSCK REPAIR` or a crawler. Other queries can read the files of an insert before it finishes.
@@ -271,10 +273,11 @@ their codec themselves.
   a database when the database is dropped, so `DROP SCHEMA` refuses a database that still has tables or views unless
   `CASCADE` is given.
 
-Glue has no transactions: DDL takes effect immediately, files are visible as soon as they are written, and nothing
-is rolled back on failure. `DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP`
-of schemas, tables and views, `CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`,
-...) and `INSERT` inside an explicit `BEGIN` transaction are an error that aborts the transaction; end it with
+Glue has no transactions: DDL takes effect immediately and is not rolled back on failure. `INSERT` is applied when
+the transaction commits and undone when it rolls back (see above), also inside an explicit `BEGIN` transaction.
+`DELETE`, `UPDATE` and `MERGE INTO` are not supported. DDL (`CREATE`/`ALTER`/`DROP` of schemas, tables and views,
+`CREATE TABLE ... AS`, the partition SQL, or `glue_add_partition`, `glue_alter_table`, ...) inside an explicit
+`BEGIN` transaction is an error that aborts the transaction; end it with
 `COMMIT`, `ABORT` or `ROLLBACK` and run the statement again. The `glue_*` functions that change Glue
 (`glue_add_partition`, `glue_drop_partition`, `glue_rename_partition`, `glue_set_partition_location`,
 `glue_set_table_location`, `glue_replace_columns`) name themselves in that error and say to run them as a statement of

@@ -173,15 +173,17 @@ ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partit
 	} else {
 		try {
 			auto partition_format = partition_storage.GetFileFormat();
+			SerDeProperties properties;
 			if (IsTextFileFormat(partition_format)) {
-				partition_storage.CheckTextSerdeSupported(partition_format);
+				properties = partition_storage.ResolveSerDeProperties(SerDeDirection::READ);
 			}
 			if (partition_format != file_format) {
 				stored_as = HiveFileFormatToString(partition_format);
-			} else if (partition_format == HiveFileFormat::CSV && partition_storage.GetCSVOptions() != csv_options) {
+			} else if (partition_format == HiveFileFormat::CSV &&
+			           HiveCSVOptions::FromSerDeProperties(properties) != csv_options) {
 				stored_as = "csv with another dialect";
 			} else if (partition_format == HiveFileFormat::JSON &&
-			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {
+			           HiveJSONOptions::FromSerDeProperties(properties).ignore_errors != json_options.ignore_errors) {
 				stored_as = "json with other SerDe properties";
 			}
 		} catch (NotImplementedException &) {

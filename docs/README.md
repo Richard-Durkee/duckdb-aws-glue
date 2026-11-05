@@ -42,11 +42,10 @@ declares it `binary`, whatever the session's `binary_as_string`. In a table that
 such bytes inside an `array`, `struct` or `map` column keep the escaped form the reader gives a BLOB.
 A `float` or `double` column may hold NaN wherever the file does not count its NaN values (`nan_count`, which most
 writers leave out): such a column's min/max never skip a row group for a filter that NaN could match.
-Text tables are read the way their SerDe reads them:
+Text tables are read and written the way their SerDe does. Which SerDe property does what (the reader or writer
+option it sets, ignored, not applied and logged, or refused), with its default, is in the generated table
+[SerDes and SerDe properties](serde_properties.md). Beyond what that table says:
 
-- LazySimpleSerDe: the delimiter is `field.delim`, else `serialization.format`, else `\001`; a number from -128 to 127
-  is a byte code (`'1'` is `\001`, `'9'` a tab). NULL is `serialization.null.format`, `\N` by default. Fields are not
-  quoted.
 - OpenCSVSerde: `separatorChar` (`,`), `quoteChar` (`"`) and `escapeChar` (`\` when the table has none; doubled quotes
   are read either way). Without `escapeChar` the escape is read as Athena v3 reads it: the `\` is dropped and the `\`
   or quote character after it is kept, in a quoted field or not (`\` is an empty field, `a\x` is `ax`, `a\\b` is
@@ -68,15 +67,9 @@ Text tables are read the way their SerDe reads them:
   are converted with `TRY_CAST` (`CAST` in OpenCSVSerde tables without the property), which differs from Hive in
   details: surrounding spaces are ignored, `'1.5'` in an `int` column is 2 (Hive: 1), and blank lines are skipped
   (Hive: a row of NULLs).
-- `skip.header.line.count` lines are skipped at the start of every file.
 - A line may be up to `hive_csv_max_line_size` bytes long (default 8000000; Hive has no limit); a longer line fails
   the query. Up to the default the reader's buffers and how a file is split between threads are unchanged; a larger
   limit makes each thread read at least that many bytes.
-- OpenX JsonSerDe: with `ignore.malformed.json` or `use.null.for.invalid.data` set to `true` the files are read with
-  `read_json(ignore_errors := true)`: a line that is not valid JSON is a row of NULLs and a value that does not fit
-  its column is NULL; either property enables both. Other JsonSerDe properties that change how the files are read
-  (OpenX `mapping.*` and `dots.in.keys`, Hive `timestamp.formats`) are not applied: the read
-  succeeds and a warning is logged (`CALL enable_logging(level := 'warning')`).
 - JSON keys are matched to the columns ignoring (ASCII) case, as both SerDes do, at every nesting level; an OpenX table
   with `case.insensitive=false` matches them exactly. Keys of one object that differ only in case are duplicate keys.
 - Writes produce files that read back unchanged: LazySimpleSerDe values are unquoted and refused if they hold the
@@ -85,13 +78,8 @@ Text tables are read the way their SerDe reads them:
   is refused), and a `\` is doubled in a table without `escapeChar`, which reads with the `\` escape. NULL is written
   as an empty field, which reads back as an empty string in a string column, false in a boolean column and NULL
   elsewhere only with `use.null.for.invalid.data`; otherwise reading it fails.
-- Not supported, for reads and writes: footer lines (`skip.footer.line.count`), header lines in JsonSerDe tables,
-  nested columns, multi-byte quote or escape characters, and for LazySimpleSerDe `escape.delim`, a non-UTF-8
-  `serialization.encoding`, `serialization.last.column.takes.rest`, NUL or line-break delimiters and a delimiter in the
-  NULL string. Writes need a single-byte delimiter.
-- As in Hive, a table property overrides the SerDe property of the same name and keys are case-sensitive. Line counts
-  and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and SerDe
-  properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files
+- Line counts and byte codes are DuckDB integer casts (`'1.5'` is 2). Partitions are read with the table's SerDe and
+  SerDe properties: a scan that reaches a partition whose own InputFormat, SerDe or SerDe properties read its files
   differently (a csv partition of a parquet table, another delimiter) fails with an error naming the partition instead
   of reading it as the table's format. `hive_scan()` uses plain `read_csv` rules.
 

@@ -8,6 +8,7 @@ namespace duckdb {
 class Serializer;
 class Deserializer;
 struct LogicalType;
+struct SerDeProperties;
 
 //! The longest line a scan of a csv table reads by default (hive_csv_max_line_size): read_csv's buffers hold 32 MB
 //! and each thread reads a quarter of one, so a line up to this size changes neither
@@ -51,6 +52,8 @@ struct HiveCSVOptions {
 	bool epoch_fields = false;
 
 public:
+	//! The options a csv table's resolved SerDe properties give its reader and writer
+	static HiveCSVOptions FromSerDeProperties(const SerDeProperties &properties);
 	//! With serde_fields: how a field becomes a value of a column of 'type', in the scan and in its reader call
 	HiveFieldConversion FieldConversion(const LogicalType &type) const;
 	//! The regexp_replace pattern that drops field_escape from a field's text, with '\1' the character it escapes

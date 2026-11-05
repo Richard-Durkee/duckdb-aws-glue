@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
@@ -45,6 +46,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The keys a partition directory holds, as the sample measured it; 0 until measured (one is assumed)
+	mutable atomic<idx_t> keys_per_partition {0};
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
@@ -133,15 +136,32 @@ protected:
 	bool ExpandNextPath() const override;
 
 private:
-	//! A listing we still have to do: either the table root (covering the partitions under it) or a batch of
-	//! partitions that each get their own listing
+	//! A contiguous range of the partitions below the root that share a key prefix, listed with one prefix listing
+	struct ListingRange {
+		//! The glob of the range's listing, e.g. <root>/part=24*/**
+		string glob;
+		//! The partitions of the range the scan reads
+		vector<idx_t> partitions;
+	};
+	//! A listing we still have to do: the table root (covering the partitions under it), ranges of the partitions
+	//! below the root listed concurrently by prefix, or a batch of partitions that each get their own listing.
+	//! 'partitions' are the partitions the job reads, also when it lists ranges.
 	struct ListingJob {
 		bool root;
 		vector<idx_t> partitions;
+		vector<ListingRange> ranges;
 	};
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
 	void ListRoot(const vector<idx_t> &partitions) const;
+	//! Lists 'ranges' concurrently, one prefix listing each, keeping the files of 'partitions'
+	void ListRanges(const vector<ListingRange> &ranges, const vector<idx_t> &partitions) const;
+	//! Split the partitions below the root into prefix ranges of about one listing page each, keeping the ranges that
+	//! hold a partition of 'reading'. False when the ranges can not cover 'reading' (a location with glob characters,
+	//! or spelled unlike the root)
+	bool PlanRanges(const vector<idx_t> &reading, vector<ListingRange> &ranges) const;
+	//! The files of the partitions in the first range's listing, which the scan reuses
+	vector<OpenFileInfo> SampleRange(const ListingRange &range) const;
 	//! Lists the directories of 'partition_indexes' in parallel
 	void ListPartitions(const vector<idx_t> &partition_indexes) const;
 	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until

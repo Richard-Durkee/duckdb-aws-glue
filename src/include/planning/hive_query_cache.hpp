@@ -52,6 +52,8 @@ public:
 	//! listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
 	                                              bool cache_in_connection = false);
+	//! The listing of 'glob' (a prefix listing of a range of partitions), fetched page by page as it is read
+	shared_ptr<MultiFileList> GetGlobListing(ClientContext &context, const string &glob);
 	//! The id of the next scan bound in this query, starting at 1
 	idx_t NextScanId();
 

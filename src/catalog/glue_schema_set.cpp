@@ -4,6 +4,7 @@
 #include "duckdb/parser/parsed_data/create_schema_info.hpp"
 
 #include "api/glue_api.hpp"
+#include "catalog/glue_metadata.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction_manager.hpp"
 #include "duckdb/transaction/transaction.hpp"
@@ -51,7 +52,7 @@ optional_ptr<CatalogEntry> GlueSchemaSet::GetEntry(ClientContext &context, const
 	}
 	// not cached, ask Glue for this database directly
 	GlueDatabaseInfo database;
-	if (!GlueAPI::GetDatabase(context, catalog, name, database)) {
+	if (!GlueMetadata::GetDatabase(context, catalog, name, database)) {
 		return nullptr;
 	}
 	auto schema_entry = CreateSchemaEntry(database);

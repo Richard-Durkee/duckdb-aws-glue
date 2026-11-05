@@ -14,6 +14,7 @@
 #include "core/glue_types.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_transaction.hpp"
+#include "catalog/glue_metadata.hpp"
 #include "catalog/glue_schema_entry.hpp"
 #include "duckdb/transaction/transaction.hpp"
 
@@ -35,11 +36,16 @@ GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &funct
 	auto name = ResolveGlueTableName(context, function_name, table_name.GetValue<string>());
 	GluePartitionTarget result;
 	result.catalog = &Catalog::GetCatalog(context, name.Catalog()).Cast<GlueCatalog>();
-	if (!GlueAPI::GetTable(context, *result.catalog, name.Schema().GetIdentifierName(), name.Name().GetIdentifierName(),
-	                       result.table)) {
+	// starts the catalog transaction, so the definition is fetched once for the statement and the writes below
+	// derive from it instead of fetching it again
+	Transaction::Get(context, *result.catalog);
+	auto table = GlueMetadata::GetTable(context, *result.catalog, name.Schema().GetIdentifierName(),
+	                                    name.Name().GetIdentifierName(), GlueMetadata::Freshness::THIS_QUERY);
+	if (!table) {
 		throw CatalogException("Table '%s.%s' does not exist in Glue catalog '%s'", name.Schema().GetIdentifierName(),
 		                       name.Name().GetIdentifierName(), name.Catalog().GetIdentifierName());
 	}
+	result.table = *table;
 	if (result.table.IsView()) {
 		ThrowIsView(function_name, result.TableName(), require_partitions);
 	}
@@ -260,12 +266,7 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 	}
 	return_types.emplace_back(LogicalType::VARCHAR);
 	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
-	auto load_partitions = [&]() {
-		return make_shared_ptr<const vector<GluePartitionInfo>>(
-		    GlueAPI::GetPartitions(context, *result->target.catalog, table.schema_name, table.name));
-	};
-	auto &cache = *GlueTransaction::Get(context, *result->target.catalog).cache;
-	result->partitions = *cache.GetPartitions(table.schema_name, table.name, load_partitions);
+	result->partitions = *GlueMetadata::GetPartitions(context, *result->target.catalog, table.schema_name, table.name);
 	return std::move(result);
 }
 
@@ -639,13 +640,13 @@ void GlueReplaceColumnsScan(ClientContext &context, TableFunctionInput &data, Da
 	auto &table = bind_data.target.table;
 	// keeps the refreshed entry alive while its columns are read below
 	Transaction::Get(context, catalog);
-	GlueAPI::UpdateTableColumns(context, catalog, table, bind_data.columns);
+	auto written = GlueAPI::UpdateTableColumns(context, catalog, table, bind_data.columns);
 	auto schema = catalog.GetSchemas().GetEntry(context, table.schema_name);
 	if (!schema) {
 		throw CatalogException("Table \"%s\" was altered but its Glue database could not be found afterwards",
 		                       bind_data.target.TableName());
 	}
-	auto &updated = schema->Cast<GlueSchemaEntry>().RefreshTable(context, table.name);
+	auto &updated = schema->Cast<GlueSchemaEntry>().ReplaceTable(written);
 	vector<Value> columns;
 	for (auto &column : updated.table_info.columns) {
 		columns.push_back(

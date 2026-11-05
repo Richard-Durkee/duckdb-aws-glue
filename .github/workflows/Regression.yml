@@ -50,7 +50,8 @@ jobs:
   build-benchmark-runners:
     name: Build Benchmark Runners
     needs: check-draft
-    runs-on: ubuntu-latest
+    # ubuntu-latest is Ubuntu 26.04, whose compiler fails to build vcpkg's snappy 1.2.2 (AVX2 intrinsics)
+    runs-on: ubuntu-24.04
     env:
       GEN: ninja
       CC: clang-20
@@ -150,7 +151,8 @@ jobs:
     name: Regression Tests (${{ matrix.name }})
     needs: build-benchmark-runners
     if: github.ref != 'refs/heads/main'
-    runs-on: ubuntu-latest
+    # ubuntu-latest is Ubuntu 26.04, whose compiler fails to build vcpkg's snappy 1.2.2 (AVX2 intrinsics)
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       # Two jobs of ~3 minutes each, so only the join-heavy TPC-H and TPC-DS queries: every query costs 10-30s against

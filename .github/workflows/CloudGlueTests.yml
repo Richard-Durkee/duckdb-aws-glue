@@ -37,7 +37,8 @@ permissions:
 
 jobs:
   cloud-glue-tests:
-    runs-on: ubuntu-latest
+    # ubuntu-latest is Ubuntu 26.04, whose compiler fails to build vcpkg's snappy 1.2.2 (AVX2 intrinsics)
+    runs-on: ubuntu-24.04
     environment: cloud-glue
 
     permissions:

@@ -64,6 +64,8 @@
 #include "duckdb/planner/sql_export_helpers.hpp"
 #include "catalog/glue_table.hpp"
 #include "core/glue_types.hpp"
+
+#include <functional>
 #include "functions/hive_reader_call.hpp"
 
 namespace duckdb {
@@ -336,6 +338,26 @@ private:
 	vector<OpenFileInfo> &files;
 };
 
+//! Lists one prefix range of partitions (every key below the root matching its glob)
+class ListRangeTask : public BaseExecutorTask {
+public:
+	ListRangeTask(TaskExecutor &executor, ClientContext &context, const string &glob, vector<OpenFileInfo> &files)
+	    : BaseExecutorTask(executor), context(context), glob(glob), files(files) {
+	}
+
+	void ExecuteTask() override {
+		files = HiveQueryCache::Get(context)->GetGlobListing(context, glob)->GetAllFiles();
+	}
+	string TaskType() const override {
+		return "ListRangeTask";
+	}
+
+private:
+	ClientContext &context;
+	const string &glob;
+	vector<OpenFileInfo> &files;
+};
+
 //===--------------------------------------------------------------------===//
 // HiveMultiFileList
 //===--------------------------------------------------------------------===//
@@ -382,13 +404,22 @@ static constexpr idx_t S3_KEYS_PER_LIST_PAGE = 1000;
 //! root to be listed
 static constexpr idx_t ROOT_REQUESTS_SAVED = 10;
 
+//! hive_partition_range_listing
+static bool RangeListingEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_partition_range_listing", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return true;
+}
+
 void HiveMultiFileList::PlanListings() const {
 	if (planned) {
 		return;
 	}
 	planned = true;
 	if (scan_info->partition_keys.empty()) {
-		listing_jobs.push_back(ListingJob {true, {}});
+		listing_jobs.push_back(ListingJob {true, {}, {}});
 		return;
 	}
 	// the partitions below the table root can be listed together
@@ -434,8 +465,21 @@ void HiveMultiFileList::PlanListings() const {
 		            (root_pages == partition_rounds && partition_requests >= ROOT_REQUESTS_SAVED * root_pages);
 	}
 	vector<idx_t> separately;
-	if (!below_root.empty() && list_root) {
-		listing_jobs.push_back(ListingJob {true, std::move(below_root)});
+	bool listed_by_ranges = false;
+	// a root that fits one page is one request in one round, which no other way beats
+	if (!below_root.empty() && below_root.size() > 1 && root_pages > 1 && RangeListingEnabled(client_context) &&
+	    (!threshold.IsValid() || below_root.size() >= threshold.GetIndex())) {
+		// ranges of the partitions below the root, listed by prefix at the same time: the root's pages without
+		// waiting for one page before asking for the next, and without listing the ranges no partition read is in
+		vector<ListingRange> ranges;
+		if (PlanRanges(below_root, ranges) && ranges.size() < below_root.size()) {
+			listing_jobs.push_back(ListingJob {false, std::move(below_root), std::move(ranges)});
+			listed_by_ranges = true;
+		}
+	}
+	if (listed_by_ranges) {
+	} else if (!below_root.empty() && list_root) {
+		listing_jobs.push_back(ListingJob {true, std::move(below_root), {}});
 	} else {
 		separately = std::move(below_root);
 	}
@@ -443,13 +487,17 @@ void HiveMultiFileList::PlanListings() const {
 	// partitions that need their own listing go in batches, and each batch is listed in parallel
 	for (idx_t start = 0; start < separately.size(); start += listed_together) {
 		auto end = MinValue<idx_t>(start + listed_together, separately.size());
-		listing_jobs.push_back(ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end)});
+		listing_jobs.push_back(
+		    ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end), {}});
 	}
 	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "plan");
 	event.partitions = partitions->size();
 	event.partitions_read = indexes->size();
 	event.listings = listing_jobs.size();
-	event.detail = listing_jobs.empty() || !listing_jobs[0].root ? "partitions" : "root";
+	event.detail = listing_jobs.empty()              ? "partitions"
+	               : !listing_jobs[0].ranges.empty() ? "ranges"
+	               : listing_jobs[0].root            ? "root"
+	                                                 : "partitions";
 	DUCKDB_LOG(client_context, GlueScanLogType, event);
 }
 
@@ -618,6 +666,144 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 }
 
+bool HiveMultiFileList::PlanRanges(const vector<idx_t> &reading, vector<ListingRange> &ranges) const {
+	auto root = scan_info->root_location;
+	StringUtil::RTrim(root, "/");
+	auto root_prefix = root + "/";
+	auto partitions = scan_info->Partitions(client_context);
+	// every partition below the root by its path relative to the root, with a trailing '/': S3 lists keys in this
+	// order, so a key prefix covers a contiguous run of them
+	vector<pair<string, idx_t>> entries;
+	for (idx_t i = 0; i < partitions->size(); i++) {
+		auto location = (*partitions)[i].location;
+		StringUtil::RTrim(location, "/");
+		if (location.size() <= root_prefix.size() || !StringUtil::StartsWith(location, root_prefix)) {
+			continue;
+		}
+		entries.emplace_back(location.substr(root_prefix.size()) + "/", i);
+	}
+	std::sort(entries.begin(), entries.end());
+	unordered_set<idx_t> reading_set(reading.begin(), reading.end());
+	auto keys_per_partition = MaxValue<idx_t>(scan_info->keys_per_partition.load(), 1);
+	bool listable = true;
+	idx_t covered = 0;
+	auto emit = [&](const string &prefix, idx_t lo, idx_t hi) {
+		vector<idx_t> read;
+		for (idx_t i = lo; i < hi; i++) {
+			if (reading_set.count(entries[i].second)) {
+				read.push_back(entries[i].second);
+			}
+		}
+		if (read.empty()) {
+			return;
+		}
+		if (prefix.find_first_of("*[\\?{") != string::npos) {
+			listable = false;
+			return;
+		}
+		covered += read.size();
+		// a prefix ending inside a directory name covers the directories starting with it
+		auto glob = root_prefix + prefix + (prefix.empty() || prefix.back() == '/' ? "**" : "*/**");
+		ranges.push_back({std::move(glob), std::move(read)});
+	};
+	// split [lo, hi), whose paths share their first 'depth' characters, until a range fits a listing page
+	std::function<void(idx_t, idx_t, idx_t)> split = [&](idx_t lo, idx_t hi, idx_t depth) {
+		auto &first = entries[lo].first;
+		auto &last = entries[hi - 1].first;
+		while (depth < first.size() && depth < last.size() && first[depth] == last[depth]) {
+			depth++;
+		}
+		if ((hi - lo) * keys_per_partition <= S3_KEYS_PER_LIST_PAGE || first.size() == depth) {
+			// fits, or one partition's directory holds the rest
+			emit(first.substr(0, depth), lo, hi);
+			return;
+		}
+		for (idx_t start = lo; start < hi && listable;) {
+			auto c = entries[start].first[depth];
+			idx_t end = start + 1;
+			while (end < hi && entries[end].first[depth] == c) {
+				end++;
+			}
+			split(start, end, depth + 1);
+			start = end;
+		}
+	};
+	if (!entries.empty()) {
+		split(0, entries.size(), 0);
+	}
+	// a partition read that no range holds (its location spelled unlike the root) needs the other listings
+	return listable && covered == reading_set.size();
+}
+
+void HiveMultiFileList::ListRanges(const vector<ListingRange> &ranges, const vector<idx_t> &partitions) const {
+	auto root = scan_info->root_location;
+	StringUtil::RTrim(root, "/");
+	auto root_prefix = root + "/";
+	// as tasks on DuckDB's threads, all ranges at the same time
+	vector<vector<OpenFileInfo>> listed(ranges.size());
+	TaskExecutor executor(client_context);
+	vector<unique_ptr<BaseExecutorTask>> tasks;
+	for (idx_t i = 0; i < ranges.size(); i++) {
+		tasks.push_back(make_uniq<ListRangeTask>(executor, client_context, ranges[i].glob, listed[i]));
+	}
+	executor.ScheduleTasks(std::move(tasks));
+	executor.WorkOnTasks();
+	unordered_set<idx_t> reading;
+	auto all = scan_info->Partitions(client_context);
+	for (auto partition_index : partitions) {
+		auto &partition = (*all)[partition_index];
+		if (partition.values.size() != scan_info->partition_keys.size()) {
+			throw InvalidInputException("Partition [%s] of Hive table '%s' has %d values but the table has %d "
+			                            "partition keys",
+			                            StringUtil::Join(partition.values, ", "), scan_info->Describe(),
+			                            partition.values.size(), scan_info->partition_keys.size());
+		}
+		reading.insert(partition_index);
+	}
+	BuildPartitionLocations();
+	auto comparable_size = ComparableLocation(root).size() + 1;
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto &files : listed) {
+		for (auto &file : files) {
+			if (!IsDataFile(file, root_prefix)) {
+				continue;
+			}
+			auto owner = OwningPartition(file.path, comparable_size);
+			if (!owner.IsValid()) {
+				continue;
+			}
+			ThrowIfLocationShared(owner.GetIndex(), reading);
+			if (!reading.count(owner.GetIndex())) {
+				continue;
+			}
+			AddFile(std::move(file), owner.GetIndex());
+		}
+	}
+}
+
+vector<OpenFileInfo> HiveMultiFileList::SampleRange(const ListingRange &range) const {
+	auto root = scan_info->root_location;
+	StringUtil::RTrim(root, "/");
+	auto root_prefix = root + "/";
+	auto listing = HiveQueryCache::Get(client_context)->GetGlobListing(client_context, range.glob);
+	BuildPartitionLocations();
+	auto comparable_size = ComparableLocation(root).size() + 1;
+	vector<OpenFileInfo> files;
+	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	for (auto &file : listing->GetAllFiles()) {
+		if (!IsDataFile(file, root_prefix)) {
+			continue;
+		}
+		auto owner = OwningPartition(file.path, comparable_size);
+		if (!owner.IsValid()) {
+			continue;
+		}
+		scan_info->file_partitions[file.path] = owner.GetIndex();
+		files.push_back(file);
+	}
+	return files;
+}
+
 bool HiveMultiFileList::ExpandNextPath() const {
 	// called with the list's lock held; runs one listing per call
 	PlanListings();
@@ -640,7 +826,10 @@ bool HiveMultiFileList::ExpandNextPath() const {
 		for (auto partition_index : job.partitions) {
 			scan_info->VerifyConsistentPartitionSerDe((*partitions)[partition_index]);
 		}
-		if (job.root) {
+		if (!job.ranges.empty()) {
+			ListRanges(job.ranges, job.partitions);
+			mode = "ranges";
+		} else if (job.root) {
 			ListRoot(job.partitions);
 			mode = "root";
 		} else {
@@ -707,6 +896,10 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	}
 	if (listing_jobs.empty()) {
 		return files;
+	}
+	if (!listing_jobs[0].ranges.empty()) {
+		// the first range's listing, which the scan reuses: the files of every partition in it
+		return SampleRange(listing_jobs[0].ranges[0]);
 	}
 	if (listing_jobs[0].root) {
 		return SampleRootPartitions(listing_jobs[0].partitions);

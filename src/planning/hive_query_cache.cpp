@@ -139,8 +139,8 @@ shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &co
 	if (!entry->partitions) {
 		auto &catalog = Catalog::GetCatalog(context, Identifier(info.catalog_name)).Cast<GlueCatalog>();
 		auto load = [&]() {
-			return make_shared_ptr<const vector<GluePartitionInfo>>(
-			    GlueAPI::GetPartitions(context, catalog, info.database_name, info.table_name));
+			return make_shared_ptr<const vector<GluePartitionInfo>>(GlueAPI::GetPartitions(
+			    context, catalog, info.database_name, info.table_name, GluePartitionColumnSchema::INCLUDE));
 		};
 		auto cache = GlueTransactionCache::Of(context, catalog);
 		entry->partitions = cache ? cache->GetPartitions(info.database_name, info.table_name, load) : load();

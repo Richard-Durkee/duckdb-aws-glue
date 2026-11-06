@@ -33,6 +33,9 @@ public:
 //! How a create call ended: the object exists afterwards either way, another client may have created it first
 enum class GlueCreateOutcome : uint8_t { CREATED, ALREADY_EXISTED };
 
+//! Whether GetPartitions asks for each partition's columns (ExcludeColumnSchema)
+enum class GluePartitionColumnSchema : uint8_t { INCLUDE, EXCLUDE };
+
 //! Thin wrapper around the AWS SDK Glue client
 class GlueAPI {
 public:
@@ -134,7 +137,8 @@ public:
 	                              const vector<string> &new_values);
 	//! List the partitions of a Hive table (GetPartitions, all pages)
 	static vector<GluePartitionInfo> GetPartitions(ClientContext &context, GlueCatalog &catalog,
-	                                               const string &database_name, const string &table_name);
+	                                               const string &database_name, const string &table_name,
+	                                               GluePartitionColumnSchema columns);
 	//! Register partitions of a Hive table (BatchCreatePartition); their StorageDescriptor is the one of 'table',
 	//! as fetched, with each partition's location. Partitions that already exist are skipped; throws for the first
 	//! partition Glue refuses, after retrying the errors that may pass.

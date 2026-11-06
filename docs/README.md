@@ -420,7 +420,8 @@ fetch. The pages are asked for in parallel with Glue's Segment API:
 overlap with the others. `0`, the default, uses 8 requests against AWS and 1 against a Glue compatible server given
 with `ENDPOINT` (moto ignores `Segment` and answers every segment with the whole table, so the partitions a segment
 already returned are dropped); 10 is the maximum Glue accepts. The responses include every partition's storage
-descriptor with its columns, which the scan checks the partitions it reads against.
+descriptor with its columns, which the scan checks the partitions it reads against. `glue_repair_table` and `INSERT`
+ask for the partitions without their columns.
 
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.

@@ -231,7 +231,7 @@ void ThrowIfPartitionExists(ClientContext &context, const GluePartitionTarget &t
 struct GluePartitionsBindData : public TableFunctionData {
 	GluePartitionTarget target;
 	vector<LogicalType> key_types;
-	vector<GluePartitionInfo> partitions;
+	shared_ptr<const vector<GluePartitionInfo>> partitions;
 };
 
 struct GluePartitionsState : public GlobalTableFunctionState {
@@ -261,11 +261,11 @@ unique_ptr<FunctionData> GluePartitionsBind(ClientContext &context, TableFunctio
 	return_types.emplace_back(LogicalType::VARCHAR);
 	return_types.emplace_back(LogicalType::LIST(LogicalType::VARCHAR));
 	auto load_partitions = [&]() {
-		return make_shared_ptr<const vector<GluePartitionInfo>>(
-		    GlueAPI::GetPartitions(context, *result->target.catalog, table.schema_name, table.name));
+		return make_shared_ptr<const vector<GluePartitionInfo>>(GlueAPI::GetPartitions(
+		    context, *result->target.catalog, table.schema_name, table.name, GluePartitionColumnSchema::INCLUDE));
 	};
 	auto &cache = *GlueTransaction::Get(context, *result->target.catalog).cache;
-	result->partitions = *cache.GetPartitions(table.schema_name, table.name, load_partitions);
+	result->partitions = cache.GetPartitions(table.schema_name, table.name, load_partitions);
 	return std::move(result);
 }
 
@@ -278,8 +278,9 @@ void GluePartitionsScan(ClientContext &context, TableFunctionInput &data, DataCh
 	auto &state = data.global_state->Cast<GluePartitionsState>();
 	auto &keys = bind_data.target.table.partition_keys;
 	idx_t count = 0;
-	while (state.offset < bind_data.partitions.size() && count < STANDARD_VECTOR_SIZE) {
-		auto &partition = bind_data.partitions[state.offset++];
+	auto &partitions = *bind_data.partitions;
+	while (state.offset < partitions.size() && count < STANDARD_VECTOR_SIZE) {
+		auto &partition = partitions[state.offset++];
 		for (idx_t k = 0; k < keys.size(); k++) {
 			Value value =
 			    k < partition.values.size()
@@ -1030,7 +1031,8 @@ void GlueGetPartitionResponseScan(ClientContext &context, TableFunctionInput &da
 	output.data[2].Append(Value::LIST(LogicalType::VARCHAR, std::move(values)));
 	output.data[3].Append(Value(partition.location));
 	output.data[4].Append(Value(partition.serde_library));
-	output.data[5].Append(GlueColumnsToValue(partition.partition_columns));
+	output.data[5].Append(
+	    GlueColumnsToValue(partition.partition_columns ? *partition.partition_columns : vector<GlueColumn>()));
 	output.data[6].Append(GlueParametersToValue(partition.parameters));
 	output.data[7].Append(GlueParametersToValue(partition.serde_parameters));
 

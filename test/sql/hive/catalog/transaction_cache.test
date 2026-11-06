@@ -104,6 +104,17 @@ SELECT glue_calls('GetPartitions'), glue_calls('GetTable');
 ----
 0	0
 
+# glue_partitions() shows the partition list the scans of the transaction fetched
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.tc_orders');
+----
+3
+
+query I
+SELECT glue_calls('GetPartitions');
+----
+0
+
 # Glue DDL stays rejected inside an explicit transaction (no transaction support in Glue)
 statement error
 CALL glue_add_partition('my_datalake.default.tc_orders', {dt: '2026-01-04'});

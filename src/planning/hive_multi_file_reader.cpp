@@ -214,19 +214,20 @@ void HiveScanInfo::VerifyConsistentPartitionSerDe(const GluePartitionInfo &parti
 
 void HiveScanInfo::CheckPartitionColumns(ClientContext &context, const GluePartitionInfo &partition,
                                          const vector<idx_t> &column_indexes) const {
-	if (partition.partition_columns.empty() || !this->table) {
+	if (!partition.partition_columns || partition.partition_columns->empty() || !this->table) {
 		return;
 	}
+	auto &partition_columns = *partition.partition_columns;
 	auto &table_columns = this->table->Cast<GlueTable>().table_info.columns;
 	for (auto column_index : column_indexes) {
 		auto &name = names[column_index].GetIdentifierName();
 		optional_ptr<const GlueColumn> partition_column;
 		if (file_format == HiveFileFormat::CSV) {
-			if (column_index < partition.partition_columns.size()) {
-				partition_column = &partition.partition_columns[column_index];
+			if (column_index < partition_columns.size()) {
+				partition_column = &partition_columns[column_index];
 			}
 		} else {
-			for (auto &column : partition.partition_columns) {
+			for (auto &column : partition_columns) {
 				if (StringUtil::CIEquals(column.name, name)) {
 					partition_column = &column;
 					break;

@@ -129,7 +129,8 @@ void GlueRepairTableApply(ClientContext &context, TableFunctionInput &data, Glue
 
 	set<vector<string>> existing_values;
 	unordered_set<string> existing_locations;
-	for (auto &partition : GlueAPI::GetPartitions(context, catalog, table.schema_name, table.name)) {
+	for (auto &partition :
+	     GlueAPI::GetPartitions(context, catalog, table.schema_name, table.name, GluePartitionColumnSchema::EXCLUDE)) {
 		existing_values.insert(partition.values);
 		auto location = partition.location;
 		StringUtil::RTrim(location, "/");

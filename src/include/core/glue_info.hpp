@@ -196,7 +196,8 @@ struct GluePartitionInfo {
 	string serde_library;
 	unordered_map<string, string> serde_parameters;
 	//! The data columns the partition declares, which can differ from the table's; empty when not known
-	vector<GlueColumn> partition_columns;
+	//! The data columns the partition declares, shared by partitions with equal columns; null when not fetched
+	shared_ptr<const vector<GlueColumn>> partition_columns;
 };
 
 //! A partition as GetPartition returns it: also its parameters

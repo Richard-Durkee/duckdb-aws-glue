@@ -206,7 +206,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 	}
 	D_ASSERT(existing_table);
 	auto &glue_catalog = existing_table->catalog.Cast<GlueCatalog>();
-	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name);
+	auto partitions = GlueAPI::GetPartitions(context, glue_catalog, table_info.schema_name, table_info.name,
+	                                         GluePartitionColumnSchema::EXCLUDE);
 	auto result = make_uniq<BoundCaseExpression>(LogicalType::VARCHAR);
 	vector<pair<string, vector<string>>> custom_directories;
 	for (auto &partition : partitions) {

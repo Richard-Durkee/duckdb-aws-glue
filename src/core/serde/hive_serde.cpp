@@ -130,6 +130,10 @@ HiveSerDeParameters HiveSerDe::NewTableParameters() const {
 }
 
 void HiveSerDe::Check(const GlueTableInfo &table) const {
+	CheckColumns(table);
+}
+
+void HiveSerDe::CheckColumns(const GlueTableInfo &table) const {
 }
 
 void HiveSerDe::Refuse(const GlueTableInfo &table, const string &what) {
@@ -159,13 +163,17 @@ void HiveCSVSerDe::Check(const GlueTableInfo &table) const {
 	if (CountProperty(table, "skip.footer.line.count") > 0) {
 		Refuse(table, "has 'skip.footer.line.count' set");
 	}
+	CheckColumns(table);
+	CheckProperties(table);
+}
+
+void HiveCSVSerDe::CheckColumns(const GlueTableInfo &table) const {
 	for (auto &column : table.columns) {
 		if (column.type.find('<') != string::npos) {
 			Refuse(table, StringUtil::Format("has the nested column '%s' (%s), stored with collection delimiters",
 			                                 column.name, column.type));
 		}
 	}
-	CheckProperties(table);
 }
 
 HiveCSVDialect HiveCSVSerDe::ReadDialect(const GlueTableInfo &table) const {

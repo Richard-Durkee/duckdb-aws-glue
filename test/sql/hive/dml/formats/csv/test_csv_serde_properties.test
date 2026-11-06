@@ -460,19 +460,38 @@ DuckDB writes single-byte field delimiters only
 statement ok
 DROP TABLE my_datalake.default.formats_csv_wide;
 
-# nested columns are stored with collection delimiters, which DuckDB can not read or write
-statement ok
+# nested columns are stored with collection delimiters, which DuckDB can not read or write: CREATE TABLE refuses them
+# rather than create a table nothing can read or write
+statement error
 CREATE TABLE my_datalake.default.formats_csv_nested (id INTEGER, tags VARCHAR[]) WITH (format = 'csv');
+----
+has the nested column 'tags' (array<string>), stored with collection delimiters, which DuckDB can not read or write
+
+statement error
+CREATE TABLE my_datalake.default.formats_csv_nested (id INTEGER, s STRUCT(a INTEGER)) WITH (format = 'csv', quote = '"');
+----
+has the nested column 's'
+
+statement error
+CREATE TABLE my_datalake.default.formats_csv_nested WITH (format = 'csv') AS SELECT 1 AS id, MAP {'a': 1} AS m;
+----
+has the nested column 'm'
 
 statement error
 SELECT * FROM my_datalake.default.formats_csv_nested;
 ----
-has the nested column 'tags' (array<string>)
+does not exist
 
-statement error
-INSERT INTO my_datalake.default.formats_csv_nested VALUES (1, ['a']);
-----
-has the nested column 'tags' (array<string>)
+# a partition column is not stored in the files
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_nested (id INTEGER, dt VARCHAR) PARTITIONED BY (dt) WITH (format = 'csv');
+
+statement ok
+DROP TABLE my_datalake.default.formats_csv_nested;
+
+# json and parquet tables store nested columns as they are
+statement ok
+CREATE TABLE my_datalake.default.formats_csv_nested (id INTEGER, tags VARCHAR[]) WITH (format = 'json');
 
 statement ok
 DROP TABLE my_datalake.default.formats_csv_nested;

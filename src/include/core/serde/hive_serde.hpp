@@ -51,6 +51,8 @@ public:
 	virtual HiveSerDeParameters NewTableParameters() const;
 	//! Throws NotImplementedException for a table of this SerDe DuckDB can not read or write
 	virtual void Check(const GlueTableInfo &table) const;
+	//! Throws NotImplementedException for columns this SerDe stores in a way DuckDB can not read or write
+	virtual void CheckColumns(const GlueTableInfo &table) const;
 
 	template <class TARGET>
 	const TARGET &Cast() const {
@@ -93,6 +95,7 @@ public:
 	virtual HiveSerDeParameters Format(const HiveCSVDialect &dialect) const = 0;
 	HiveSerDeParameters NewTableParameters() const override;
 	void Check(const GlueTableInfo &table) const override;
+	void CheckColumns(const GlueTableInfo &table) const override;
 
 protected:
 	//! Applies the SerDe properties the table sets to 'dialect'

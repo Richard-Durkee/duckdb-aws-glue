@@ -262,12 +262,7 @@ void CheckHiveSerDe(HiveSerDe serde, const GlueTableInfo &table) {
 		}
 		return;
 	}
-	for (auto &column : table.columns) {
-		if (column.type.find('<') != string::npos) {
-			Refuse(table, StringUtil::Format("has the nested column '%s' (%s), stored with collection delimiters",
-			                                 column.name, column.type));
-		}
-	}
+	CheckHiveSerDeColumns(serde, table);
 	if (serde == HiveSerDe::OPEN_CSV) {
 		if (OpenCSVQuote(table).size() > 1 || OpenCSVEscape(table).size() > 1) {
 			Refuse(table, "has a quoteChar or escapeChar of more than one byte");
@@ -290,6 +285,18 @@ void CheckHiveSerDe(HiveSerDe serde, const GlueTableInfo &table) {
 	if (StringUtil::Contains(null_string, delimiter)) {
 		Refuse(table,
 		       StringUtil::Format("has the field delimiter '%s' in its NULL string '%s'", delimiter, null_string));
+	}
+}
+
+void CheckHiveSerDeColumns(HiveSerDe serde, const GlueTableInfo &table) {
+	if (HiveSerDeFileFormat(serde) != HiveFileFormat::CSV) {
+		return;
+	}
+	for (auto &column : table.columns) {
+		if (column.type.find('<') != string::npos) {
+			Refuse(table, StringUtil::Format("has the nested column '%s' (%s), stored with collection delimiters",
+			                                 column.name, column.type));
+		}
 	}
 }
 

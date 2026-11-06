@@ -493,6 +493,7 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 	if (table.columns.empty()) {
 		throw BinderException("Table '%s' needs at least one column that is not a partition column", table_name);
 	}
+	CheckHiveSerDeColumns(table.GetSerDe(), table);
 	return table;
 }
 

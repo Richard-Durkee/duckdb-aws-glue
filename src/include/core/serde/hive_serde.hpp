@@ -30,6 +30,8 @@ bool IsCreatedHiveSerDeParameter(const string &key);
 
 //! Throws NotImplementedException for a table DuckDB can not read or write
 void CheckHiveSerDe(HiveSerDe serde, const GlueTableInfo &table);
+//! Throws NotImplementedException for columns the SerDe stores in a way DuckDB can not read or write
+void CheckHiveSerDeColumns(HiveSerDe serde, const GlueTableInfo &table);
 
 //! The dialect of a csv table that sets none of its SerDe's properties
 HiveCSVDialect DefaultCSVDialect(HiveSerDe serde);

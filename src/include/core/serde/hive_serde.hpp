@@ -42,6 +42,8 @@ public:
 	HiveSerDeParameters NewTableParameters() const;
 	//! Throws NotImplementedException for a table of this SerDe DuckDB can not read or write
 	void Check(const GlueTableInfo &table) const;
+	//! Throws NotImplementedException for columns this SerDe stores in a way DuckDB can not read or write
+	void CheckColumns(const GlueTableInfo &table) const;
 
 	//! The dialect of a csv table that sets none of the SerDe's properties
 	HiveCSVDialect DefaultCSVDialect() const;

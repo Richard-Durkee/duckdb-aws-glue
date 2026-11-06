@@ -255,14 +255,7 @@ void HiveSerDe::Check(const GlueTableInfo &table) const {
 	if (CountProperty(table, "skip.footer.line.count") > 0) {
 		Refuse(table, "has 'skip.footer.line.count' set");
 	}
-	if (FileFormat() == HiveFileFormat::CSV) {
-		for (auto &column : table.columns) {
-			if (column.type.find('<') != string::npos) {
-				Refuse(table, StringUtil::Format("has the nested column '%s' (%s), stored with collection delimiters",
-				                                 column.name, column.type));
-			}
-		}
-	}
+	CheckColumns(table);
 	string value;
 	switch (type) {
 	case HiveSerDeType::LAZY_SIMPLE: {
@@ -298,6 +291,18 @@ void HiveSerDe::Check(const GlueTableInfo &table) const {
 	case HiveSerDeType::PARQUET:
 	case HiveSerDeType::AVRO:
 		return;
+	}
+}
+
+void HiveSerDe::CheckColumns(const GlueTableInfo &table) const {
+	if (FileFormat() != HiveFileFormat::CSV) {
+		return;
+	}
+	for (auto &column : table.columns) {
+		if (column.type.find('<') != string::npos) {
+			Refuse(table, StringUtil::Format("has the nested column '%s' (%s), stored with collection delimiters",
+			                                 column.name, column.type));
+		}
 	}
 }
 

@@ -33,8 +33,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	vector<LogicalType> types;
 	//! The file format of the data files
 	HiveFileFormat file_format = HiveFileFormat::PARQUET;
-	HiveCSVOptions csv_options;
-	HiveJSONOptions json_options;
+	HiveCSVDialect csv_dialect;
+	HiveJSONDialect json_dialect;
 	//! The partition keys, in order
 	vector<string> partition_keys;
 	//! Numbers the scans of a query (HiveQueryCache::NextScanId), so the GlueScan log can tell them apart

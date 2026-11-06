@@ -30,13 +30,16 @@ enum class HiveFieldConversion : uint8_t {
 	TRY_EPOCH
 };
 
-//! How the files of a csv table are read
-struct HiveCSVOptions {
+//! How the files of a csv table are written and read, as its SerDe describes them
+struct HiveCSVDialect {
 	string delimiter = ",";
+	//! Empty when fields are not quoted
 	string quote = "\"";
 	string escape = "\"";
 	//! The header lines every file starts with
 	idx_t skip_lines = 0;
+	//! Without, no field is NULL and NULL is written as an empty field
+	bool has_null_string = true;
 	string null_string;
 	//! Read fields as text and TRY_CAST them; short rows padded with NULL, extra fields ignored
 	bool serde_fields = false;
@@ -55,10 +58,14 @@ public:
 	HiveFieldConversion FieldConversion(const LogicalType &type) const;
 	//! The regexp_replace pattern that drops field_escape from a field's text, with '\1' the character it escapes
 	string FieldEscapePattern() const;
-	bool operator==(const HiveCSVOptions &other) const;
-	bool operator!=(const HiveCSVOptions &other) const;
+	//! The nullstr of read_csv: without a NULL string "\n", which matches no unquoted field
+	string ReadNullString() const;
+	//! The nullstr of COPY
+	string WriteNullString() const;
+	bool operator==(const HiveCSVDialect &other) const;
+	bool operator!=(const HiveCSVDialect &other) const;
 	void Serialize(Serializer &serializer) const;
-	static HiveCSVOptions Deserialize(Deserializer &deserializer);
+	static HiveCSVDialect Deserialize(Deserializer &deserializer);
 };
 
 } // namespace duckdb

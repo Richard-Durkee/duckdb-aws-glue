@@ -24,6 +24,7 @@
 #include "duckdb/parser/expression/columnref_expression.hpp"
 
 #include "core/glue_types.hpp"
+#include "core/serde/hive_serde.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/parser/parsed_data/create_view_info.hpp"
 #include "duckdb/parser/parser.hpp"
@@ -445,21 +446,24 @@ GlueTableInfo GlueSchemaEntry::BuildTableInfo(ClientContext &context, const Crea
 		table.location = options.location;
 	}
 	table.parameters = options.parameters;
-	table.file_format = options.format;
-	if (table.file_format == HiveFileFormat::CSV) {
+	if (options.format == HiveFileFormat::CSV) {
 		// with a quote or escape character OpenCSVSerde (which quotes), without both LazySimpleSerDe (which does not)
-		if (options.csv_quote.empty() && options.csv_escape.empty()) {
-			table.serde_library = "org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe";
-			table.serde_parameters["field.delim"] = options.csv_delimiter;
-			table.serde_parameters["serialization.format"] = options.csv_delimiter;
-		} else {
+		auto quoted = !options.csv_quote.empty() || !options.csv_escape.empty();
+		HiveSerDe serde(quoted ? HiveSerDeType::OPEN_CSV : HiveSerDeType::LAZY_SIMPLE);
+		auto dialect = serde.NewTableCSVDialect();
+		dialect.delimiter = options.csv_delimiter;
+		if (quoted) {
 			// the escape character defaults to the quote character, like DuckDB's COPY
-			string quote = options.csv_quote.empty() ? "\"" : options.csv_quote;
-			table.serde_library = "org.apache.hadoop.hive.serde2.OpenCSVSerde";
-			table.serde_parameters["separatorChar"] = options.csv_delimiter;
-			table.serde_parameters["quoteChar"] = quote;
-			table.serde_parameters["escapeChar"] = options.csv_escape.empty() ? quote : options.csv_escape;
+			dialect.quote = options.csv_quote.empty() ? "\"" : options.csv_quote;
+			dialect.escape = options.csv_escape.empty() ? dialect.quote : options.csv_escape;
 		}
+		table.serde_library = serde.Library();
+		table.serde_parameters = serde.FormatCSVDialect(dialect);
+		table.parameters.emplace("delimiter", options.csv_delimiter);
+	} else {
+		auto serde = HiveSerDe::ForFileFormat(options.format);
+		table.serde_library = serde.Library();
+		table.serde_parameters = serde.NewTableParameters();
 	}
 	table.bucket_columns = options.bucket_columns;
 	table.number_of_buckets = options.number_of_buckets;

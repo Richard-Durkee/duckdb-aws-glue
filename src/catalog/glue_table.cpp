@@ -20,6 +20,7 @@
 
 #include "functions/glue_functions.hpp"
 #include "core/glue_types.hpp"
+#include "core/serde/hive_serde.hpp"
 #include "api/glue_api.hpp"
 #include "catalog/glue_catalog.hpp"
 #include "catalog/glue_schema_entry.hpp"
@@ -70,27 +71,12 @@ void AddIcebergTableProperties(CreateTableInfo &info, const GlueTableInfo &table
 //! HIVE path: adds format, SerDe parameters, and table properties. Throws "Not supported"
 //! for anything the extension's CREATE TABLE path can not reproduce.
 void AddHiveTableProperties(CreateTableInfo &info, const GlueTableInfo &table_info) {
-	// File format check: GetFileFormat throws for unknown SerDes; rewrap with a consistent message.
-	HiveFileFormat file_format;
-	try {
-		file_format = table_info.GetFileFormat();
-	} catch (const NotImplementedException &) {
+	HiveSerDe serde;
+	if (!TryGetHiveSerDe(table_info.serde_library, serde)) {
 		throw NotImplementedException("Not supported: SerDe '%s' for Hive tables", table_info.serde_library);
 	}
-
-	// SerDe parameters check: CREATE path writes these 5 SerDe parameters.
-	// Throw error for unknown SerDe parameter.
-	static const char *SAFE_SERDE_KEYS[] = {"field.delim", "separatorChar", "quoteChar", "escapeChar",
-	                                        "serialization.format"};
 	for (auto &param : table_info.serde_parameters) {
-		bool is_safe = false;
-		for (auto &safe_key : SAFE_SERDE_KEYS) {
-			if (StringUtil::CIEquals(param.first, safe_key)) {
-				is_safe = true;
-				break;
-			}
-		}
-		if (!is_safe) {
+		if (!IsCreatedHiveSerDeParameter(param.first)) {
 			throw NotImplementedException("Not supported: SerDe parameter '%s' for Hive tables", param.first);
 		}
 	}
@@ -101,21 +87,19 @@ void AddHiveTableProperties(CreateTableInfo &info, const GlueTableInfo &table_in
 	}
 
 	info.options["type"] = ConstantExpression::FromValue(Value("HIVE"));
-	info.options["format"] = ConstantExpression::FromValue(Value(HiveFileFormatToString(file_format)));
+	info.options["format"] = ConstantExpression::FromValue(Value(HiveFileFormatToString(HiveSerDeFileFormat(serde))));
 	if (!table_info.location.empty()) {
 		info.options["location"] = ConstantExpression::FromValue(Value(table_info.location));
 	}
 
-	// CSV properties — pulled from SerDe parameters.
-	if (file_format == HiveFileFormat::CSV) {
-		auto delimiter = table_info.GetFieldDelimiter();
-		if (!delimiter.empty() && delimiter != ",") {
-			info.options["delimiter"] = ConstantExpression::FromValue(Value(delimiter));
+	if (HiveSerDeFileFormat(serde) == HiveFileFormat::CSV) {
+		auto dialect = ReadCSVDialect(serde, table_info);
+		if (!dialect.delimiter.empty() && dialect.delimiter != ",") {
+			info.options["delimiter"] = ConstantExpression::FromValue(Value(dialect.delimiter));
 		}
-		// quote/escape only exist on OpenCSVSerde.
-		if (StringUtil::Contains(StringUtil::Lower(table_info.serde_library), "opencsvserde")) {
-			info.options["quote"] = ConstantExpression::FromValue(Value(table_info.GetQuoteCharacter()));
-			info.options["escape"] = ConstantExpression::FromValue(Value(table_info.GetEscapeCharacter()));
+		if (!dialect.quote.empty()) {
+			info.options["quote"] = ConstantExpression::FromValue(Value(dialect.quote));
+			info.options["escape"] = ConstantExpression::FromValue(Value(dialect.escape));
 		}
 		if (table_info.GetParameter("skip.header.line.count") == "1") {
 			info.options["header"] = ConstantExpression::Boolean(true);
@@ -250,15 +234,12 @@ TableFunction GlueTable::GetHiveScanFunction(ClientContext &context, unique_ptr<
 	scan_info->table = this;
 	scan_info->root_location = table_info.location;
 	scan_info->file_format = table_info.GetFileFormat();
-	if (IsTextFileFormat(scan_info->file_format)) {
-		table_info.CheckTextSerdeSupported(scan_info->file_format);
-	}
 	if (scan_info->file_format == HiveFileFormat::CSV) {
-		scan_info->csv_options = table_info.GetCSVOptions();
+		scan_info->csv_dialect = table_info.GetCSVDialect();
 	}
 	if (scan_info->file_format == HiveFileFormat::JSON) {
-		scan_info->json_options = table_info.GetJSONOptions();
-		for (auto &property : scan_info->json_options.unsupported_properties) {
+		scan_info->json_dialect = table_info.GetJSONDialect();
+		for (auto &property : scan_info->json_dialect.unsupported_properties) {
 			DUCKDB_LOG_WARNING(context, "Glue table '%s.%s': SerDe property '%s' is not applied when reading",
 			                   table_info.schema_name, table_info.name, property);
 		}

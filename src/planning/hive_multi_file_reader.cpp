@@ -3,6 +3,7 @@
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
+#include "core/serde/hive_serde.hpp"
 
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -172,16 +173,15 @@ ErrorData HiveScanInfo::PartitionStorageMismatch(const GluePartitionInfo &partit
 		stored_as = format.Describe(partition_storage);
 	} else {
 		try {
-			auto partition_format = partition_storage.GetFileFormat();
-			if (IsTextFileFormat(partition_format)) {
-				partition_storage.CheckTextSerdeSupported(partition_format);
-			}
+			auto partition_serde = partition_storage.GetSerDe();
+			CheckHiveSerDe(partition_serde, partition_storage);
+			auto partition_format = HiveSerDeFileFormat(partition_serde);
 			if (partition_format != file_format) {
 				stored_as = HiveFileFormatToString(partition_format);
-			} else if (partition_format == HiveFileFormat::CSV && partition_storage.GetCSVOptions() != csv_options) {
+			} else if (partition_format == HiveFileFormat::CSV && partition_storage.GetCSVDialect() != csv_dialect) {
 				stored_as = "csv with another dialect";
 			} else if (partition_format == HiveFileFormat::JSON &&
-			           partition_storage.GetJSONOptions().ignore_errors != json_options.ignore_errors) {
+			           partition_storage.GetJSONDialect().ignore_errors != json_dialect.ignore_errors) {
 				stored_as = "json with other SerDe properties";
 			}
 		} catch (NotImplementedException &) {
@@ -884,8 +884,8 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WriteProperty(109, "partition_keys", info.partition_keys);
 	serializer.WriteProperty(110, "columns", info.names);
 	serializer.WriteProperty(111, "column_types", info.types);
-	serializer.WriteProperty(112, "csv_options", info.csv_options);
-	serializer.WriteProperty(113, "json_options", info.json_options);
+	serializer.WriteProperty(112, "csv_dialect", info.csv_dialect);
+	serializer.WriteProperty(113, "json_dialect", info.json_dialect);
 }
 
 //! Bind the scan again from what HiveScanSerialize wrote: the partitions it holds are the ones the plan reads, those
@@ -904,8 +904,8 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	info->partition_keys = deserializer.ReadProperty<vector<string>>(109, "partition_keys");
 	info->names = deserializer.ReadProperty<vector<Identifier>>(110, "columns");
 	info->types = deserializer.ReadProperty<vector<LogicalType>>(111, "column_types");
-	info->csv_options = deserializer.ReadProperty<HiveCSVOptions>(112, "csv_options");
-	info->json_options = deserializer.ReadProperty<HiveJSONOptions>(113, "json_options");
+	info->csv_dialect = deserializer.ReadProperty<HiveCSVDialect>(112, "csv_dialect");
+	info->json_dialect = deserializer.ReadProperty<HiveJSONDialect>(113, "json_dialect");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
@@ -1002,7 +1002,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 	for (idx_t i = 0; i < scan_info->names.size(); i++) {
 		if (scan_info->GetPartitionKeyIndex(scan_info->names[i].GetIdentifierName()) == DConstants::INVALID_INDEX) {
 			// with SerDe fields every column is read as text; InitializeReader converts it to the column's type
-			auto type = scan_info->csv_options.serde_fields ? LogicalType::VARCHAR : scan_info->types[i];
+			auto type = scan_info->csv_dialect.serde_fields ? LogicalType::VARCHAR : scan_info->types[i];
 			data_columns.emplace_back(scan_info->names[i], Value(type.ToString()));
 		}
 	}
@@ -1023,11 +1023,11 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["auto_detect"] = Value::BOOLEAN(false);
 		param_map["header"] = Value::BOOLEAN(false);
-		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->csv_options.skip_lines));
-		param_map["delim"] = Value(scan_info->csv_options.delimiter);
-		param_map["quote"] = Value(scan_info->csv_options.quote);
-		param_map["escape"] = Value(scan_info->csv_options.escape);
-		param_map["nullstr"] = Value(scan_info->csv_options.null_string);
+		param_map["skip"] = Value::BIGINT(NumericCast<int64_t>(scan_info->csv_dialect.skip_lines));
+		param_map["delim"] = Value(scan_info->csv_dialect.delimiter);
+		param_map["quote"] = Value(scan_info->csv_dialect.quote);
+		param_map["escape"] = Value(scan_info->csv_dialect.escape);
+		param_map["nullstr"] = Value(scan_info->csv_dialect.ReadNullString());
 		// a quoted empty field is an empty string, not NULL (Hive reads it that way, and DuckDB writes it for one)
 		param_map["allow_quoted_nulls"] = Value::BOOLEAN(false);
 		{
@@ -1044,11 +1044,11 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 				param_map["buffer_size"] = Value::BIGINT(NumericCast<int64_t>(max_line_size));
 			}
 		}
-		if (scan_info->csv_options.serde_fields) {
+		if (scan_info->csv_dialect.serde_fields) {
 			// as the SerDes do: missing trailing fields are NULL and the fields beyond the last column are ignored
 			param_map["null_padding"] = Value::BOOLEAN(true);
 			param_map["strict_mode"] = Value::BOOLEAN(false);
-			if (!scan_info->csv_options.quote.empty()) {
+			if (!scan_info->csv_dialect.quote.empty()) {
 				// the parallel scanner refuses null_padding together with a quoted line break (hive_csv_parallel)
 				Value parallel;
 				if (context.TryGetCurrentSetting("hive_csv_parallel", parallel) && !parallel.IsNull() &&
@@ -1063,8 +1063,8 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		ExtensionHelper::AutoLoadExtension(context, "json");
 		param_map["columns"] = Value::STRUCT(data_columns);
 		param_map["format"] = Value("newline_delimited");
-		param_map["case_insensitive_keys"] = Value::BOOLEAN(scan_info->json_options.case_insensitive_keys);
-		if (scan_info->json_options.ignore_errors) {
+		param_map["case_insensitive_keys"] = Value::BOOLEAN(scan_info->json_dialect.case_insensitive_keys);
+		if (scan_info->json_dialect.ignore_errors) {
 			param_map["ignore_errors"] = Value::BOOLEAN(true);
 		}
 		break;
@@ -1074,7 +1074,7 @@ TableFunction BindHiveScan(ClientContext &context, shared_ptr<HiveScanInfo> scan
 		break;
 	}
 	auto scan_function = GetListReadFunction(context, function_name, *scan_info);
-	if (scan_info->csv_options.serde_fields) {
+	if (scan_info->csv_dialect.serde_fields) {
 		// read_csv would convert the text itself, strictly: have the column mapping cast it, so InitializeReader can
 		// make the casts TRY_CASTs
 		auto &info = scan_function.function_info->Cast<TableFunctionMultiFileInfo>();
@@ -1639,7 +1639,7 @@ static void MakeEpoch(ClientContext &context, unique_ptr<Expression> &expr, bool
 
 //! Drop the escape character read_csv does not apply from a field's text, before the text is converted; only a field
 //! that holds it goes through regexp_replace
-static void UnescapeField(ClientContext &context, unique_ptr<Expression> &expr, const HiveCSVOptions &options) {
+static void UnescapeField(ClientContext &context, unique_ptr<Expression> &expr, const HiveCSVDialect &options) {
 	auto &text = BoundCastExpression::IsCast(*expr)
 	                 ? BoundCastExpression::ChildMutable(expr->Cast<BoundFunctionExpression>())
 	                 : expr;
@@ -1687,21 +1687,21 @@ ReaderInitializeType HiveMultiFileReader::InitializeReader(MultiFileReaderData &
 		}
 		return result;
 	}
-	if (!ScanInfo().csv_options.serde_fields) {
+	if (!ScanInfo().csv_dialect.serde_fields) {
 		return result;
 	}
 	if (!reader_data.reader->expression_map.empty()) {
 		throw InternalException("Hive text table '%s': a filter was pushed into read_csv", ScanInfo().Describe());
 	}
-	auto &csv_options = ScanInfo().csv_options;
+	auto &csv_dialect = ScanInfo().csv_dialect;
 	for (auto &expr : reader_data.expressions) {
 		if (!expr) {
 			continue;
 		}
-		if (!csv_options.field_escape.empty()) {
-			UnescapeField(context, expr, csv_options);
+		if (!csv_dialect.field_escape.empty()) {
+			UnescapeField(context, expr, csv_dialect);
 		}
-		switch (csv_options.FieldConversion(expr->GetReturnType())) {
+		switch (csv_dialect.FieldConversion(expr->GetReturnType())) {
 		case HiveFieldConversion::NONE:
 		case HiveFieldConversion::CAST:
 			break;
@@ -1786,7 +1786,7 @@ static unique_ptr<ParsedExpression> BarredField(const Identifier &name) {
 }
 
 //! A field's text with the escape character read_csv does not apply dropped, as InitializeReader reads it
-static unique_ptr<ParsedExpression> UnescapedField(const HiveCSVOptions &options, unique_ptr<ParsedExpression> field) {
+static unique_ptr<ParsedExpression> UnescapedField(const HiveCSVDialect &options, unique_ptr<ParsedExpression> field) {
 	if (options.field_escape.empty()) {
 		return field;
 	}
@@ -1808,13 +1808,13 @@ static unique_ptr<ParsedExpression> UnescapedField(const HiveCSVOptions &options
 }
 
 //! A data column of the scan, of the table's type, as an expression over the reader's column: the conversion of a field
-//! read as text that InitializeReader gives the scan (HiveCSVOptions::FieldConversion)
+//! read as text that InitializeReader gives the scan (HiveCSVDialect::FieldConversion)
 static unique_ptr<ParsedExpression> ReaderColumn(const HiveScanInfo &info, const Identifier &name,
                                                  const LogicalType &type) {
-	if (info.file_format != HiveFileFormat::CSV || !info.csv_options.serde_fields) {
+	if (info.file_format != HiveFileFormat::CSV || !info.csv_dialect.serde_fields) {
 		return make_uniq<ColumnRefExpression>(name);
 	}
-	auto &options = info.csv_options;
+	auto &options = info.csv_dialect;
 	unique_ptr<ParsedExpression> column;
 	auto conversion = options.FieldConversion(type);
 	switch (conversion) {

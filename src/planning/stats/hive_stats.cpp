@@ -161,7 +161,7 @@ static optional_idx RowsInFile(ClientContext &context, const MultiFileBindData &
 	case HiveFileFormat::JSON:
 		// no reader is built for these: they are bound with a dialect and an explicit column list that fresh options
 		// would not reproduce. Counting lines needs none of it
-		return SampleLineOrientedRowsPerFile(context, file, info.csv_options.skip_lines);
+		return SampleLineOrientedRowsPerFile(context, file, info.csv_dialect.skip_lines);
 	case HiveFileFormat::AVRO:
 		return optional_idx();
 	}

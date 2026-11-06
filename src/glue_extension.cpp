@@ -8,7 +8,7 @@
 #include "duckdb/storage/storage_extension.hpp"
 
 #include "catalog/glue_attach.hpp"
-#include "core/readers/hive_csv_options.hpp"
+#include "core/serde/hive_csv_dialect.hpp"
 #include "functions/glue_functions.hpp"
 #include "functions/glue_repair_table.hpp"
 #include "grammar/glue_grammar.hpp"

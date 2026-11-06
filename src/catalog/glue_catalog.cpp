@@ -24,6 +24,7 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/scan_filter_equality.hpp"
+#include "core/serde/hive_serde.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {

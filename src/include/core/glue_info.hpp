@@ -8,8 +8,8 @@
 #include "duckdb/common/unordered_map.hpp"
 
 #include "core/glue_format.hpp"
-#include "core/readers/hive_csv_options.hpp"
-#include "core/readers/hive_json_options.hpp"
+#include "core/serde/hive_csv_dialect.hpp"
+#include "core/serde/hive_json_dialect.hpp"
 
 namespace duckdb {
 
@@ -48,16 +48,13 @@ struct GlueDatabaseInfo {
 
 //! The file format of a Hive table's data files, decided by its SerDe
 enum class HiveFileFormat : uint8_t { PARQUET, CSV, JSON, AVRO };
+//! The SerDe of a Hive table, decided by its SerializationLibrary (core/serde/hive_serde.hpp)
+enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
 string HiveFileFormatToString(HiveFileFormat format);
 //! Whether the data files are text files (csv, json), whose codec the table records rather than the files themselves
 bool IsTextFileFormat(HiveFileFormat format);
 //! Parse 'parquet' | 'csv' | 'json' | 'avro' (case-insensitive), throws for anything else
 HiveFileFormat HiveFileFormatFromString(const string &format);
-
-//! The SerDe of a Hive table, decided by its SerializationLibrary; SerDes of one file format can differ in how they
-//! read the data files and which engines write them
-enum class HiveSerDe : uint8_t { PARQUET, LAZY_SIMPLE, OPEN_CSV, HIVE_JSON, OPENX_JSON, AVRO };
-HiveFileFormat HiveSerDeFileFormat(HiveSerDe serde);
 
 //! Glue's TableType, as far as this extension decides anything on it. The field is a free string (EXTERNAL_TABLE,
 //! VIRTUAL_VIEW, GOVERNED, whatever a writer sets), so anything else is OTHER and the raw value is kept alongside.
@@ -100,8 +97,6 @@ struct GlueTableInfo {
 	//! (and TableType, within one second) tells the two apart. Empty for a definition not fetched from Glue.
 	string version_id;
 	int64_t create_time_ms = 0;
-	//! The file format to create the table with (CreateHiveTable); for a fetched table use GetFileFormat()
-	HiveFileFormat file_format = HiveFileFormat::PARQUET;
 	//! The Table object this projection was made from; null for a definition not fetched from Glue
 	shared_ptr<const GlueFetchedTable> fetched;
 
@@ -129,8 +124,6 @@ public:
 	HiveFileFormat GetFileFormat() const;
 	//! A property of the table as Hive hands it to the SerDe: a table parameter, else a SerDe parameter
 	bool TryGetProperty(const string &key, string &result) const;
-	//! separatorChar for OpenCSVSerde, else field.delim, serialization.format or '\001'
-	string GetFieldDelimiter() const;
 	//! The codec to write a csv / json table's files with (write.compression, else write_compression, else
 	//! compressionType), uncompressed when the table names none; throws for a codec DuckDB can not write. Files are
 	//! read with the codec their extension says, whatever the table records.
@@ -142,26 +135,10 @@ public:
 	string GetCodecParameter(const string &key) const;
 	//! compression_level, empty when the table does not say
 	string GetCompressionLevel() const;
-	//! serialization.null.format ('\N' by default); empty for OpenCSVSerde
-	string GetNullFormat() const;
-	//! skip.header.line.count, 0 without
-	idx_t GetHeaderLineCount() const;
-	//! Throws for text tables DuckDB can not read or write: footer lines, JSON header lines, nested csv columns, ...
-	void CheckTextSerdeSupported(HiveFileFormat format) const;
-	//! OpenCSVSerde's quoteChar ('"' by default); empty for LazySimpleSerDe, which does not quote
-	string GetQuoteCharacter() const;
-	//! OpenCSVSerde's escapeChar, else its quote character; empty for LazySimpleSerDe
-	string GetEscapeCharacter() const;
-	//! How the files of a csv table are read
-	HiveCSVOptions GetCSVOptions() const;
-	//! How the files of a json table are read
-	HiveJSONOptions GetJSONOptions() const;
-
-private:
-	//! A non-negative integer property, 0 when not set
-	idx_t GetCountProperty(const string &key) const;
-	//! An OpenCSVSerde character property (its first character), 'fallback' when not set
-	string GetOpenCSVCharacter(const string &key, const string &fallback) const;
+	//! How the files of a csv table are written and read; throws for a table DuckDB can not read or write
+	HiveCSVDialect GetCSVDialect() const;
+	//! How the files of a json table are read; throws for a table DuckDB can not read or write
+	HiveJSONDialect GetJSONDialect() const;
 };
 
 //! What CreateView / UpdateView write: a Hive style view (TableType VIRTUAL_VIEW) marked as written by DuckDB

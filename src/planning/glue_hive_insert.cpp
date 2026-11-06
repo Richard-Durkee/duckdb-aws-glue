@@ -32,6 +32,7 @@
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
 #include "core/hive_location.hpp"
+#include "core/serde/hive_serde.hpp"
 #include "execution/hive_copy.hpp"
 
 namespace duckdb {
@@ -332,11 +333,12 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		}
 	}
 
-	// For INSERT, the table's SerDe determines the format.
-	// For CTAS the table is freshly created and has no SerDe yet, so use the option from the CREATE TABLE statement.
-	auto file_format = creating_table ? table_info.file_format : table_info.GetFileFormat();
-	if (IsTextFileFormat(file_format)) {
-		table_info.CheckTextSerdeSupported(file_format);
+	auto file_format = table_info.GetFileFormat();
+	HiveCSVDialect csv_dialect;
+	if (file_format == HiveFileFormat::CSV) {
+		csv_dialect = table_info.GetCSVDialect();
+	} else {
+		CheckHiveSerDe(table_info.GetSerDe(), table_info);
 	}
 	auto format_name = HiveFileFormatToString(file_format);
 	// the operator feeding the copy and the columns it produces
@@ -365,15 +367,16 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		break;
 	case HiveFileFormat::CSV: {
 		// Hive CSV files: the table's dialect and NULL string, a header line only when the table says so
-		auto header_lines = table_info.GetHeaderLineCount();
+		auto header_lines = csv_dialect.skip_lines;
 		if (header_lines > 1) {
 			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: its files start with %d "
 			                              "header lines, DuckDB writes at most one",
 			                              table_info.schema_name, table_info.name, header_lines);
 		}
-		auto delimiter = table_info.GetFieldDelimiter();
-		auto quoted = table_info.GetSerDe() == HiveSerDe::OPEN_CSV;
-		auto null_string = table_info.GetNullFormat();
+		auto &delimiter = csv_dialect.delimiter;
+		auto quoted = !csv_dialect.quote.empty();
+		auto null_string = csv_dialect.WriteNullString();
+		auto serde_name = HiveSerDeName(table_info.GetSerDe());
 		if (delimiter.size() > 1) {
 			throw NotImplementedException("Writing to Hive table '%s.%s' is not supported: DuckDB writes single-byte "
 			                              "field delimiters only, the table's is '%s'",
@@ -381,8 +384,8 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		}
 		copy_options[Identifier("header")] = {Value::BOOLEAN(header_lines == 1)};
 		copy_options[Identifier("delimiter")] = {Value(delimiter)};
-		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
-		copy_options[Identifier("escape")] = {Value(table_info.GetEscapeCharacter())};
+		copy_options[Identifier("quote")] = {Value(csv_dialect.quote)};
+		copy_options[Identifier("escape")] = {Value(csv_dialect.escape)};
 		copy_options[Identifier("nullstr")] = {Value(null_string)};
 		if (quoted) {
 			// as Hive writes OpenCSVSerde files, so that an escape character in a value is escaped too
@@ -396,28 +399,27 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		                                          DelimiterToString(delimiter), null_string);
 		vector<unique_ptr<Expression>> select_list;
 		vector<LogicalType> projected_types;
-		auto csv_options = table_info.GetCSVOptions();
 		for (idx_t i = 0; i < names.size(); i++) {
 			unique_ptr<Expression> column = make_uniq<BoundReferenceExpression>(types[i], i);
 			if (std::find(partition_columns.begin(), partition_columns.end(), i) == partition_columns.end()) {
 				auto message = StringUtil::Format("Writing to Hive table '%s.%s' failed: a value of column '%s' %s, "
 				                                  "which the table's %s files can not hold in a field",
 				                                  table_info.schema_name, table_info.name, names[i].GetIdentifierName(),
-				                                  reason, quoted ? "OpenCSVSerde" : "LazySimpleSerDe");
-				auto conversion = csv_options.FieldConversion(types[i]);
+				                                  reason, serde_name);
+				auto conversion = csv_dialect.FieldConversion(types[i]);
 				if (conversion == HiveFieldConversion::EPOCH || conversion == HiveFieldConversion::TRY_EPOCH) {
 					column = EpochField(
 					    context, std::move(column),
 					    StringUtil::Format(
 					        "Writing to Hive table '%s.%s' failed: a value of column '%s' is infinite, which the "
-					        "table's OpenCSVSerde files can not hold in a field",
-					        table_info.schema_name, table_info.name, names[i].GetIdentifierName()));
+					        "table's %s files can not hold in a field",
+					        table_info.schema_name, table_info.name, names[i].GetIdentifierName(), serde_name));
 				}
 				// only unquoted fields can not tell the NULL string from NULL
 				column =
 				    CheckedTextField(context, std::move(column), forbidden, quoted ? nullptr : &null_string, message);
-				if (!csv_options.field_escape.empty()) {
-					column = EscapedTextField(context, std::move(column), csv_options.field_escape);
+				if (!csv_dialect.field_escape.empty()) {
+					column = EscapedTextField(context, std::move(column), csv_dialect.field_escape);
 				}
 				copy_types[i] = LogicalType::VARCHAR;
 			}

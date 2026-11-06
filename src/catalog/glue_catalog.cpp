@@ -24,6 +24,7 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "catalog/scan_filter_equality.hpp"
+#include "core/serde/hive_serde.hpp"
 #include "planning/glue_hive_insert.hpp"
 
 namespace duckdb {
@@ -477,7 +478,7 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
 	}
 	// Athena writes JSON only with the Hive JsonSerDe; OpenX properties (mapping.*, dots.in.keys) would not find the
 	// keys DuckDB writes
-	if (table_info.GetSerDe() == HiveSerDe::OPENX_JSON) {
+	if (table_info.GetSerDe().Type() == HiveSerDeType::OPENX_JSON) {
 		throw NotImplementedException("%s into Glue table '%s' is not supported: the table uses the OpenX JSON SerDe "
 		                              "'%s', DuckDB writes JSON tables only with the Hive JsonSerDe "
 		                              "(org.apache.hive.hcatalog.data.JsonSerDe)",

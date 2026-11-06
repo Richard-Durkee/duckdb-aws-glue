@@ -1,4 +1,4 @@
-#include "core/readers/hive_csv_options.hpp"
+#include "core/serde/hive_csv_dialect.hpp"
 
 #include "duckdb/common/serializer/serializer.hpp"
 #include "duckdb/common/serializer/deserializer.hpp"
@@ -7,7 +7,7 @@
 
 namespace duckdb {
 
-HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) const {
+HiveFieldConversion HiveCSVDialect::FieldConversion(const LogicalType &type) const {
 	// the whole type, not the id: an alias of VARCHAR such as JSON keeps its own conversion
 	if (type == LogicalType::VARCHAR) {
 		return HiveFieldConversion::NONE;
@@ -21,23 +21,32 @@ HiveFieldConversion HiveCSVOptions::FieldConversion(const LogicalType &type) con
 	return null_for_invalid_data ? HiveFieldConversion::TRY_CAST : HiveFieldConversion::CAST;
 }
 
-string HiveCSVOptions::FieldEscapePattern() const {
+string HiveCSVDialect::FieldEscapePattern() const {
 	return duckdb_re2::RE2::QuoteMeta(field_escape) + "([" + duckdb_re2::RE2::QuoteMeta(field_escape) +
 	       duckdb_re2::RE2::QuoteMeta(quote) + "])?";
 }
 
-bool HiveCSVOptions::operator==(const HiveCSVOptions &other) const {
+string HiveCSVDialect::ReadNullString() const {
+	return has_null_string ? null_string : "\n";
+}
+
+string HiveCSVDialect::WriteNullString() const {
+	return has_null_string ? null_string : string();
+}
+
+bool HiveCSVDialect::operator==(const HiveCSVDialect &other) const {
 	return delimiter == other.delimiter && quote == other.quote && escape == other.escape &&
-	       skip_lines == other.skip_lines && null_string == other.null_string && serde_fields == other.serde_fields &&
+	       skip_lines == other.skip_lines && has_null_string == other.has_null_string &&
+	       null_string == other.null_string && serde_fields == other.serde_fields &&
 	       null_for_invalid_data == other.null_for_invalid_data && false_unless_true == other.false_unless_true &&
 	       field_escape == other.field_escape && epoch_fields == other.epoch_fields;
 }
 
-bool HiveCSVOptions::operator!=(const HiveCSVOptions &other) const {
+bool HiveCSVDialect::operator!=(const HiveCSVDialect &other) const {
 	return !(*this == other);
 }
 
-void HiveCSVOptions::Serialize(Serializer &serializer) const {
+void HiveCSVDialect::Serialize(Serializer &serializer) const {
 	serializer.WriteProperty(100, "delimiter", delimiter);
 	serializer.WriteProperty(101, "quote", quote);
 	serializer.WriteProperty(102, "escape", escape);
@@ -48,10 +57,11 @@ void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<bool>(107, "false_unless_true", false_unless_true, false);
 	serializer.WritePropertyWithDefault<bool>(108, "epoch_fields", epoch_fields, false);
 	serializer.WritePropertyWithDefault<string>(109, "field_escape", field_escape, string());
+	serializer.WritePropertyWithDefault<bool>(110, "has_null_string", has_null_string, true);
 }
 
-HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
-	HiveCSVOptions result;
+HiveCSVDialect HiveCSVDialect::Deserialize(Deserializer &deserializer) {
+	HiveCSVDialect result;
 	result.delimiter = deserializer.ReadProperty<string>(100, "delimiter");
 	result.quote = deserializer.ReadProperty<string>(101, "quote");
 	result.escape = deserializer.ReadProperty<string>(102, "escape");
@@ -63,6 +73,7 @@ HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
 	result.false_unless_true = deserializer.ReadPropertyWithExplicitDefault<bool>(107, "false_unless_true", false);
 	result.epoch_fields = deserializer.ReadPropertyWithExplicitDefault<bool>(108, "epoch_fields", false);
 	result.field_escape = deserializer.ReadPropertyWithExplicitDefault<string>(109, "field_escape", string());
+	result.has_null_string = deserializer.ReadPropertyWithExplicitDefault<bool>(110, "has_null_string", true);
 	return result;
 }
 

@@ -1,4 +1,4 @@
-add_subdirectory(readers)
+add_subdirectory(serde)
 
 add_library_unity(
   glue_core

@@ -62,11 +62,12 @@ AWS_EC2_METADATA_DISABLED=true ASAN_OPTIONS=detect_container_overflow=0 \
   Validate config edits with `jq empty test/configs/*.json`.
 - Test targets don't build first: rebuild before running tests (`make test-cpp` builds its own binary).
 
-C++ tests: `test/unittest/` holds Catch tests of `src/include/functions/hive_reader_call.hpp`, which no SQL reaches, in
-their own binary `unittest_glue` (extensions linked statically; a normal build skips it). `make test-cpp` builds and
-runs it. Its Glue table test only runs when `GLUE_ENDPOINT` names localhost (the target sets it), since it creates and
-drops tables. What `BindHiveScan` passes the reader and what `InitializeReader` does to a column has to show in
-`HiveScanGetReaderCall`: the tests compare the rows of its call with the scan's.
+C++ tests: `test/unittest/` holds Catch tests of `src/include/functions/hive_reader_call.hpp`, which no SQL reaches, and
+of the SerDes (`hive_serde_test.cpp`: the dialect each SerDe parses from a table's properties), in their own binary
+`unittest_glue` (extensions linked statically; a normal build skips it). `make test-cpp` builds and runs it. Its Glue
+table test only runs when `GLUE_ENDPOINT` names localhost (the target sets it), since it creates and drops tables. What
+`BindHiveScan` passes the reader and what `InitializeReader` does to a column has to show in `HiveScanGetReaderCall`:
+the tests compare the rows of its call with the scan's.
 
 Test format is DuckDB's sqllogictest (`statement ok|error`, `query I...`, `----`, `<REGEX>:` for error patterns,
 `require-env`). Slow tests use `.test_slow`. Do not add `PRAGMA enable_verification`. Test error paths, not just the
@@ -100,6 +101,11 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   with hive partition directories, then register new partitions with `BatchCreatePartition` in Finalize. The copy is
   `GlueHiveCopy` (`src/execution/hive_copy.cpp`); for CTAS it carries the bound CREATE TABLE and creates the Glue table
   when the sink starts, before any output is initialized, as `PhysicalInsert` does.
+- **SerDes** `src/core/serde/`: one class per SerDe (`HiveSerDe::Find` by SerializationLibrary). `Check` refuses tables
+  DuckDB can not read or write; text SerDes `Parse` a table's properties into a `HiveCSVDialect` / `HiveJSONDialect`
+  and `Format` a dialect into the SerDe parameters CREATE TABLE writes. The reader, the writer, CREATE TABLE and
+  `duckdb_tables().sql` work from the dialect, not from SerDe parameters; a new SerDe property is read in its SerDe's
+  `ReadProperties` and nowhere else.
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition

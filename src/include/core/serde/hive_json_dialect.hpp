@@ -7,10 +7,9 @@ namespace duckdb {
 
 class Serializer;
 class Deserializer;
-struct GlueTableInfo;
 
-//! How the files of a json table are read
-struct HiveJSONOptions {
+//! How the files of a json table are read, as its SerDe (HiveJSONSerDe) describes them
+struct HiveJSONDialect {
 	//! A line that fails to parse or a value that does not fit its column is NULL (OpenX JsonSerDe
 	//! ignore.malformed.json / use.null.for.invalid.data)
 	bool ignore_errors = false;
@@ -21,10 +20,8 @@ struct HiveJSONOptions {
 	vector<string> unsupported_properties;
 
 public:
-	//! The options for the table's SerDe and SerDe properties
-	static HiveJSONOptions FromTable(const GlueTableInfo &table);
 	void Serialize(Serializer &serializer) const;
-	static HiveJSONOptions Deserialize(Deserializer &deserializer);
+	static HiveJSONDialect Deserialize(Deserializer &deserializer);
 };
 
 } // namespace duckdb

@@ -139,17 +139,17 @@ unique_ptr<FunctionData> HiveScanBind(ClientContext &context, TableFunctionBindI
 		} else if (name == "format") {
 			scan_info->file_format = HiveFileFormatFromString(option.second.GetValue<string>());
 		} else if (name == "delim") {
-			scan_info->csv_options.delimiter = option.second.GetValue<string>();
+			scan_info->csv_dialect.delimiter = option.second.GetValue<string>();
 		} else if (name == "quote") {
-			scan_info->csv_options.quote = option.second.GetValue<string>();
+			scan_info->csv_dialect.quote = option.second.GetValue<string>();
 		} else if (name == "escape") {
-			scan_info->csv_options.escape = option.second.GetValue<string>();
+			scan_info->csv_dialect.escape = option.second.GetValue<string>();
 		} else if (name == "header") {
-			scan_info->csv_options.skip_lines = option.second.GetValue<bool>() ? 1 : 0;
+			scan_info->csv_dialect.skip_lines = option.second.GetValue<bool>() ? 1 : 0;
 		} else if (name == "nullstr") {
-			scan_info->csv_options.null_string = option.second.GetValue<string>();
+			scan_info->csv_dialect.null_string = option.second.GetValue<string>();
 		} else if (name == "ignore_errors") {
-			scan_info->json_options.ignore_errors = option.second.GetValue<bool>();
+			scan_info->json_dialect.ignore_errors = option.second.GetValue<bool>();
 		}
 	}
 	if (!schema) {

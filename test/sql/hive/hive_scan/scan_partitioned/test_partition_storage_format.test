@@ -59,6 +59,20 @@ SELECT serde_library, serde_parameters['field.delim'] FROM glue_get_partition_re
 ----
 org.apache.hadoop.hive.serde2.lazy.LazySimpleSerDe	,
 
+# a csv partition of a parquet table is refused for its format, whatever its csv properties are
+statement ok
+COPY (SELECT 1::INTEGER AS id, 'a' AS name) TO 's3://glue-test/warehouse/fixture/fixture_partition_invalid_text/dt=parquet/data.parquet';
+
+query IIT
+SELECT id, name, dt FROM my_datalake.default.fixture_partition_invalid_text WHERE dt = 'parquet';
+----
+1	a	parquet
+
+statement error
+SELECT * FROM my_datalake.default.fixture_partition_invalid_text;
+----
+<REGEX>:.*Partition \[dt=text\] of Hive table 'default.fixture_partition_invalid_text' is stored as csv \(InputFormat.*can not be read yet.*
+
 # fixture_partition_dialects is a csv table (',') with a partition of its dialect and one delimited by '|'
 query IIT
 SELECT id, name, dt FROM my_datalake.default.fixture_partition_dialects WHERE dt = 'comma';

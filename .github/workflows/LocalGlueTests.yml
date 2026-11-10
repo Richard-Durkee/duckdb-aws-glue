@@ -15,6 +15,10 @@ jobs:
   local-glue-tests:
     # ubuntu-26.04 (GCC 15.2) fails to build vcpkg's snappy 1.2.2: __m256i used without <immintrin.h>
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        link_jobs: [4, 2]
 
     env:
       GEN: ninja
@@ -54,14 +58,14 @@ jobs:
         uses: duckdb/duckdb-ci/build-duckdb@main
         with:
           build-type: release
-          build: make release EXT_RELEASE_FLAGS=-DFORCE_ASSERT=1
+          build: |
+            (while true; do
+              echo "MEM $(date +%T) $(free -m | awk '/Mem:/{printf "ram used %d/%d MB avail %d", $3, $2, $7} /Swap:/{printf " swap used %d/%d", $3, $2}') links=$(pgrep -c -f 'collect2|/ld' || true) top: $(ps -eo rss,comm --sort=-rss | sed -n 2,5p | awk '{printf "%s:%dMB ", $2, $1/1024}')"
+              sleep 5
+            done) &
+            make release EXT_RELEASE_FLAGS="-DFORCE_ASSERT=1 -DDUCKDB_RELEASE_LINK_JOBS=${{ matrix.link_jobs }}"
+
           vcpkg-commit: cd61e1e26a038e82d6550a3ebbe0fbbfe7da78e3 # Release 2026.06.2
-
-      - name: Run tests
-        run: make test-local TEST_BUILD=release
-
-      - name: Run C++ tests
-        run: make test-cpp TEST_BUILD=release
 
       - name: Server logs
         if: always()

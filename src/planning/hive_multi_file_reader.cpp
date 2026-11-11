@@ -387,6 +387,15 @@ static optional_idx ListingThreshold(ClientContext &context) {
 	return optional_idx();
 }
 
+//! hive_listing_measure_keys: whether the sample's files per partition size the table location's listing
+static bool MeasureKeysEnabled(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("hive_listing_measure_keys", setting) && !setting.IsNull()) {
+		return BooleanValue::Get(setting);
+	}
+	return true;
+}
+
 //! How many partition directories are listed at the same time when each partition gets its own listing
 static idx_t PartitionsListedTogether(ClientContext &context) {
 	return MaxValue<idx_t>(1, NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()));
@@ -426,9 +435,9 @@ void HiveMultiFileList::PlanListings() const {
 	}
 	// The root's listing pages through every partition below it one page after another, while the partitions read are
 	// listed together: list the root when that takes fewer rounds of requests, or as many rounds and a tenth of the
-	// requests (on a one page root: ten partitions read). Each partition holds at least one file, so the partitions
-	// below the root bound its pages from below. hive_partition_listing_threshold replaces this with a fixed count of
-	// partitions read
+	// requests (on a one page root: ten partitions read). Each partition holds at least one file, or as many as the
+	// sampled partitions hold on average once measured. hive_partition_listing_threshold replaces this with a fixed
+	// count of partitions read
 	auto listed_together = PartitionsListedTogether(client_context);
 	idx_t partitions_below_root = 0;
 	for (auto &partition : *partitions) {
@@ -438,7 +447,8 @@ void HiveMultiFileList::PlanListings() const {
 			partitions_below_root++;
 		}
 	}
-	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
+	auto keys_below_root = partitions_below_root * MaxValue<idx_t>(scan_info->keys_per_partition.load(), 1);
+	auto root_pages = (keys_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
 	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
 	auto partition_requests = below_root.size();
 	bool list_root;
@@ -721,6 +731,35 @@ MultiFileCount HiveMultiFileList::GetFileCount(idx_t min_exact_count) const {
 vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 	lock_guard<mutex> lck(lock);
 	PlanListings();
+	auto files = SampleFromPlan();
+	if (scan_info->partition_keys.empty() || files.empty() || !MeasureKeysEnabled(client_context) ||
+	    ListingThreshold(client_context).IsValid()) {
+		return files;
+	}
+	unordered_set<idx_t> sampled_partitions;
+	{
+		lock_guard<mutex> guard(scan_info->file_partitions_lock);
+		for (auto &file : files) {
+			auto entry = scan_info->file_partitions.find(file.path);
+			if (entry != scan_info->file_partitions.end()) {
+				sampled_partitions.insert(entry->second);
+			}
+		}
+	}
+	auto partitions = MaxValue<idx_t>(sampled_partitions.size(), 1);
+	auto keys = MaxValue<idx_t>((files.size() + partitions / 2) / partitions, 1);
+	idx_t unmeasured = 0;
+	bool measured = scan_info->keys_per_partition.compare_exchange_strong(unmeasured, keys);
+	// more files per partition only lengthen the location's listing, so only a plan that lists it can change
+	if (measured && keys > 1 && next_job == 0 && listing_jobs[0].root) {
+		planned = false;
+		listing_jobs.clear();
+		PlanListings();
+	}
+	return files;
+}
+
+vector<OpenFileInfo> HiveMultiFileList::SampleFromPlan() const {
 	vector<OpenFileInfo> files;
 	if (scan_info->partition_keys.empty()) {
 		ListDataFiles(client_context, CacheListings(client_context, *scan_info), scan_info->root_location,

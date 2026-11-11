@@ -117,6 +117,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "the location is listed when that takes fewer rounds of requests than listing the "
 	                          "partitions read, or as many rounds and a tenth of the requests.",
 	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
+	config.AddExtensionOption("hive_listing_measure_keys",
+	                          "Count the files of the partitions the scan samples, and size the table location's "
+	                          "listing by them rather than one file per partition. Default true.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

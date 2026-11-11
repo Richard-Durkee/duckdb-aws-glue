@@ -115,25 +115,26 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   ones, which such a table usually has none of, so a scan would silently read nothing. To read it, set
   `projection.enabled` to `false` and register its partitions (`ALTER TABLE ... ADD PARTITION`, `glue_add_partition`).
 - Partition column values are the values Glue stores for the partition, not the directory names, typed as Glue's
-  partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its
-  build side when the scan starts, are applied to the partition values first, so only the partitions a query reads
-  are listed (EXPLAIN shows the partitions kept as `Scanning Files`). A filter the partition values decide is
-  true of every row the scan then reads, and is dropped from the plan, as for `read_parquet` with hive
-  partitioning. The partitions read below the table location are
-  listed in whichever way takes fewer rounds of requests: the location once, recursively (one S3 request per 1000
-  keys, one after another), with the files matched to their partitions by prefix, or each partition on its own,
-  several at the same time. On a tie the location is listed when that makes a tenth of the requests, so a table
-  of up to 1000 partitions lists its location from 10 partitions read (or fewer, when they take more than one round). The estimate assumes one file per partition;
-  `SET hive_partition_listing_threshold = n` replaces it with a fixed rule (the location from n partitions read).
-  Partitions at custom locations are always listed on their own. They are listed as tasks on DuckDB's threads, as many at a time as
-  `SET threads`. A directory is listed once per
-  query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default
-  false) the listing is kept for later statements of the connection as well, held and cleared like the metadata
-  cache (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way
+  partition keys. Files are listed lazily: filters on partition columns, including those a join derives from its build
+  side when the scan starts, are applied to the partition values first, so only the partitions a query reads are
+  listed (EXPLAIN shows the partitions kept as `Scanning Files`). A filter the partition values decide is true of
+  every row the scan then reads, and is dropped from the plan, as for `read_parquet` with hive partitioning. The
+  partitions read below the table location are listed in whichever way takes fewer rounds of requests: the location
+  once, recursively (one S3 request per 1000 keys, one after another), with the files matched to their partitions by
+  prefix, or each partition on its own, several at the same time. On a tie the location is listed when that makes a
+  tenth of the requests, so a table of up to 1000 partitions lists its location from 10 partitions read (or fewer,
+  when they take more than one round). The estimate counts one file per partition until the scan has sampled the
+  table, and then as many data files as the sampled partitions hold on average
+  (`SET hive_listing_measure_keys = false` keeps one); `SET hive_partition_listing_threshold = n` replaces it with a
+  fixed rule (the location from n partitions read). Partitions at custom locations are always listed on their own.
+  They are listed as tasks on DuckDB's threads, as many at a time as `SET threads`. A directory is listed once per
+  query, shared by every scan of it and the cardinality sample. With `SET glue_cache_listings = true` (default false)
+  the listing is kept for later statements of the connection as well, held and cleared like the metadata cache
+  (`glue_metadata_cache_scope`, writes through the extension, rollback, DETACH) — so files added any other way
   (another writer, `COPY TO` the table location) appear only after the next clear. Files removed any other way
   (compaction, an overwrite, dropping and recreating the table at the same location) are worse than unseen: scans
-  under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear.
-  It suits hosts that run one query per connection.
+  under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear. It
+  suits hosts that run one query per connection.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the

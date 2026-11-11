@@ -1,5 +1,6 @@
 #pragma once
 
+#include "duckdb/common/atomic.hpp"
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
@@ -45,6 +46,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The data files a sampled partition holds on average, 0 until measured: sizes the table location's listing
+	atomic<idx_t> keys_per_partition {0};
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
@@ -147,6 +150,8 @@ private:
 	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until
 	//! they hold one of 'partitions'
 	vector<OpenFileInfo> SampleRootPartitions(const vector<idx_t> &partitions) const;
+	//! The sample the first listing of the plan gives (called with the lock held)
+	vector<OpenFileInfo> SampleFromPlan() const;
 	//! Index every registered partition location, including pruned ones, so attribution does not depend on filters
 	void BuildPartitionLocations() const;
 	//! Refuse to read a file attributed to 'owner' when its location is one two or more partitions are registered at

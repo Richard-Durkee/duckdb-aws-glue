@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_retry_strategy.hpp"
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/map.hpp"
@@ -98,6 +99,17 @@ bool GlueAPI::GetPartition(ClientContext &context, GlueCatalog &catalog, const s
 	return true;
 }
 
+//! GetPartition for telling a lost response apart from a conflict: an error of the lookup counts as not found, so the
+//! write reports its own error. Other errors, such as an interrupt, are thrown.
+static bool TryGetPartition(ClientContext &context, GlueCatalog &catalog, const string &database_name,
+                            const string &table_name, const vector<string> &values, GluePartitionInfo &result) {
+	try {
+		return GlueAPI::GetPartition(context, catalog, database_name, table_name, values, result);
+	} catch (GlueException &) {
+		return false;
+	}
+}
+
 bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table,
                               const GluePartitionInput &partition, bool if_not_exists) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
@@ -119,9 +131,17 @@ bool GlueAPI::CreatePartition(ClientContext &context, GlueCatalog &catalog, cons
 	request.SetDatabaseName(database_name);
 	request.SetTableName(table_name);
 	request.SetPartitionInput(input);
+	GlueRetryCounter retries;
 	auto outcome = client->CreatePartition(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			GluePartitionInfo existing;
+			if (retries.Retried() &&
+			    TryGetPartition(context, catalog, database_name, table_name, partition.values, existing) &&
+			    existing.location == partition.location) {
+				// the first attempt created it, but its response was lost
+				return true;
+			}
 			if (if_not_exists) {
 				return false;
 			}
@@ -145,10 +165,12 @@ bool GlueAPI::DeletePartition(ClientContext &context, GlueCatalog &catalog, cons
 	request.SetDatabaseName(database_name);
 	request.SetTableName(table_name);
 	request.SetPartitionValues(ToAwsValues(values));
+	GlueRetryCounter retries;
 	auto outcome = client->DeletePartition(request);
 	if (!outcome.IsSuccess()) {
 		if (IsEntityNotFound(outcome)) {
-			return false;
+			// unless the first attempt deleted it, but its response was lost
+			return retries.Retried();
 		}
 		ThrowGlueError(outcome, StringUtil::Format("DeletePartition '%s.%s' [%s]", database_name, table_name,
 		                                           PartitionValuesToString(values)));
@@ -304,8 +326,16 @@ string GlueAPI::RenamePartition(ClientContext &context, GlueCatalog &catalog, co
 	request.SetTableName(table_name);
 	request.SetPartitionValueList(ToAwsValues(partition.values));
 	request.SetPartitionInput(input);
+	GlueRetryCounter retries;
 	auto outcome = client->UpdatePartition(request);
 	if (!outcome.IsSuccess()) {
+		GluePartitionInfo renamed;
+		if (IsEntityNotFound(outcome) && retries.Retried() &&
+		    TryGetPartition(context, catalog, database_name, table_name, new_values, renamed) &&
+		    renamed.location == partition.location) {
+			// the first attempt renamed it, but its response was lost
+			return partition.location;
+		}
 		ThrowGlueError(outcome, StringUtil::Format("UpdatePartition '%s.%s' [%s] -> [%s]", database_name, table_name,
 		                                           PartitionValuesToString(partition.values),
 		                                           PartitionValuesToString(new_values)));

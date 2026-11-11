@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_retry_strategy.hpp"
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -114,6 +115,42 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 	return true;
 }
 
+static bool SameColumns(const Aws::Vector<Aws::Glue::Model::Column> &a,
+                        const Aws::Vector<Aws::Glue::Model::Column> &b) {
+	if (a.size() != b.size()) {
+		return false;
+	}
+	for (idx_t i = 0; i < a.size(); i++) {
+		if (a[i].GetName() != b[i].GetName() || a[i].GetType() != b[i].GetType()) {
+			return false;
+		}
+	}
+	return true;
+}
+
+//! Whether the table a repeated CreateTable found is the one its first attempt created: the same type, view text,
+//! location, columns, partition keys and storage format as the request. Another client that created an identical
+//! table in between can not be told apart.
+static bool IsCreatedTable(Aws::Glue::GlueClient &client, GlueCatalog &catalog, const string &database_name,
+                           const Aws::Glue::Model::TableInput &input) {
+	Aws::Glue::Model::GetTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetName(input.GetName());
+	auto outcome = client.GetTable(request);
+	if (!outcome.IsSuccess()) {
+		return false;
+	}
+	auto &table = outcome.GetResult().GetTable();
+	auto &found = table.GetStorageDescriptor();
+	auto &sent = input.GetStorageDescriptor();
+	return table.GetTableType() == input.GetTableType() && table.GetViewOriginalText() == input.GetViewOriginalText() &&
+	       found.GetLocation() == sent.GetLocation() && SameColumns(found.GetColumns(), sent.GetColumns()) &&
+	       SameColumns(table.GetPartitionKeys(), input.GetPartitionKeys()) &&
+	       found.GetInputFormat() == sent.GetInputFormat() && found.GetOutputFormat() == sent.GetOutputFormat() &&
+	       found.GetSerdeInfo().GetSerializationLibrary() == sent.GetSerdeInfo().GetSerializationLibrary();
+}
+
 GlueCreateOutcome GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateTable");
@@ -201,9 +238,14 @@ GlueCreateOutcome GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &
 	SetCatalogId(request, catalog);
 	request.SetDatabaseName(table.schema_name);
 	request.SetTableInput(table_input);
+	GlueRetryCounter retries;
 	auto outcome = client->CreateTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			if (retries.Retried() && IsCreatedTable(*client, catalog, table.schema_name, table_input)) {
+				// the first attempt created it, but its response was lost
+				return GlueCreateOutcome::CREATED;
+			}
 			return GlueCreateOutcome::ALREADY_EXISTED;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateTable '%s.%s' (location '%s')", table.schema_name, table.name,
@@ -266,9 +308,14 @@ GlueCreateOutcome GlueAPI::CreateView(ClientContext &context, GlueCatalog &catal
 	SetCatalogId(request, catalog);
 	request.SetDatabaseName(view.database_name);
 	request.SetTableInput(ToViewTableInput(view));
+	GlueRetryCounter retries;
 	auto outcome = client->CreateTable(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			if (retries.Retried() && IsCreatedTable(*client, catalog, view.database_name, request.GetTableInput())) {
+				// the first attempt created it, but its response was lost
+				return GlueCreateOutcome::CREATED;
+			}
 			return GlueCreateOutcome::ALREADY_EXISTED;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateView '%s.%s'", view.database_name, view.name));
@@ -292,13 +339,8 @@ void GlueAPI::UpdateView(ClientContext &context, GlueCatalog &catalog, const Glu
 	});
 }
 
-//! UpdateTable replaces the whole definition: build the TableInput from the Table 'bound' was fetched as, let
-//! 'modify' change it, and send it back
-static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-                            const GlueTableInfo &bound,
-                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
-	auto &table = FetchedTable(bound);
-
+//! The TableInput that gives a table its current definition
+static Aws::Glue::Model::TableInput ToTableInput(const Aws::Glue::Model::Table &table) {
 	Aws::Glue::Model::TableInput table_input;
 	table_input.SetName(table.GetName());
 	if (table.DescriptionHasBeenSet()) {
@@ -335,6 +377,33 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 		table_input.SetTargetTable(table.GetTargetTable());
 	}
 	table_input.SetStorageDescriptor(table.GetStorageDescriptor());
+	return table_input;
+}
+
+//! Whether a table holds the definition 'input' sets, compared as the JSON Glue receives. A definition Glue stores
+//! differently than it was sent (e.g. an empty description, which Glue drops) does not match, so the update reports
+//! the concurrent modification as before.
+static bool HasDefinition(Aws::Glue::GlueClient &client, GlueCatalog &catalog, const string &database_name,
+                          const Aws::Glue::Model::TableInput &input) {
+	Aws::Glue::Model::GetTableRequest request;
+	SetCatalogId(request, catalog);
+	request.SetDatabaseName(database_name);
+	request.SetName(input.GetName());
+	auto outcome = client.GetTable(request);
+	if (!outcome.IsSuccess()) {
+		return false;
+	}
+	return ToTableInput(outcome.GetResult().GetTable()).Jsonize().View().WriteCompact() ==
+	       input.Jsonize().View().WriteCompact();
+}
+
+//! UpdateTable replaces the whole definition: build the TableInput from the Table 'bound' was fetched as, let
+//! 'modify' change it, and send it back
+static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+                            const GlueTableInfo &bound,
+                            const std::function<void(Aws::Glue::Model::TableInput &)> &modify) {
+	auto &table = FetchedTable(bound);
+	auto table_input = ToTableInput(table);
 	modify(table_input);
 
 	Aws::Glue::Model::UpdateTableRequest update_request;
@@ -345,9 +414,14 @@ static void UpdateGlueTable(const std::shared_ptr<Aws::Glue::GlueClient> &client
 	if (table.VersionIdHasBeenSet()) {
 		update_request.SetVersionId(table.GetVersionId());
 	}
+	GlueRetryCounter retries;
 	auto update_outcome = client->UpdateTable(update_request);
 	if (!update_outcome.IsSuccess()) {
 		if (update_outcome.GetError().GetErrorType() == Aws::Glue::GlueErrors::CONCURRENT_MODIFICATION) {
+			if (retries.Retried() && HasDefinition(*client, catalog, bound.schema_name, table_input)) {
+				// the first attempt updated it, but its response was lost
+				return;
+			}
 			throw TransactionException("Glue table \"%s.%s\" was changed by another client since it was read, run "
 			                           "the statement again",
 			                           bound.schema_name, bound.name);
@@ -472,8 +546,13 @@ void GlueAPI::DeleteTable(ClientContext &context, GlueCatalog &catalog, const st
 	CheckWritable(catalog, "DeleteTable");
 	GlueHttpClientContextScope http_scope(context);
 	auto client = GetClient(context, catalog);
+	GlueRetryCounter retries;
 	auto outcome = RequestDeleteTable(*client, catalog, database_name, table_name);
 	if (!outcome.IsSuccess()) {
+		if (IsEntityNotFound(outcome) && retries.Retried()) {
+			// the first attempt deleted it, but its response was lost
+			return;
+		}
 		if (IsEntityNotFound(outcome)) {
 			throw CatalogException("Table with name \"%s\" does not exist in Glue database \"%s\"", table_name,
 			                       database_name);

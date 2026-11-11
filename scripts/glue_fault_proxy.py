@@ -16,7 +16,9 @@ forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+amz-sdk-request header) and forwarded when the SDK retries it. A write naming a lost_reply_* database, table or view
+reaches moto, but the response to its first attempt is lost: the proxy holds it for LOST_REPLY_SECONDS (longer than
+the client's timeout), closes the connection and answers the SDK's retry."""
 
 import argparse
 import http.client
@@ -34,6 +36,12 @@ RACED_CREATE_PREFIX = "fault_already_exists"
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
 # the first attempt of a request on a database with this prefix is throttled, its retries are not
 THROTTLED_PREFIX = "fault_throttled"
+# a write naming an object with this prefix loses the response to its first attempt
+LOST_REPLY_PREFIX = "lost_reply_"
+LOST_REPLY_SECONDS = 4
+LOST_REPLY_WRITES = {"AWSGlue." + operation for operation in ("CreateDatabase", "DeleteDatabase", "CreateTable",
+                                                                "DeleteTable", "UpdateTable", "CreatePartition",
+                                                                "DeletePartition", "UpdatePartition")}
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
 SLOW_PARTITIONS_PREFIX = "fault_slow_partitions"
 SLOW_PARTITIONS_SECONDS = 4
@@ -86,9 +94,21 @@ def as_other_clients_object(target, request):
     return json.dumps(request).encode()
 
 
+def is_first_attempt(sdk_request):
+    """Whether the SDK's amz-sdk-request header names the first attempt of the request, not a retry."""
+    return "attempt=1" in (sdk_request or "").replace(" ", "").split(";")
+
+
 def is_throttled(database, sdk_request):
-    attempts = (sdk_request or "").replace(" ", "").split(";")
-    return database.startswith(THROTTLED_PREFIX) and "attempt=1" in attempts
+    return database.startswith(THROTTLED_PREFIX) and is_first_attempt(sdk_request)
+
+
+def loses_reply(target, request, sdk_request):
+    if target not in LOST_REPLY_WRITES or not is_first_attempt(sdk_request):
+        return False
+    names = [request.get("DatabaseName"), request.get("Name"), request.get("TableName"),
+             request.get("TableInput", {}).get("Name"), request.get("DatabaseInput", {}).get("Name")]
+    return any(isinstance(name, str) and name.startswith(LOST_REPLY_PREFIX) for name in names)
 
 
 def is_raced_update(target, database):
@@ -168,6 +188,10 @@ class Handler(BaseHTTPRequestHandler):
         if raced:
             body = as_other_clients_object(target, request)
         status, headers, data = self.forward(target, body)
+        if loses_reply(target, request, self.headers.get("amz-sdk-request")):
+            time.sleep(LOST_REPLY_SECONDS)
+            self.close_connection = True
+            return
         if raced and status == 200:
             # the object exists now, but as far as this client can tell another client created it first
             self.reply_error("AlreadyExistsException")

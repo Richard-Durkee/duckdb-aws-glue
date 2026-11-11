@@ -1,0 +1,269 @@
+# name: test/sql/hive/catalog/lost_write_responses.test
+# description: A write whose response is lost is sent again, and the repeat finding the first attempt's effect succeeds
+# group: [catalog]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+# GLUE_FAULT_ENDPOINT loses the first response to a write naming a lost_reply_* database, table or view: the write
+# reaches Glue, the response does not arrive before the timeout, and the AWS SDK sends the request again, which then
+# finds what the first attempt did (AlreadyExists, EntityNotFound, ConcurrentModification)
+statement ok
+attach '{GLUE_CATALOG_ID}' as lossy (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP VIEW IF EXISTS my_datalake.default.lost_reply_v;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.lost_reply_t;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.lost_reply_db;
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_throttled_lwr CASCADE;
+
+statement ok
+CALL enable_logging('GlueRetry', storage = 'memory');
+
+# below the 4 seconds the proxy holds a lost response
+statement ok
+SET http_timeout = 2;
+
+# after each write through lossy, exactly one retry without a response is logged: the one of its lost first attempt
+
+statement ok
+CREATE SCHEMA lossy.lost_reply_db;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE TABLE lossy.default.lost_reply_t (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CREATE VIEW lossy.default.lost_reply_v AS SELECT 42 AS answer;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# an UpdateTable whose response is lost is sent again with the VersionId it already moved past, and Glue refuses it
+# as a concurrent modification
+statement ok
+CREATE OR REPLACE VIEW lossy.default.lost_reply_v AS SELECT 43 AS answer;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+COMMENT ON TABLE lossy.default.lost_reply_t IS 'kept';
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+ALTER TABLE lossy.default.lost_reply_t ADD COLUMN note VARCHAR;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_add_partition('lossy.default.lost_reply_t', {dt: 'a'});
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL glue_rename_partition('lossy.default.lost_reply_t', {dt: 'a'}, {dt: 'b'});
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+CALL glue_drop_partition('lossy.default.lost_reply_t', {dt: 'b'});
+----
+true
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# a repeat that finds another partition than the one it asked for, here at another location, is a real conflict
+statement ok
+CALL glue_add_partition('my_datalake.default.lost_reply_t', {dt: 'm'}, location := '{DEFAULT_S3_LOCATION}/{TEST_DIR}/elsewhere/dt=m');
+
+statement error
+CALL glue_add_partition('lossy.default.lost_reply_t', {dt: 'm'});
+----
+already exists
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+# what the writes did, as Glue holds it
+query III
+SELECT response.Description::VARCHAR, [c.name FOR c IN columns], [c.name FOR c IN partition_keys]
+FROM glue_get_table_response('my_datalake.default.lost_reply_t');
+----
+kept	[id, note]	[dt]
+
+query I
+SELECT response.ViewOriginalText::VARCHAR LIKE '%43%' FROM glue_get_table_response('my_datalake.default.lost_reply_v');
+----
+true
+
+query I
+SELECT count(*) FROM glue_get_database_response('my_datalake.lost_reply_db');
+----
+1
+
+# without a lost response, dropping a partition that is not there still fails
+statement error
+CALL glue_drop_partition('my_datalake.default.lost_reply_t', {dt: 'b'});
+----
+Partition [b] does not exist in Glue table 'default.lost_reply_t'
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DROP VIEW lossy.default.lost_reply_v;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DROP TABLE lossy.default.lost_reply_t;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+DROP SCHEMA lossy.lost_reply_db;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('GlueRetry') WHERE status IS NULL;
+----
+1
+
+# attached again, so that it reads what Glue holds rather than what it cached above
+statement ok
+DETACH my_datalake;
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+query I
+SELECT count(*) FROM duckdb_tables() WHERE database_name = 'my_datalake' AND table_name LIKE 'lost_reply%';
+----
+0
+
+query I
+SELECT count(*) FROM duckdb_schemas() WHERE database_name = 'my_datalake' AND schema_name = 'lost_reply_db';
+----
+0
+
+# a throttled attempt is one Glue refused, so a drop that then finds nothing still fails
+statement ok
+CREATE SCHEMA my_datalake.fault_throttled_lwr;
+
+statement ok
+CREATE TABLE my_datalake.fault_throttled_lwr.t (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+CALL glue_drop_partition('lossy.fault_throttled_lwr.t', {dt: 'x'});
+----
+Partition [x] does not exist
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('GlueRetry') WHERE error = 'ThrottlingException';
+----
+true
+
+statement ok
+DROP SCHEMA my_datalake.fault_throttled_lwr CASCADE;
+
+statement ok
+RESET http_timeout;

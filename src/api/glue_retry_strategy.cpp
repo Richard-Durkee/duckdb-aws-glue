@@ -11,6 +11,15 @@
 
 namespace duckdb {
 
+thread_local idx_t GlueRetryCounter::retries = 0;
+
+GlueRetryCounter::GlueRetryCounter() : start(retries) {
+}
+
+bool GlueRetryCounter::Retried() const {
+	return retries != start;
+}
+
 GlueLoggingRetryStrategy::GlueLoggingRetryStrategy(std::shared_ptr<Aws::Client::RetryStrategy> strategy_p)
     : strategy(std::move(strategy_p)) {
 }
@@ -18,11 +27,16 @@ GlueLoggingRetryStrategy::GlueLoggingRetryStrategy(std::shared_ptr<Aws::Client::
 bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Client::CoreErrors> &error,
                                            long attempted_retries) const {
 	auto retry = strategy->ShouldRetry(error, attempted_retries);
+	// a response below 500 (e.g. ThrottlingException) means Glue did not carry out the attempt; without a response or
+	// with a server error it may have
+	auto status = static_cast<int>(error.GetResponseCode());
+	if (retry && (status <= 0 || status >= 500)) {
+		GlueRetryCounter::retries++;
+	}
 	auto context = GlueHttpClientContextScope::Current();
 	if (retry && context && Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {
 		GlueRetryEvent event;
 		event.error = error.GetExceptionName().c_str();
-		auto status = static_cast<int>(error.GetResponseCode());
 		if (status > 0) {
 			event.status = NumericCast<idx_t>(status);
 		}

@@ -549,6 +549,15 @@ no response, `error` and `request_id` when the SDK has none (e.g. a dropped conn
 `glue_max_retries`, or 10 by default. A retry the SDK makes to correct clock skew does not go through the
 retry strategy and is not logged.
 
+A write whose response is lost (a timeout or a dropped connection) is sent again by the SDK. When the repeat finds
+what the first attempt did, the write succeeds instead of failing. A create that finds AlreadyExists succeeds when the
+object matches the request (its location, and for a table or view also its type, view text, columns, partition keys
+and storage format). A delete that finds EntityNotFound succeeds, as does a partition rename whose partition exists
+under its new values and an update refused as a concurrent modification when the table holds what the update sent.
+Only a retry after an attempt without a response or with a server error counts, as Glue may have carried out that
+attempt; a throttled attempt is one Glue refused. Another client that made the same change in between can not be told
+apart, so a delete of an object another client deleted succeeds after such a retry.
+
 ```sql
 CALL enable_logging('GlueRetry', storage = 'memory');
 -- ... run queries ...
@@ -572,9 +581,11 @@ The local config also sets `GLUE_FAULT_ENDPOINT`: `scripts/glue_fault_proxy.py` 
 GetTables on a database named `fault_access_denied*` / `fault_invalid_input*` with that Glue error, and carries out
 CreateDatabase / CreateTable on a `fault_already_exists*` database before answering AlreadyExistsException (what it
 creates differs from what was asked for), and refuses the first attempt of each request on a `fault_throttled*`
-database with ThrottlingException, letting the SDK's retries through; tests that need it are skipped without it. It
-also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
-`link_db` as Glue does through a database resource link whose target is `target_db`.
+database with ThrottlingException, letting the SDK's retries through, and holds back the response to the first attempt
+of a write naming a `lost_reply_*` database, table or view until the client times out, answering its retry; tests that
+need it are skipped without it. It also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front
+of moto, which answers for the database `link_db` as Glue does through a database resource link whose target is
+`target_db`.
 
 ```sh
 make glue-fixture        # docker compose up (creates the bucket and the 'default' database)

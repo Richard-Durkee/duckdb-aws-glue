@@ -1,5 +1,6 @@
 #include "api/glue_api_util.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_retry_strategy.hpp"
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -59,6 +60,16 @@ bool GlueAPI::GetDatabase(ClientContext &context, GlueCatalog &catalog, const st
 	return true;
 }
 
+//! GetDatabase for telling a lost response apart from a conflict: an error of the lookup counts as not found, so the
+//! write reports its own error. Other errors, such as an interrupt, are thrown.
+static bool TryGetDatabase(ClientContext &context, GlueCatalog &catalog, const string &name, GlueDatabaseInfo &result) {
+	try {
+		return GlueAPI::GetDatabase(context, catalog, name, result);
+	} catch (GlueException &) {
+		return false;
+	}
+}
+
 GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &catalog,
                                           const GlueDatabaseInfo &database) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
@@ -79,9 +90,17 @@ GlueCreateOutcome GlueAPI::CreateDatabase(ClientContext &context, GlueCatalog &c
 	Aws::Glue::Model::CreateDatabaseRequest request;
 	SetCatalogId(request, catalog);
 	request.SetDatabaseInput(input);
+	GlueRetryCounter retries;
 	auto outcome = client->CreateDatabase(request);
 	if (!outcome.IsSuccess()) {
 		if (IsAlreadyExists(outcome)) {
+			GlueDatabaseInfo existing;
+			if (retries.Retried() && TryGetDatabase(context, catalog, database.name, existing) &&
+			    existing.description == database.description && existing.location_uri == database.location_uri &&
+			    existing.parameters == database.parameters) {
+				// the first attempt created it, but its response was lost
+				return GlueCreateOutcome::CREATED;
+			}
 			return GlueCreateOutcome::ALREADY_EXISTED;
 		}
 		ThrowGlueError(outcome, StringUtil::Format("CreateDatabase '%s'", database.name));
@@ -144,8 +163,13 @@ void GlueAPI::DeleteDatabase(ClientContext &context, GlueCatalog &catalog, const
 	Aws::Glue::Model::DeleteDatabaseRequest request;
 	SetCatalogId(request, catalog);
 	request.SetName(database_name);
+	GlueRetryCounter retries;
 	auto outcome = client->DeleteDatabase(request);
 	if (!outcome.IsSuccess()) {
+		if (IsEntityNotFound(outcome) && retries.Retried()) {
+			// the first attempt deleted it, but its response was lost
+			return;
+		}
 		if (IsEntityNotFound(outcome)) {
 			throw CatalogException("Glue database with name \"%s\" does not exist", database_name);
 		}

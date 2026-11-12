@@ -35,7 +35,7 @@ bool HiveCSVOptions::operator==(const HiveCSVOptions &other) const {
 	       skip_lines == other.skip_lines && null_string == other.null_string && serde_fields == other.serde_fields &&
 	       null_for_invalid_data == other.null_for_invalid_data && serde == other.serde &&
 	       field_escape == other.field_escape && timestamp_formats == other.timestamp_formats &&
-	       timestamp_millis == other.timestamp_millis;
+	       timestamp_millis == other.timestamp_millis && escape_delimiters == other.escape_delimiters;
 }
 
 bool HiveCSVOptions::operator!=(const HiveCSVOptions &other) const {
@@ -55,6 +55,7 @@ void HiveCSVOptions::Serialize(Serializer &serializer) const {
 	serializer.WritePropertyWithDefault<bool>(111, "timestamp_millis", timestamp_millis, false);
 	serializer.WritePropertyWithDefault<uint8_t>(112, "serde", static_cast<uint8_t>(serde),
 	                                             static_cast<uint8_t>(HiveSerDe::LAZY_SIMPLE));
+	serializer.WritePropertyWithDefault<bool>(113, "escape_delimiters", escape_delimiters, true);
 }
 
 HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
@@ -72,6 +73,7 @@ HiveCSVOptions HiveCSVOptions::Deserialize(Deserializer &deserializer) {
 	result.timestamp_millis = deserializer.ReadPropertyWithExplicitDefault<bool>(111, "timestamp_millis", false);
 	result.serde = static_cast<HiveSerDe>(deserializer.ReadPropertyWithExplicitDefault<uint8_t>(
 	    112, "serde", static_cast<uint8_t>(HiveSerDe::LAZY_SIMPLE)));
+	result.escape_delimiters = deserializer.ReadPropertyWithExplicitDefault<bool>(113, "escape_delimiters", true);
 	return result;
 }
 

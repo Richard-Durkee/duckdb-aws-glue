@@ -459,7 +459,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 		copy_options[Identifier("quote")] = {Value(table_info.GetQuoteCharacter())};
 		// LazySimpleSerDe's escape is written by EscapedTextField: DuckDB escapes only inside quotes
 		auto escape = quoted ? string() : table_info.GetEscapeCharacter();
-		copy_options[Identifier("escape")] = {Value(quoted ? table_info.GetEscapeCharacter() : string())};
+		copy_options[Identifier("escape")] = {Value(quoted ? table_info.GetCSVOptions().escape : string())};
 		copy_options[Identifier("nullstr")] = {Value(null_string)};
 		if (quoted) {
 			// as Hive writes OpenCSVSerde files, so that an escape character in a value is escaped too

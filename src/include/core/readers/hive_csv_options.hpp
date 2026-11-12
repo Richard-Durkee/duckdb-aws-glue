@@ -55,6 +55,8 @@ struct HiveCSVOptions {
 	//! With serde_fields: an escape character read_csv does not apply, dropped from a field's text; the escape or quote
 	//! character after it is kept
 	string field_escape;
+	//! false for OpenCSVSerde's '\' escape, read with read_csv's escape_delimiters, multi_line and doublequote
+	bool escape_delimiters = true;
 	//! With serde_fields: the SerDe the fields are converted as. OpenCSVSerde reads a boolean as true for 'true' in
 	//! any case and false otherwise, a timestamp or date as milliseconds or days since the epoch, and an integer as
 	//! an optional sign and digits

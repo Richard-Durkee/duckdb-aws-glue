@@ -355,12 +355,13 @@ HiveCSVOptions GlueTableInfo::GetCSVOptions() const {
 	    GetSerDe() != HiveSerDe::OPEN_CSV || (TryGetProperty("use.null.for.invalid.data", null_for_invalid_data) &&
 	                                          StringUtil::CIEquals(null_for_invalid_data, "true"));
 	options.serde = GetSerDe();
-	// without escapeChar OpenCSVSerde reads with a '\' escape, which read_csv, given the quote character, would keep;
-	// an explicit escapeChar '"', which this extension writes, is read as it is
+	// OpenCSVSerde's '\' escape (also without escapeChar) never escapes the separator or a line break
 	string escape_char;
 	auto escape_set = TryGetProperty("escapeChar", escape_char) && !escape_char.empty();
-	if (GetSerDe() == HiveSerDe::OPEN_CSV && !escape_set && options.delimiter != "\\" && options.quote != "\\") {
-		options.field_escape = "\\";
+	if (GetSerDe() == HiveSerDe::OPEN_CSV && (!escape_set || escape_char == "\\") && options.delimiter != "\\" &&
+	    options.quote != "\\") {
+		options.escape = "\\";
+		options.escape_delimiters = false;
 	}
 	string timestamp_formats;
 	if (GetSerDe() == HiveSerDe::LAZY_SIMPLE && TryGetProperty("timestamp.formats", timestamp_formats)) {

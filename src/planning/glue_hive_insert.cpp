@@ -33,6 +33,7 @@
 #include "catalog/glue_table.hpp"
 #include "catalog/glue_transaction.hpp"
 #include "core/glue_types.hpp"
+#include "core/partition_projection.hpp"
 #include "core/hive_location.hpp"
 #include "execution/hive_copy.hpp"
 
@@ -227,6 +228,50 @@ static unique_ptr<Expression> FinishPartitionPath(unique_ptr<BoundCaseExpression
 	}
 	result->ElseMutable() = std::move(hive_path);
 	return std::move(result);
+}
+
+struct ProjectedPartitionPathInfo : public ScalarFunctionInfo {
+	ProjectedPartitionPathInfo(shared_ptr<ProjectedPartitionWriter> writer_p, string location_p)
+	    : writer(std::move(writer_p)), location(std::move(location_p)) {
+	}
+	shared_ptr<ProjectedPartitionWriter> writer;
+	string location;
+};
+
+static void ProjectedPartitionPathFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &info =
+	    state.expr.Cast<BoundFunctionExpression>().Function().GetExtraFunctionInfo().Cast<ProjectedPartitionPathInfo>();
+	auto prefix = info.location + "/";
+	vector<Value> row(args.ColumnCount());
+	for (idx_t row_index = 0; row_index < args.size(); row_index++) {
+		for (idx_t column = 0; column < row.size(); column++) {
+			row[column] = args.GetValue(column, row_index);
+		}
+		auto location = info.writer->Location(row);
+		if (StringUtil::StartsWith(location, prefix)) {
+			location = location.substr(prefix.size());
+		}
+		result.SetValue(row_index, Value(location));
+	}
+}
+
+//! The PARTITION_PATH of a table that projects its partitions: the location the scan derives for the row's values
+static unique_ptr<Expression> CreateProjectedPartitionPath(ClientContext &context,
+                                                           shared_ptr<const PartitionProjection> projection,
+                                                           const string &location, const vector<LogicalType> &types,
+                                                           const vector<idx_t> &partition_columns) {
+	vector<LogicalType> key_types;
+	vector<unique_ptr<Expression>> children;
+	for (idx_t i = 0; i < partition_columns.size(); i++) {
+		key_types.push_back(types[partition_columns[i]]);
+		children.push_back(make_uniq<BoundReferenceExpression>(key_types.back(), i));
+	}
+	auto writer = make_shared_ptr<ProjectedPartitionWriter>(context, std::move(projection), key_types);
+	ScalarFunction function(Identifier("glue_projected_partition_path"), key_types, LogicalType::VARCHAR,
+	                        ProjectedPartitionPathFunction);
+	function.SetFallible();
+	function.SetExtraFunctionInfo(make_shared_ptr<ProjectedPartitionPathInfo>(std::move(writer), location));
+	return FunctionBinder(context).BindScalarFunction(function, std::move(children));
 }
 
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
@@ -613,14 +658,17 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	map<vector<string>, string> planned_locations;
 	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
-		copy.file_path = location;
+		auto projection = PartitionProjection::FromTable(table_info);
+		copy.file_path = projection ? projection->WriteRoot() : location;
 		copy.partition_output = true;
 		copy.partition_columns = partition_columns;
 		copy.write_partition_columns = false;
 		copy.hive_file_pattern = true;
 		copy.partition_path_expression =
-		    CreatePartitionPath(context, existing_table, table_info, location, copy_names, copy_types,
-		                        partition_columns, planned_locations, partition_directories);
+		    projection ? CreateProjectedPartitionPath(context, std::move(projection), copy.file_path, copy_types,
+		                                              partition_columns)
+		               : CreatePartitionPath(context, existing_table, table_info, location, copy_names, copy_types,
+		                                     partition_columns, planned_locations, partition_directories);
 		// with partitioned output the copy must not initialize a single (partition-less) output file
 		copy.write_empty_file = true;
 		copy.per_thread_output = false;
@@ -696,13 +744,12 @@ PhysicalOperator &GlueHiveInsert::PlanCreateTableAs(ClientContext &context, Phys
 		supported.Throw();
 	}
 	auto table_info = schema.BuildTableInfo(context, op.info->Base());
-	// the same gate as GetHiveTableForDML: the partitions the statement registers would be ignored
+	// Athena's CTAS can not configure partition projection either
 	if (table_info.IsPartitionProjected()) {
 		throw NotImplementedException(
 		    "CREATE TABLE ... AS for Glue table '%s' is not supported: with 'projection.enabled' "
-		    "on a partitioned table it would use Athena partition projection, so the partitions "
-		    "it would register are ignored by Athena. Set projection.enabled to false; the "
-		    "partitions the statement writes are then registered in Glue and readable",
+		    "on a partitioned table it would use Athena partition projection. Create the table "
+		    "with CREATE TABLE and then INSERT into it",
 		    table_info.name);
 	}
 	vector<Identifier> names;
@@ -795,7 +842,8 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		GlueTransactionCache::Invalidate(context, catalog);
 	}
 	auto &transaction = GlueTransaction::Get(context, catalog);
-	if (table_info.partition_keys.empty() || state.written_files.empty()) {
+	// Athena reads a projected table's partitions from its projection and ignores the registered ones
+	if (table_info.partition_keys.empty() || state.written_files.empty() || table_info.IsPartitionProjected()) {
 		transaction.CompleteHiveWrite(write_id);
 		return SinkFinalizeType::READY;
 	}

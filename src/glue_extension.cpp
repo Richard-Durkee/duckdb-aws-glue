@@ -15,6 +15,7 @@
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
 #include "core/glue_log_types.hpp"
+#include "core/partition_projection.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
 #include <aws/core/Aws.h>
@@ -122,6 +123,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "the location is listed when that takes fewer rounds of requests than listing the "
 	                          "partitions read, or as many rounds and a tenth of the requests.",
 	                          LogicalType::UBIGINT, Value(LogicalType::UBIGINT));
+
+	config.AddExtensionOption("glue_projection_max_partitions",
+	                          "The most partitions a scan of a table with partition projection may derive after its "
+	                          "filters narrow them down; more fail the query.",
+	                          LogicalType::UBIGINT, Value::UBIGINT(PartitionProjection::DEFAULT_MAX_PARTITIONS));
 
 	config.AddExtensionOption("hive_csv_parallel",
 	                          "Read each file of an OpenCSVSerde table with several threads when a scan has at most "

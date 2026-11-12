@@ -19,7 +19,8 @@ public:
 };
 
 //! A Joda-Time pattern as a strptime format; false for a pattern strptime can not express (a time zone, a fraction
-//! other than SSS, another field), or one without a year, whose default year (1970 in Hive, 1900 in strptime) differs
-bool JodaPatternToStrptime(const string &pattern, string &result);
+//! other than SSS, another field), or one without a year, whose default year (1970 in Hive, 1900 in strptime) differs.
+//! With 'exact_widths' a single-letter field is written without padding ('M' is '1', not '01'), as Java writes it
+bool JodaPatternToStrptime(const string &pattern, string &result, bool exact_widths = false);
 
 } // namespace duckdb

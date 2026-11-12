@@ -28,7 +28,17 @@ bool LocationHasGlob(const string &location) {
 }
 
 unique_ptr<MultiFileList> ListLocation(FileSystem &fs, const string &location) {
-	return fs.GlobFileList(location + "/**", FileGlobOptions::ALLOW_EMPTY);
+	// the location is a literal path, only the appended /** is a pattern
+	string literal;
+	auto remote = StringUtil::Contains(location, "://");
+	for (auto c : location) {
+		// a backslash separates the components of a Windows path
+		if (c == '*' || c == '?' || c == '[' || (c == '\\' && remote)) {
+			literal += '\\';
+		}
+		literal += c;
+	}
+	return fs.GlobFileList(literal + "/**", FileGlobOptions::ALLOW_EMPTY);
 }
 
 Path HivePartitionDirectory(const vector<string> &keys, const vector<string> &values) {

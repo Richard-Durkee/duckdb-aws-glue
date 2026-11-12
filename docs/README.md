@@ -142,24 +142,30 @@ Every format is scanned through a custom `MultiFileReader` (`HiveMultiFileReader
   (compaction, an overwrite, dropping and recreating the table at the same location) are worse than unseen: scans
   under the cached listing fail trying to open the dead paths, or read the superseded files, until the next clear.
   It suits hosts that run one query per connection.
-- A table with the table property `projection.enabled` set to `true` projects its partitions from its properties
-  instead of listing them in Glue; partitions registered in Glue are not read. Every partition key needs
+- A table with the table property `projection.enabled` set to `true` projects its partitions from its properties, as
+  Athena does, instead of listing them in Glue; partitions registered in Glue are not read. Every partition key needs
   `projection.<key>.type`:
-  - `enum`: the comma-separated `projection.<key>.values`.
+  - `enum`: the comma-separated `projection.<key>.values`, white space included; empty and repeated values are skipped.
   - `integer`: the inclusive `projection.<key>.range` (`min,max`), every `projection.<key>.interval`-th value (1 by
     default), zero-padded to `projection.<key>.digits`.
-  - `date`: the inclusive `projection.<key>.range`, two dates in `projection.<key>.format` (a Java `DateTimeFormatter`
-    pattern of the letters `y`, `u`, `M`, `L`, `d`, `D`, `H`, `h`, `m`, `s`, `SSS`, `SSSSSS` and `a`, and quoted
-    text) or relative ones (`NOW`, `NOW-3YEARS`, `NOW + 1 MONTH`, in UTC from the start of the transaction), stepped
-    by `projection.<key>.interval` (1 by default) `projection.<key>.interval.unit` (`YEARS` to `MILLIS`; `DAYS` or
-    `MONTHS` by default when the format has no finer field). The key holds the formatted value, or for a `date` or
-    `timestamp` key the date or timestamp.
-  - `injected`: the values the query filters the key to with `=` or `IN`; a query without such a filter fails.
+  - `date`: the inclusive `projection.<key>.range`, two dates in `projection.<key>.format` or relative ones (`NOW`,
+    `NOW-3YEARS`, `NOW + 1 MONTH`, in UTC from the start of the transaction). The format is a Java `DateTimeFormatter`
+    pattern of the letters `y`, `M`, `d`, `H`, `h`, `m`, `s`, `SSS` and `a` with quoted text, read as for
+    `timestamp.formats`; `yy` is a year from 2000, and other letters are refused. The values step by
+    `projection.<key>.interval` `projection.<key>.interval.unit` (a `java.time` `ChronoUnit`), which count only
+    together; otherwise by one of the format's finest field (a time field needs both). A `date` or `timestamp` key
+    holds the directory read back as a date or timestamp, a string key the directory.
+  - `injected`: the values the query filters the key to with `=`, `IN` or an `OR` of them; a query without such a
+    filter fails, and a `timestamp` key is refused, as in Athena.
 
   The partitions are at `<location>/<key>=<value>/...`, or at `storage.location.template` with `${<key>}` replaced by
-  each value. Filters on one partition key narrow its values before the keys are combined; a scan that would read
-  more than 1,000,000 partitions fails. Writes to such a table (`INSERT`, `COPY FROM`, `CREATE TABLE ... AS`) are
-  refused, since Athena ignores the partitions a write registers; set `projection.enabled` to `false` to write it.
+  each value, without escaping. Filters on one partition key narrow its values before the keys are combined (a range
+  or equality on an integer key of an integer column without enumerating the range; other keys are enumerated first, up
+  to 10,000,000 values each); a scan that would read more than
+  `glue_projection_max_partitions` (default 100,000) partitions after that fails. `INSERT` and `COPY FROM` write each
+  row to the partition the projection derives for its values and register nothing in Glue; a value the projection does
+  not derive fails the statement. `CREATE TABLE ... AS` with projection properties is refused, as Athena's can not set
+  them.
 - To estimate a scan's row count, planning lists one directory per table and query (the first partition a scan
   of the table reads, or the location of an unpartitioned table; when the scan lists the table location, the
   first page of that listing, which the scan then continues) and reads the row count of its largest file: the

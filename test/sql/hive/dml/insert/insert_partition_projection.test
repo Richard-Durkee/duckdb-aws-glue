@@ -1,0 +1,300 @@
+# name: test/sql/hive/dml/insert/insert_partition_projection.test
+# description: INSERT into a table that projects its partitions writes each row where the projection reads it and registers nothing in Glue
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+foreach table pw_keys pw_dates pw_template pw_injected pw_wide
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.{table};
+
+endloop
+
+#---------------------------------------------------------------------------
+# enum and integer keys: the integer is written padded to its digits
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_keys (id INTEGER, region VARCHAR, hour INTEGER) PARTITIONED BY (region, hour) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_keys',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,eu',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'projection.hour.interval' = '2',
+    'projection.hour.digits' = '2');
+
+query I
+INSERT INTO my_datalake.default.pw_keys VALUES (1, 'us', 6), (2, 'eu', 0), (3, 'us', 6);
+----
+3
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_keys/region=us/hour=06/*.parquet');
+----
+1
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_keys ORDER BY id;
+----
+1	us	6
+2	eu	0
+3	us	6
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pw_keys');
+----
+0
+
+# a value the projection does not derive fails the statement, which then leaves no file behind
+statement error
+INSERT INTO my_datalake.default.pw_keys VALUES (4, 'us', 8), (5, 'ap', 8);
+----
+partition column 'region' has the value 'ap', which its projection (projection.region.*) does not derive
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_keys/region=us/hour=08/*');
+----
+0
+
+statement error
+INSERT INTO my_datalake.default.pw_keys VALUES (4, 'us', 7);
+----
+partition column 'hour' has the value 7, which its projection (projection.hour.*) does not derive
+
+statement error
+INSERT INTO my_datalake.default.pw_keys VALUES (4, 'us', 24);
+----
+partition column 'hour' has the value 24, which its projection (projection.hour.*) does not derive
+
+statement error
+INSERT INTO my_datalake.default.pw_keys VALUES (4, 'us ', 6);
+----
+partition column 'region' has the value 'us ', which its projection (projection.region.*) does not derive
+
+statement error
+INSERT INTO my_datalake.default.pw_keys VALUES (4, NULL, 6);
+----
+partition column 'region' is NULL, and a projected partition holds no NULL
+
+# COPY FROM writes as INSERT does
+statement ok
+COPY (SELECT 6 AS id, 'eu' AS region, 22 AS hour) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_src.parquet';
+
+statement ok
+COPY my_datalake.default.pw_keys FROM '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_src.parquet';
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_keys WHERE hour = 22;
+----
+6	eu	22
+
+#---------------------------------------------------------------------------
+# a date key: a DATE column is written in the format and read back from it, a string column holds the formatted text
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_dates (id INTEGER, d DATE, m VARCHAR) PARTITIONED BY (d, m) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_dates',
+    'projection.enabled' = 'true',
+    'projection.d.type' = 'date',
+    'projection.d.format' = 'yyyyMMdd',
+    'projection.d.range' = '20240101,20240131',
+    'projection.d.interval' = '7',
+    'projection.d.interval.unit' = 'DAYS',
+    'projection.m.type' = 'date',
+    'projection.m.format' = 'yyyy-M',
+    'projection.m.range' = '2024-1,2024-12');
+
+statement ok
+INSERT INTO my_datalake.default.pw_dates VALUES (1, DATE '2024-01-08', '2024-3');
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_dates/d=20240108/m=2024-3/*.parquet');
+----
+1
+
+query III
+SELECT id, d, m FROM my_datalake.default.pw_dates;
+----
+1	2024-01-08	2024-3
+
+# off the seven-day grid, outside the range, or not in the format
+statement error
+INSERT INTO my_datalake.default.pw_dates VALUES (2, DATE '2024-01-09', '2024-3');
+----
+partition column 'd' has the value '2024-01-09'::DATE, which its projection (projection.d.*) does not derive
+
+statement error
+INSERT INTO my_datalake.default.pw_dates VALUES (2, DATE '2024-02-05', '2024-3');
+----
+partition column 'd' has the value '2024-02-05'::DATE, which its projection (projection.d.*) does not derive
+
+statement error
+INSERT INTO my_datalake.default.pw_dates VALUES (2, DATE '2024-01-08', '2024-03');
+----
+partition column 'm' has the value '2024-03', which its projection (projection.m.*) does not derive
+
+#---------------------------------------------------------------------------
+# storage.location.template: written below the template's text before its first placeholder, values as written
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_template (id INTEGER, region VARCHAR, hour INTEGER) PARTITIONED BY (region, hour) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_template',
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'enum',
+    'projection.region.values' = 'us,a b',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23',
+    'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_template_data/${region}/h_${hour}');
+
+statement ok
+INSERT INTO my_datalake.default.pw_template VALUES (1, 'a b', 7);
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_template_data/a b/h_7/*.parquet');
+----
+1
+
+query III
+SELECT id, region, hour FROM my_datalake.default.pw_template;
+----
+1	a b	7
+
+# a failed write below a template outside the table location leaves none of its files behind: with one open file,
+# files are written long before the last row fails
+statement ok
+SET partitioned_write_flush_threshold = 1000;
+
+statement ok
+SET partitioned_write_max_open_files = 1;
+
+statement error
+INSERT INTO my_datalake.default.pw_template SELECT i, CASE WHEN i < 99999 THEN 'us' ELSE 'ap' END, (i % 24)::INTEGER FROM range(100000) t(i);
+----
+partition column 'region' has the value 'ap', which its projection (projection.region.*) does not derive
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_template_data/us/**');
+----
+0
+
+statement ok
+RESET partitioned_write_flush_threshold;
+
+statement ok
+RESET partitioned_write_max_open_files;
+
+# a template with no directory before its first placeholder, or an empty segment, has nowhere to write
+statement ok
+ALTER TABLE my_datalake.default.pw_template SET ('storage.location.template' = 's3://${region}/h_${hour}');
+
+statement error
+INSERT INTO my_datalake.default.pw_template VALUES (2, 'us', 1);
+----
+its 'storage.location.template' has no directory before its first placeholder, or an empty segment in it
+
+statement ok
+ALTER TABLE my_datalake.default.pw_template SET ('storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_template_data/${region}//h_${hour}');
+
+statement error
+INSERT INTO my_datalake.default.pw_template VALUES (2, 'us', 1);
+----
+has an empty, '.' or '..' segment
+
+#---------------------------------------------------------------------------
+# an injected key: the value as the column's text; NULL, '' and paths that would leave the directory are refused
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_injected (id INTEGER, k VARCHAR, n INTEGER) PARTITIONED BY (k, n) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_injected',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected',
+    'projection.n.type' = 'injected');
+
+statement ok
+INSERT INTO my_datalake.default.pw_injected VALUES (1, 'acme', 7), (2, 'x/y', 8);
+
+query III
+SELECT id, k, n FROM my_datalake.default.pw_injected WHERE k IN ('acme', 'x/y') AND n IN (7, 8) ORDER BY id;
+----
+1	acme	7
+2	x/y	8
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_injected/k=x/y/n=8/*.parquet');
+----
+1
+
+statement error
+INSERT INTO my_datalake.default.pw_injected VALUES (3, '', 1);
+----
+partition column 'k' has the value '', and an injected key has no empty value
+
+foreach value 'a/../b' 'a//b' 'a/./b'
+
+statement error
+INSERT INTO my_datalake.default.pw_injected VALUES (3, {value}, 1);
+----
+has an empty, '.' or '..' segment
+
+endloop
+
+#---------------------------------------------------------------------------
+# an integer key over every BIGINT is checked, not enumerated
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pw_wide (id INTEGER, account BIGINT, code VARCHAR) PARTITIONED BY (account, code) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pw_wide',
+    'projection.enabled' = 'true',
+    'projection.account.type' = 'integer',
+    'projection.account.range' = '0,9223372036854775807',
+    'projection.code.type' = 'integer',
+    'projection.code.range' = '1,99',
+    'projection.code.digits' = '3');
+
+statement ok
+INSERT INTO my_datalake.default.pw_wide VALUES (1, 9000000000000000000, '007');
+
+query III
+SELECT id, account, code FROM my_datalake.default.pw_wide WHERE account = 9000000000000000000 AND code = '007';
+----
+1	9000000000000000000	007
+
+# a string column holds the padded text the scan reads
+statement error
+INSERT INTO my_datalake.default.pw_wide VALUES (2, 1, '7');
+----
+partition column 'code' has the value '7', which its projection (projection.code.*) does not derive
+
+statement error
+INSERT INTO my_datalake.default.pw_wide VALUES (2, -1, '007');
+----
+partition column 'account' has the value -1, which its projection (projection.account.*) does not derive
+
+# CREATE TABLE AS can not set up a projection, in Athena either
+statement error
+CREATE TABLE my_datalake.default.pw_ctas PARTITIONED BY (k) WITH ('projection.enabled' = 'true', 'projection.k.type' = 'injected')
+AS SELECT 1 AS id, 'a' AS k;
+----
+Create the table with CREATE TABLE and then INSERT into it
+
+foreach table pw_keys pw_dates pw_template pw_injected pw_wide
+
+statement ok
+DROP TABLE my_datalake.default.{table};
+
+endloop

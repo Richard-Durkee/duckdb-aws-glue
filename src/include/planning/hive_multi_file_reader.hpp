@@ -44,6 +44,8 @@ struct HiveScanInfo : public TableFunctionInfo {
 	idx_t scan_id = 0;
 	//! Set when the table projects its partitions from its properties instead of listing them in Glue
 	shared_ptr<const PartitionProjection> projection;
+	//! The partitions the projection derives before the filters, unset beyond idx_t
+	optional_idx projected_partitions;
 	//! The partition (index into Partitions()) each listed data file belongs to. Filled in while the file list expands,
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;

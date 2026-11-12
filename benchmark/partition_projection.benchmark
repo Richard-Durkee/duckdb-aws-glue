@@ -1,0 +1,69 @@
+# name: benchmark/partition_projection.benchmark
+# description: read 50 of the million partitions a table projects from its properties (projection.enabled), in the local Glue (moto) + S3: the filters narrow each key before the partitions are combined, so the scan derives and lists only the 50
+# group: [file_pruning_benchmarks]
+
+name Read 50 of 1000000 projected partitions
+group file_pruning_benchmarks
+subgroup partition_projection
+
+require parquet
+
+require httpfs
+
+require glue
+
+cache partition_projection.duckdb
+
+load
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+CREATE TABLE IF NOT EXISTS my_datalake.default.projected_1000000 (
+    id BIGINT,
+    value DOUBLE,
+    region INTEGER,
+    hour INTEGER
+) PARTITIONED BY (region, hour) WITH (
+    'projection.enabled' = 'true',
+    'projection.region.type' = 'integer',
+    'projection.region.range' = '0,999',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,999'
+);
+INSERT INTO my_datalake.default.projected_1000000
+SELECT h * 100 + r, random() * 1000, 7, h
+FROM range(0, 100) AS t(h)
+CROSS JOIN range(0, 100) AS u(r)
+WHERE NOT EXISTS (SELECT 1 FROM my_datalake.default.projected_1000000 WHERE region = 7 AND hour = 0);
+
+reload
+CREATE SECRET (
+    TYPE S3,
+    KEY_ID 'minio',
+    SECRET 'minio123',
+    REGION 'us-east-1',
+    ENDPOINT 'localhost:9100',
+    USE_SSL false,
+    URL_STYLE 'path'
+);
+ATTACH '123456789012' AS my_datalake (
+    TYPE glue,
+    ENDPOINT 'http://localhost:5555',
+    DEFAULT_LOCATION 's3://glue-test/warehouse/benchmark'
+);
+
+run
+SET enable_external_file_cache = false;
+SELECT count(*), sum(value) > 0 FROM my_datalake.default.projected_1000000
+WHERE region = 7 AND hour BETWEEN 10 AND 59;

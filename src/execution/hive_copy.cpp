@@ -111,7 +111,9 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	// keyed on the transaction, not this operator: each execution of the plan registers its write
 	if (!transaction.FindHiveWrite(write_id)) {
-		auto location = table_info.location;
+		// a projected table's storage.location.template may write outside the table location: the undo lists the
+		// directory the copy writes below
+		auto location = table_info.IsPartitionProjected() ? file_path : table_info.location;
 		StringUtil::RTrim(location, "/");
 		GlueHiveWrite write;
 		write.write_id = write_id;

@@ -1,4 +1,5 @@
 #include "planning/hive_multi_file_reader.hpp"
+#include "planning/hive_projection_pushdown.hpp"
 #include "core/hive_location.hpp"
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
@@ -34,8 +35,6 @@
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
-#include "duckdb/planner/expression/bound_operator_expression.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/catalog/catalog.hpp"
@@ -105,7 +104,7 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 			for (idx_t key_index = 0; key_index < projection->Keys().size(); key_index++) {
 				values.push_back(projection->Values(context, key_index));
 			}
-			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(projection->Combine(values));
+			partitions = make_shared_ptr<const vector<GluePartitionInfo>>(projection->Combine(context, values));
 		} else {
 			GlueScanEvent event(Describe(), scan_id, "partitions");
 			partitions = GetTablePartitions(context, *this);
@@ -278,10 +277,13 @@ string HiveScanInfo::Describe() const {
 //! a directory, so only the last component is checked); and a zero-byte object of any name holds no rows and is not a
 //! file of any format the reader opens
 bool IsDataFile(const OpenFileInfo &file, const string &prefix) {
-	if (!StringUtil::StartsWith(file.path, prefix)) {
+	// s3a:// and s3:// name the same file
+	auto path = ComparableLocation(file.path);
+	auto directory = ComparableLocation(prefix) + "/";
+	if (!StringUtil::StartsWith(path, directory)) {
 		return false;
 	}
-	auto components = StringUtil::Split(file.path.substr(prefix.size()), '/');
+	auto components = StringUtil::Split(path.substr(directory.size()), '/');
 	for (auto &component : components) {
 		if (component.empty() || component[0] == '_' || component[0] == '.') {
 			return false;
@@ -443,6 +445,17 @@ void HiveMultiFileList::PlanListings() const {
 			partitions_below_root++;
 		}
 	}
+	if (scan_info->projection && !below_root.empty()) {
+		// the root holds every projected partition, not just the derived ones, and with an injected key whatever values
+		// were ever written
+		auto injected = false;
+		for (auto &key : scan_info->projection->Keys()) {
+			injected = injected || key.type == ProjectionType::INJECTED;
+		}
+		partitions_below_root = scan_info->projected_partitions.IsValid() && !injected
+		                            ? MaxValue(partitions_below_root, scan_info->projected_partitions.GetIndex())
+		                            : NumericLimits<idx_t>::Maximum() - S3_KEYS_PER_LIST_PAGE;
+	}
 	auto root_pages = (partitions_below_root + S3_KEYS_PER_LIST_PAGE - 1) / S3_KEYS_PER_LIST_PAGE;
 	auto partition_rounds = (below_root.size() + listed_together - 1) / listed_together;
 	auto partition_requests = below_root.size();
@@ -467,7 +480,7 @@ void HiveMultiFileList::PlanListings() const {
 		listing_jobs.push_back(ListingJob {false, vector<idx_t>(separately.begin() + start, separately.begin() + end)});
 	}
 	GlueScanEvent event(scan_info->Describe(), scan_info->scan_id, "plan");
-	event.partitions = partitions->size();
+	event.partitions = scan_info->projection ? scan_info->projected_partitions : optional_idx(partitions->size());
 	event.partitions_read = indexes->size();
 	event.listings = listing_jobs.size();
 	event.detail = listing_jobs.empty() || !listing_jobs[0].root ? "partitions" : "root";
@@ -625,15 +638,12 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 		reading.insert(partition_index);
 	}
 	BuildPartitionLocations();
-	auto root_prefix = root + "/";
 	auto comparable_size = ComparableLocation(root).size() + 1;
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
 	for (auto &file : files) {
-		if (!IsDataFile(file, root_prefix)) {
-			continue;
-		}
+		// hidden components are judged below the partition, as ListPartition does: a value may spell '_a' or 'c/.d'
 		auto partition_index = OwningPartition(file.path, comparable_size);
-		if (!partition_index.IsValid()) {
+		if (!partition_index.IsValid() || !IsDataFile(file, (*all)[partition_index.GetIndex()].location)) {
 			continue;
 		}
 		ThrowIfLocationShared(partition_index.GetIndex(), reading);
@@ -761,8 +771,8 @@ vector<OpenFileInfo> HiveMultiFileList::ListSampleDirectory() const {
 vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t> &partitions) const {
 	auto root = scan_info->root_location;
 	StringUtil::RTrim(root, "/");
-	auto root_prefix = root + "/";
 	auto comparable_root_size = ComparableLocation(root).size() + 1;
+	auto all = scan_info->Partitions(client_context);
 	auto listing = HiveQueryCache::Get(client_context)
 	                   ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info));
 	unordered_set<idx_t> reading(partitions.begin(), partitions.end());
@@ -792,16 +802,13 @@ vector<OpenFileInfo> HiveMultiFileList::SampleRootPartitions(const vector<idx_t>
 			scan.scan_type = MultiFileListScanType::ALWAYS_FETCH;
 			continue;
 		}
-		if (!IsDataFile(file, root_prefix)) {
-			continue;
-		}
 		in_sampled = sampled.IsValid() && StringUtil::StartsWith(ComparableLocation(file.path), sampled_prefix);
 		if (scan.scan_type == MultiFileListScanType::ALWAYS_FETCH && sampled.IsValid() && !in_sampled) {
 			// pages come in key order, so the sampled partition's files are all seen
 			break;
 		}
 		auto owner = OwningPartition(file.path, comparable_root_size);
-		if (!owner.IsValid()) {
+		if (!owner.IsValid() || !IsDataFile(file, (*all)[owner.GetIndex()].location)) {
 			continue;
 		}
 		if (owner != last_partition) {
@@ -898,11 +905,16 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	// optimizer only serializes scans of statements that plan one, which load them anyway (GetFileCount, pruning).
 	vector<vector<string>> partitions;
 	vector<string> locations;
-	auto all = info.Partitions(list.Context());
-	auto indexes = list.PartitionIndexes();
-	for (auto index : *indexes) {
-		partitions.push_back((*all)[index].values);
-		locations.push_back((*all)[index].location);
+	// a projected scan copied before its filters are pushed (CTE inlining) derives its partitions again: all of them
+	// may be far more than the filters will leave
+	auto projected = info.projection && !info.PartitionsLoaded() && info.table;
+	if (!projected) {
+		auto all = info.Partitions(list.Context());
+		auto indexes = list.PartitionIndexes();
+		for (auto index : *indexes) {
+			partitions.push_back((*all)[index].values);
+			locations.push_back((*all)[index].location);
+		}
 	}
 	serializer.WriteProperty(104, "partitions", partitions);
 	serializer.WriteProperty(105, "partition_locations", locations);
@@ -920,6 +932,7 @@ static void HiveScanSerialize(Serializer &serializer, const optional_ptr<Functio
 	serializer.WritePropertyWithDefault<string>(116, "table", info.table ? info.table_name : string());
 	// a name only: outside the transaction that created the secret, the open fails rather than reading by path
 	serializer.WritePropertyWithDefault<string>(117, "file_secret", info.file_secret);
+	serializer.WritePropertyWithDefault<bool>(118, "projected", projected, false);
 }
 
 //! The Glue table a deserialized scan was bound to, while the catalog holds it as the scan read it: the same location
@@ -995,6 +1008,7 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 	auto database_name = deserializer.ReadPropertyWithDefault<string>(115, "database");
 	auto table_name = deserializer.ReadPropertyWithDefault<string>(116, "table");
 	info->file_secret = deserializer.ReadPropertyWithDefault<string>(117, "file_secret");
+	auto projected = deserializer.ReadPropertyWithDefault<bool>(118, "projected");
 	if (partitions.size() != locations.size()) {
 		throw SerializationException("Hive scan of \"%s\": %d partitions but %d partition locations", info->table_name,
 		                             partitions.size(), locations.size());
@@ -1006,8 +1020,16 @@ static unique_ptr<FunctionData> HiveScanDeserialize(Deserializer &deserializer, 
 		partition.location = std::move(locations[i]);
 		partition_infos.push_back(std::move(partition));
 	}
-	info->SetPartitions(std::move(partition_infos));
 	RestoreScanTable(context, *info, catalog_name, database_name, table_name);
+	if (projected) {
+		if (!info->table) {
+			throw SerializationException("Hive scan of \"%s\" derives its partitions from a table that changed",
+			                             info->table_name);
+		}
+		info->projection = PartitionProjection::FromTable(info->table->Cast<GlueTable>().table_info);
+	} else {
+		info->SetPartitions(std::move(partition_infos));
+	}
 	unique_ptr<FunctionData> bind_data;
 	function = BoundTableFunction(BindHiveScan(context, std::move(info), bind_data));
 	return bind_data;
@@ -1289,15 +1311,9 @@ void HiveMultiFileReader::BindOptions(MultiFileOptions &options, MultiFileList &
 //===--------------------------------------------------------------------===//
 // Partition pruning
 //===--------------------------------------------------------------------===//
-struct PartitionKeyProjection {
-	idx_t projected_column_index;
-	idx_t partition_key_index;
-};
-
-//! Replace references to partition columns of the scanned table by the partition's values
-static void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expression> &expr, TableIndex table_index,
-                                       const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info,
-                                       const GluePartitionInfo &partition) {
+void ReplacePartitionColumnRefs(ClientContext &context, unique_ptr<Expression> &expr, TableIndex table_index,
+                                const vector<PartitionKeyProjection> &projections, const HiveScanInfo &info,
+                                const GluePartitionInfo &partition) {
 	if (expr->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
 		auto &colref = expr->Cast<BoundColumnRefExpression>();
 		if (colref.Binding().table_index != table_index) {
@@ -1364,144 +1380,6 @@ static vector<idx_t> PartitionsToRead(ClientContext &context, const HiveScanInfo
 		}
 	}
 	return kept;
-}
-
-//! The partition key a filter reads, when it reads exactly one and no other column of the scan
-static optional_idx SinglePartitionKeyOfFilter(const Expression &filter, TableIndex table_index,
-                                               const vector<PartitionKeyProjection> &projections) {
-	optional_idx key;
-	bool other = false;
-	ExpressionIterator::VisitExpression<BoundColumnRefExpression>(filter, [&](const BoundColumnRefExpression &colref) {
-		if (colref.Binding().table_index != table_index) {
-			other = true;
-			return;
-		}
-		auto column_index = colref.Binding().column_index.GetIndex();
-		for (auto &projection : projections) {
-			if (projection.projected_column_index == column_index) {
-				if (key.IsValid() && key.GetIndex() != projection.partition_key_index) {
-					other = true;
-				}
-				key = projection.partition_key_index;
-				return;
-			}
-		}
-		other = true;
-	});
-	return other ? optional_idx() : key;
-}
-
-//! The values 'filter' allows a string column, when it is '<column> = <constant>' or '<column> IN (<constants>)'
-static bool TryGetEqualityValues(const Expression &filter, vector<string> &values) {
-	auto constant_string = [&](const Expression &expr) {
-		if (expr.GetExpressionClass() != ExpressionClass::BOUND_CONSTANT) {
-			return false;
-		}
-		auto &value = expr.Cast<BoundConstantExpression>().GetValue();
-		if (!value.IsNull()) {
-			values.push_back(value.ToString());
-		}
-		return true;
-	};
-	auto is_column = [](const Expression &expr) {
-		return expr.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF;
-	};
-	if (filter.GetExpressionType() == ExpressionType::COMPARE_EQUAL &&
-	    BoundComparisonExpression::IsComparison(filter)) {
-		auto &comparison = filter.Cast<BoundFunctionExpression>();
-		auto &left = BoundComparisonExpression::Left(comparison);
-		auto &right = BoundComparisonExpression::Right(comparison);
-		if (is_column(left)) {
-			return constant_string(right);
-		}
-		if (is_column(right)) {
-			return constant_string(left);
-		}
-		return false;
-	}
-	if (filter.GetExpressionType() == ExpressionType::COMPARE_IN) {
-		auto &children = filter.Cast<BoundOperatorExpression>().GetChildren();
-		if (children.empty() || !is_column(*children[0])) {
-			return false;
-		}
-		for (idx_t i = 1; i < children.size(); i++) {
-			if (!constant_string(*children[i])) {
-				values.clear();
-				return false;
-			}
-		}
-		return true;
-	}
-	return false;
-}
-
-//! The partitions of a projected table this scan can read: the projected values of each partition key, narrowed by the
-//! filters on that key alone before they are combined, so a filtered scan never builds the partitions it rules out.
-//! An injected key takes its values from the filters. 'projected' is the number of partitions without the filters.
-static vector<GluePartitionInfo> ProjectPartitions(ClientContext &context, const HiveScanInfo &info,
-                                                   TableIndex table_index,
-                                                   const vector<PartitionKeyProjection> &projections,
-                                                   const vector<unique_ptr<Expression>> &filters, idx_t &projected,
-                                                   unordered_set<idx_t> &pruning_filters) {
-	auto &projection = *info.projection;
-	auto key_count = projection.Keys().size();
-	vector<vector<idx_t>> key_filters(key_count);
-	for (idx_t filter_index = 0; filter_index < filters.size(); filter_index++) {
-		auto key = SinglePartitionKeyOfFilter(*filters[filter_index], table_index, projections);
-		if (key.IsValid()) {
-			key_filters[key.GetIndex()].push_back(filter_index);
-		}
-	}
-	vector<vector<ProjectedValue>> values;
-	projected = 1;
-	for (idx_t key_index = 0; key_index < key_count; key_index++) {
-		vector<ProjectedValue> candidates;
-		if (projection.Keys()[key_index].type == ProjectionType::INJECTED) {
-			bool found = false;
-			for (auto filter_index : key_filters[key_index]) {
-				vector<string> allowed;
-				if (TryGetEqualityValues(*filters[filter_index], allowed)) {
-					for (auto &value : allowed) {
-						candidates.push_back({value, value});
-					}
-					found = true;
-					break;
-				}
-			}
-			if (!found) {
-				projection.ThrowMissingInjectedFilter(key_index);
-			}
-		} else {
-			candidates = projection.Values(context, key_index);
-		}
-		projected = candidates.empty() || projected <= NumericLimits<idx_t>::Maximum() / candidates.size()
-		                ? projected * candidates.size()
-		                : NumericLimits<idx_t>::Maximum();
-		vector<ProjectedValue> kept;
-		GluePartitionInfo partition;
-		partition.values.resize(key_count);
-		for (auto &candidate : candidates) {
-			partition.values[key_index] = candidate.value;
-			bool keep = true;
-			for (auto filter_index : key_filters[key_index]) {
-				auto filter_copy = filters[filter_index]->Copy();
-				ReplacePartitionColumnRefs(context, filter_copy, table_index, projections, info, partition);
-				Value result;
-				if (filter_copy->IsScalar() && filter_copy->IsFoldable() &&
-				    ExpressionExecutor::TryEvaluateScalar(context, *filter_copy, result) &&
-				    (result.IsNull() || !result.GetValue<bool>())) {
-					keep = false;
-					pruning_filters.insert(filter_index);
-					break;
-				}
-			}
-			if (keep) {
-				kept.push_back(std::move(candidate));
-			}
-		}
-		values.push_back(std::move(kept));
-	}
-	return projection.Combine(values);
 }
 
 //! Which projected columns ('column_ids' into 'column_names') are partition keys
@@ -1584,11 +1462,15 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	// first use of the partitions: loaded here, with the filters known
 	unordered_set<idx_t> pruning_filters;
 	optional_idx projected;
-	if (info.projection && !info.PartitionsLoaded()) {
+	auto first_projection = info.projection && !info.PartitionsLoaded();
+	if (first_projection) {
 		idx_t count;
 		scan_info->SetPartitions(
 		    ProjectPartitions(context, info, pushdown_info.table_index, projections, filters, count, pruning_filters));
-		projected = count;
+		if (count != NumericLimits<idx_t>::Maximum()) {
+			projected = count;
+			scan_info->projected_partitions = count;
+		}
 	}
 	auto &hive_list = files.Cast<HiveMultiFileList>();
 	auto candidates = hive_list.PartitionIndexes();
@@ -1597,7 +1479,8 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	auto kept = PartitionsToRead(context, info, *partitions, *candidates, pushdown_info.table_index, projections,
 	                             filters, pruning_filters, decided_filters);
 	AddPruningFiltersToExtraInfo(pushdown_info.extra_info, filters, pruning_filters);
-	if (!pushdown_info.extra_info.total_files.IsValid()) {
+	// the first pushdown into the scan starts the filters it keeps for a SQL export
+	if (info.projection ? first_projection : !pushdown_info.extra_info.total_files.IsValid()) {
 		pushdown_info.extra_info.file_filter_expressions = vector<unique_ptr<Expression>>();
 	}
 	vector<unique_ptr<Expression>> remaining_filters;
@@ -1610,9 +1493,11 @@ unique_ptr<MultiFileList> HiveMultiFileReader::ComplexFilterPushdown(ClientConte
 	}
 	filters = std::move(remaining_filters);
 	// reported as files in EXPLAIN, but these are partitions: nothing has been listed yet
-	pushdown_info.extra_info.total_files = projected.IsValid() ? projected.GetIndex() : candidates->size();
-	pushdown_info.extra_info.filtered_files = kept.size();
-	if (kept.size() == candidates->size() && !projected.IsValid()) {
+	if (!info.projection || projected.IsValid()) {
+		pushdown_info.extra_info.total_files = projected.IsValid() ? projected.GetIndex() : candidates->size();
+		pushdown_info.extra_info.filtered_files = kept.size();
+	}
+	if (kept.size() == candidates->size() && !info.projection) {
 		return nullptr;
 	}
 	return make_uniq<HiveMultiFileList>(context, scan_info, std::move(kept));

@@ -1,17 +1,17 @@
 #include "core/partition_projection.hpp"
+#include "core/hive_timestamp_formats.hpp"
+#include "core/glue_types.hpp"
 
 #include "duckdb/common/exception.hpp"
-#include "duckdb/common/hive_partitioning.hpp"
+#include "duckdb/common/operator/cast_operators.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/operator/add.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/date.hpp"
 #include "duckdb/common/types/timestamp.hpp"
 #include "duckdb/function/scalar/strftime_format.hpp"
+#include "duckdb/main/client_context.hpp"
 #include "duckdb/transaction/meta_transaction.hpp"
-
-#include <cerrno>
-#include <cstdlib>
 
 namespace duckdb {
 
@@ -23,117 +23,30 @@ static string Trim(const string &input) {
 	return result;
 }
 
-//! A Java DateTimeFormatter pattern as a strftime format, and the finest unit it writes
-static string JavaPatternToStrftime(const string &table_name, const string &key, const string &pattern,
-                                    DatePrecision &precision) {
-	auto unsupported = [&](const string &what) {
-		return NotImplementedException("Hive table '%s' projects partition column '%s' with the date format '%s', "
-		                               "which uses %s",
-		                               table_name, key, pattern, what);
-	};
-	auto finer = [&](DatePrecision unit) {
-		if (unit > precision) {
-			precision = unit;
-		}
-	};
-	precision = DatePrecision::YEAR;
-	string result;
-	idx_t i = 0;
-	while (i < pattern.size()) {
-		auto c = pattern[i];
-		if (c == '\'') {
-			// quoted literal text; '' is a single quote
-			if (i + 1 < pattern.size() && pattern[i + 1] == '\'') {
-				result += '\'';
-				i += 2;
+//! The finest unit a strftime format writes
+static DatePrecision FormatPrecision(const string &format) {
+	auto writes = [&](const string &codes) {
+		for (idx_t i = 0; i + 1 < format.size(); i++) {
+			if (format[i] != '%') {
 				continue;
 			}
 			i++;
-			while (i < pattern.size()) {
-				if (pattern[i] == '\'') {
-					if (i + 1 < pattern.size() && pattern[i + 1] == '\'') {
-						result += '\'';
-						i += 2;
-						continue;
-					}
-					break;
-				}
-				result += pattern[i] == '%' ? "%%" : string(1, pattern[i]);
+			if (format[i] == '-' && i + 1 < format.size()) {
 				i++;
 			}
-			if (i == pattern.size()) {
-				throw InvalidInputException("Hive table '%s' has an unterminated quote in the date format '%s' of "
-				                            "partition column '%s'",
-				                            table_name, pattern, key);
+			if (codes.find(format[i]) != string::npos) {
+				return true;
 			}
-			i++;
-			continue;
 		}
-		if (!StringUtil::CharacterIsAlpha(c)) {
-			result += c == '%' ? "%%" : string(1, c);
-			i++;
-			continue;
-		}
-		idx_t count = 0;
-		while (i < pattern.size() && pattern[i] == c) {
-			count++;
-			i++;
-		}
-		switch (c) {
-		case 'y':
-		case 'u':
-			result += count == 2 ? "%y" : "%Y";
-			break;
-		case 'M':
-		case 'L':
-			finer(DatePrecision::MONTH);
-			if (count > 4) {
-				throw unsupported(StringUtil::Format("'%s'", string(count, c)));
-			}
-			result += count == 1 ? "%-m" : count == 2 ? "%m" : count == 3 ? "%b" : "%B";
-			break;
-		case 'd':
-			finer(DatePrecision::DAY);
-			if (count > 2) {
-				throw unsupported(StringUtil::Format("'%s'", string(count, c)));
-			}
-			result += count == 1 ? "%-d" : "%d";
-			break;
-		case 'D':
-			finer(DatePrecision::DAY);
-			// DD pads to two digits, which strftime can not write
-			if (count != 1 && count != 3) {
-				throw unsupported(StringUtil::Format("'%s' (only D and DDD are supported)", string(count, c)));
-			}
-			result += count == 1 ? "%-j" : "%j";
-			break;
-		case 'H':
-		case 'h':
-		case 'm':
-		case 's':
-			finer(DatePrecision::TIME);
-			if (count > 2) {
-				throw unsupported(StringUtil::Format("'%s'", string(count, c)));
-			}
-			result += count == 1 ? "%-" : "%";
-			result += c == 'H' ? 'H' : c == 'h' ? 'I' : c == 'm' ? 'M' : 'S';
-			break;
-		case 'a':
-			finer(DatePrecision::TIME);
-			result += "%p";
-			break;
-		case 'S':
-			finer(DatePrecision::TIME);
-			if (count != 3 && count != 6) {
-				throw unsupported(StringUtil::Format("'%s' (only SSS and SSSSSS are supported)", string(count, c)));
-			}
-			result += count == 3 ? "%g" : "%f";
-			break;
-		default:
-			throw unsupported(StringUtil::Format("the pattern letter '%c'", c));
-		}
+		return false;
+	};
+	if (writes("HIMSgp")) {
+		return DatePrecision::TIME;
 	}
-	return result;
+	if (writes("daA")) {
+		return DatePrecision::DAY;
+	}
+	return writes("mbB") ? DatePrecision::MONTH : DatePrecision::YEAR;
 }
 
 static bool TryParseDateUnit(const string &input, int64_t amount, interval_t &result) {
@@ -142,22 +55,63 @@ static bool TryParseDateUnit(const string &input, int64_t amount, interval_t &re
 		unit.pop_back();
 	}
 	result = {0, 0, 0};
-	if (unit == "YEAR") {
-		result.months = NumericCast<int32_t>(amount * 12);
+	if (unit == "CENTURIE") {
+		unit = "CENTURY";
+	}
+	// an amount the interval can not hold is no step
+	auto months = [&](int64_t per_unit) {
+		if (amount > NumericLimits<int32_t>::Maximum() / per_unit) {
+			return false;
+		}
+		result.months = NumericCast<int32_t>(amount * per_unit);
+		return true;
+	};
+	auto days = [&](int64_t per_unit) {
+		if (amount > NumericLimits<int32_t>::Maximum() / per_unit) {
+			return false;
+		}
+		result.days = NumericCast<int32_t>(amount * per_unit);
+		return true;
+	};
+	auto micros = [&](int64_t per_unit) {
+		if (amount > NumericLimits<int64_t>::Maximum() / per_unit) {
+			return false;
+		}
+		result.micros = amount * per_unit;
+		return true;
+	};
+	if (unit == "MILLENNIA" || unit == "MILLENNIUM") {
+		return months(12000);
+	} else if (unit == "CENTURY") {
+		return months(1200);
+	} else if (unit == "DECADE") {
+		return months(120);
+	} else if (unit == "YEAR") {
+		return months(12);
 	} else if (unit == "MONTH") {
-		result.months = NumericCast<int32_t>(amount);
+		return months(1);
 	} else if (unit == "WEEK") {
-		result.days = NumericCast<int32_t>(amount * 7);
+		return days(7);
 	} else if (unit == "DAY") {
-		result.days = NumericCast<int32_t>(amount);
+		return days(1);
+	} else if (unit == "HALF_DAY") {
+		return micros(12 * Interval::MICROS_PER_HOUR);
 	} else if (unit == "HOUR") {
-		result.micros = amount * Interval::MICROS_PER_HOUR;
+		return micros(Interval::MICROS_PER_HOUR);
 	} else if (unit == "MINUTE") {
-		result.micros = amount * Interval::MICROS_PER_MINUTE;
+		return micros(Interval::MICROS_PER_MINUTE);
 	} else if (unit == "SECOND") {
-		result.micros = amount * Interval::MICROS_PER_SEC;
+		return micros(Interval::MICROS_PER_SEC);
 	} else if (unit == "MILLI") {
-		result.micros = amount * Interval::MICROS_PER_MSEC;
+		return micros(Interval::MICROS_PER_MSEC);
+	} else if (unit == "MICRO") {
+		return micros(1);
+	} else if (unit == "NANO") {
+		// a timestamp has no finer step than a microsecond
+		if (amount % 1000 != 0) {
+			return false;
+		}
+		result.micros = amount / 1000;
 	} else {
 		return false;
 	}
@@ -176,9 +130,7 @@ static bool TryParseInteger(const string &input, int64_t &result) {
 			return false;
 		}
 	}
-	errno = 0;
-	result = std::strtoll(text.c_str(), nullptr, 10);
-	return errno != ERANGE;
+	return TryCast::Operation<string_t, int64_t>(string_t(text), result);
 }
 
 static bool TryParsePositiveInteger(const string &input, int64_t &result) {
@@ -221,10 +173,6 @@ static bool TryParseRelativeDate(const string &input, bool &is_relative, int64_t
 	return TryParseDateUnit(unit, amount, offset);
 }
 
-static interval_t Negate(interval_t interval) {
-	return {-interval.months, -interval.days, -interval.micros};
-}
-
 shared_ptr<const PartitionProjection> PartitionProjection::FromTable(const GlueTableInfo &table) {
 	if (!table.IsPartitionProjected()) {
 		return nullptr;
@@ -258,13 +206,21 @@ shared_ptr<const PartitionProjection> PartitionProjection::FromTable(const GlueT
 			if (values.empty()) {
 				throw invalid(column.name, "values", values, "a comma-separated list of values");
 			}
-			key.values = StringUtil::Split(values, ',');
+			unordered_set<string> seen;
+			for (auto &value : StringUtil::Split(values, string(","))) {
+				if (!value.empty() && seen.insert(value).second) {
+					key.values.push_back(value);
+				}
+			}
 		} else if (type == "integer") {
 			key.type = ProjectionType::INTEGER;
 			auto range = property(column.name, "range");
 			auto bounds = StringUtil::Split(range, ',');
 			if (bounds.size() != 2 || !TryParseInteger(bounds[0], key.min) || !TryParseInteger(bounds[1], key.max)) {
 				throw invalid(column.name, "range", range, "two comma-separated integers");
+			}
+			if (key.min > key.max) {
+				throw invalid(column.name, "range", range, "a lower bound that is not after the upper bound");
 			}
 			auto interval = property(column.name, "interval");
 			if (!interval.empty() && !TryParsePositiveInteger(interval, key.step)) {
@@ -282,8 +238,14 @@ shared_ptr<const PartitionProjection> PartitionProjection::FromTable(const GlueT
 			if (pattern.empty()) {
 				throw invalid(column.name, "format", pattern, "a date format");
 			}
-			DatePrecision precision;
-			key.format = JavaPatternToStrftime(table_name, column.name, pattern, precision);
+			if (!JodaPatternToStrptime(pattern, key.format, true)) {
+				throw NotImplementedException(
+				    "Hive table '%s' projects partition column '%s' with the date format '%s', "
+				    "which DuckDB can not write: the supported letters are y, M, d, H, h, m, "
+				    "s, SSS and a, with quoted text, and a year is required",
+				    table_name, column.name, pattern);
+			}
+			auto precision = FormatPrecision(key.format);
 			auto range = property(column.name, "range");
 			auto bounds = StringUtil::Split(range, ',');
 			if (bounds.size() != 2) {
@@ -297,20 +259,33 @@ shared_ptr<const PartitionProjection> PartitionProjection::FromTable(const GlueT
 			if (!interval.empty() && !TryParsePositiveInteger(interval, step)) {
 				throw invalid(column.name, "interval", interval, "a positive integer");
 			}
+			interval_t unit_check;
+			if (!unit.empty() && !TryParseDateUnit(unit, 1000, unit_check)) {
+				throw invalid(column.name, "interval.unit", unit,
+				              "a java.time ChronoUnit from MILLENNIA to NANOS (a multiple of 1000)");
+			}
+			// as Athena: the interval and its unit count only together, otherwise one of the format's finest field
+			if (interval.empty() || unit.empty()) {
+				step = 1;
+				unit.clear();
+			}
 			if (unit.empty()) {
 				if (precision == DatePrecision::DAY) {
 					unit = "DAYS";
 				} else if (precision == DatePrecision::MONTH) {
 					unit = "MONTHS";
+				} else if (precision == DatePrecision::YEAR) {
+					unit = "YEARS";
 				} else {
-					throw InvalidInputException("Hive table '%s' needs 'projection.%s.interval.unit' for the date "
-					                            "format '%s' of partition column '%s'",
-					                            table_name, column.name, pattern, column.name);
+					throw InvalidInputException("Hive table '%s' needs both 'projection.%s.interval' and "
+					                            "'projection.%s.interval.unit' for the date format '%s' of partition "
+					                            "column '%s'",
+					                            table_name, column.name, column.name, pattern, column.name);
 				}
 			}
 			if (!TryParseDateUnit(unit, step, key.interval)) {
 				throw invalid(column.name, "interval.unit", unit,
-				              "YEARS, MONTHS, WEEKS, DAYS, HOURS, MINUTES, SECONDS or MILLIS");
+				              "a java.time ChronoUnit from MILLENNIA to NANOS (a multiple of 1000)");
 			}
 			auto column_type = StringUtil::Lower(Trim(column.type));
 			if (column_type == "date") {
@@ -320,6 +295,12 @@ shared_ptr<const PartitionProjection> PartitionProjection::FromTable(const GlueT
 			}
 		} else if (type == "injected") {
 			key.type = ProjectionType::INJECTED;
+			if (StringUtil::StartsWith(StringUtil::Lower(Trim(column.type)), "timestamp")) {
+				// as in Athena
+				throw NotImplementedException("Hive table '%s' can not project the timestamp partition column '%s' "
+				                              "with the type injected",
+				                              table_name, column.name);
+			}
 		} else {
 			throw invalid(column.name, "type", type, "enum, integer, date or injected");
 		}
@@ -334,6 +315,21 @@ shared_ptr<const PartitionProjection> PartitionProjection::FromTable(const GlueT
 				                            table_name, key.name, key.name);
 			}
 		}
+		auto &location_template = result->location_template;
+		for (auto start = location_template.find("${"); start != string::npos;
+		     start = location_template.find("${", start + 2)) {
+			auto end = location_template.find('}', start);
+			auto name = location_template.substr(start + 2, end == string::npos ? string::npos : end - start - 2);
+			bool is_key = false;
+			for (auto &key : result->keys) {
+				is_key = is_key || key.name == name;
+			}
+			if (!is_key) {
+				throw InvalidInputException("Hive table '%s' has a 'storage.location.template' with the placeholder "
+				                            "${%s}, which is not one of its partition columns",
+				                            table_name, name);
+			}
+		}
 		while (!result->location_template.empty() && result->location_template.back() == '/') {
 			result->location_template.pop_back();
 		}
@@ -342,7 +338,8 @@ shared_ptr<const PartitionProjection> PartitionProjection::FromTable(const GlueT
 }
 
 static string ZeroPad(int64_t value, idx_t digits) {
-	auto text = std::to_string(value < 0 ? -value : value);
+	auto magnitude = value < 0 ? ~static_cast<uint64_t>(value) + 1 : static_cast<uint64_t>(value);
+	auto text = std::to_string(magnitude);
 	// as Java's %0<digits>d: the width includes the sign
 	auto width = value < 0 && digits > 0 ? digits - 1 : digits;
 	if (text.size() < width) {
@@ -351,11 +348,28 @@ static string ZeroPad(int64_t value, idx_t digits) {
 	return value < 0 ? "-" + text : text;
 }
 
-vector<ProjectedValue> PartitionProjection::Values(ClientContext &context, idx_t key_index) const {
+idx_t PartitionProjection::IntegerCount(idx_t key_index) const {
 	auto &key = keys[key_index];
+	auto count = (static_cast<uint64_t>(key.max) - static_cast<uint64_t>(key.min)) / static_cast<uint64_t>(key.step);
+	return count == NumericLimits<uint64_t>::Maximum() ? count : count + 1;
+}
+
+idx_t PartitionProjection::MaxPartitions(ClientContext &context) {
+	Value setting;
+	if (context.TryGetCurrentSetting("glue_projection_max_partitions", setting) && !setting.IsNull()) {
+		return setting.GetValue<idx_t>();
+	}
+	return DEFAULT_MAX_PARTITIONS;
+}
+
+vector<ProjectedValue> PartitionProjection::Values(ClientContext &context, idx_t key_index, int64_t lo,
+                                                   int64_t hi) const {
+	auto &key = keys[key_index];
+	// the values of one key are enumerated before the filters narrow them
+	static constexpr idx_t MAX_VALUES = 10000000;
 	auto too_many = [&]() {
 		return InvalidInputException("Hive table '%s' projects more than %llu values for partition column '%s'",
-		                             table_name, idx_t(MAX_PARTITIONS), key.name);
+		                             table_name, MAX_VALUES, key.name);
 	};
 	vector<ProjectedValue> result;
 	switch (key.type) {
@@ -365,22 +379,40 @@ vector<ProjectedValue> PartitionProjection::Values(ClientContext &context, idx_t
 		}
 		break;
 	case ProjectionType::INTEGER: {
-		if (key.min > key.max) {
+		// the first value on the interval's grid from lo, and the last up to hi
+		auto step = static_cast<uint64_t>(key.step);
+		uint64_t first = 0;
+		if (lo > key.min) {
+			auto distance = static_cast<uint64_t>(lo) - static_cast<uint64_t>(key.min);
+			first = distance / step + (distance % step != 0);
+		}
+		auto top = MinValue(key.max, hi);
+		if (top < key.min || first > (static_cast<uint64_t>(top) - static_cast<uint64_t>(key.min)) / step) {
 			break;
 		}
-		auto count =
-		    (static_cast<uint64_t>(key.max) - static_cast<uint64_t>(key.min)) / static_cast<uint64_t>(key.step) + 1;
-		if (count > MAX_PARTITIONS) {
+		auto count = (static_cast<uint64_t>(top) - static_cast<uint64_t>(key.min)) / step - first + 1;
+		if (count > MAX_VALUES) {
 			throw too_many();
 		}
 		for (idx_t i = 0; i < count; i++) {
-			auto value = ZeroPad(key.min + static_cast<int64_t>(i) * key.step, key.digits);
+			auto value = ZeroPad(static_cast<int64_t>(static_cast<uint64_t>(key.min) + (first + i) * step), key.digits);
 			result.push_back({value, value});
 		}
 		break;
 	}
 	case ProjectionType::DATE: {
 		auto now = MetaTransaction::Get(context).GetCurrentTransactionStartTimestamp();
+		auto parse = [&](const string &text, timestamp_t &result) {
+			StrpTimeFormat::ParseResult parsed;
+			if (!StrpTimeFormat::TryParse(key.format, text, parsed) || !parsed.TryToTimestamp(result)) {
+				return false;
+			}
+			if (StringUtil::Contains(key.format, "%y") && Date::ExtractYear(Timestamp::GetDate(result)) < 2000) {
+				// Java reads yy with the base year 2000, strptime from 1969
+				result = AddOperator::Operation<timestamp_t, interval_t, timestamp_t>(result, {1200, 0, 0});
+			}
+			return true;
+		};
 		auto bound = [&](const string &text) {
 			bool is_relative;
 			int64_t sign;
@@ -392,40 +424,62 @@ vector<ProjectedValue> PartitionProjection::Values(ClientContext &context, idx_t
 			}
 			timestamp_t result;
 			if (is_relative) {
-				result = AddOperator::Operation<timestamp_t, interval_t, timestamp_t>(now, sign < 0 ? Negate(offset)
-				                                                                                    : offset);
-			} else {
-				StrpTimeFormat::ParseResult parsed;
-				if (!StrpTimeFormat::TryParse(key.format, Trim(text), parsed) || !parsed.TryToTimestamp(result)) {
-					throw InvalidInputException("Hive table '%s' has the date '%s' in 'projection.%s.range', which "
-					                            "does not match its format",
-					                            table_name, text, key.name);
-				}
+				result = AddOperator::Operation<timestamp_t, interval_t, timestamp_t>(
+				    now, sign < 0 ? Interval::Invert(offset) : offset);
+			} else if (!parse(Trim(text), result) || StrfTimeFormat::Format(result, key.format) != Trim(text)) {
+				// as Java's strict parse: a field that appears twice has to read the same value
+				throw InvalidInputException("Hive table '%s' has the date '%s' in 'projection.%s.range', which "
+				                            "does not match its format",
+				                            table_name, text, key.name);
 			}
 			// truncated to what the format writes, as a value read back from a location
-			StrpTimeFormat::ParseResult truncated;
-			timestamp_t truncated_result;
-			if (StrpTimeFormat::TryParse(key.format, StrfTimeFormat::Format(result, key.format), truncated) &&
-			    truncated.TryToTimestamp(truncated_result)) {
-				return truncated_result;
-			}
-			return result;
+			timestamp_t truncated;
+			return parse(StrfTimeFormat::Format(result, key.format), truncated) ? truncated : result;
 		};
 		auto start = bound(key.range_start);
 		auto end = bound(key.range_end);
+		if (start > end) {
+			throw InvalidInputException("Hive table '%s' has a 'projection.%s.range' whose lower bound is after its "
+			                            "upper bound",
+			                            table_name, key.name);
+		}
+		// a format may spell the same directory again later ('yyyy a'), not only in consecutive steps
+		unordered_set<string> seen_paths;
 		for (auto current = start; current <= end;) {
 			auto path = StrfTimeFormat::Format(current, key.format);
-			if (result.empty() || result.back().path != path) {
-				if (result.size() == MAX_PARTITIONS) {
+			if (seen_paths.insert(path).second) {
+				if (result.size() == MAX_VALUES) {
 					throw too_many();
 				}
+				// a DATE or TIMESTAMP key reads the directory back with the format, as Athena does
 				string value = path;
-				if (key.value_type == LogicalTypeId::DATE) {
-					value = Date::ToString(Timestamp::GetDate(current));
-				} else if (key.value_type == LogicalTypeId::TIMESTAMP) {
-					value = Timestamp::ToString(current);
+				timestamp_t read_back;
+				if (key.value_type != LogicalTypeId::VARCHAR && parse(path, read_back)) {
+					value = key.value_type == LogicalTypeId::DATE ? Date::ToString(Timestamp::GetDate(read_back))
+					                                              : Timestamp::ToString(read_back);
 				}
 				result.push_back({std::move(value), std::move(path)});
+			}
+			if (key.interval.months == 0) {
+				// a step finer than the format: skip the steps that write the same directory, doubling the skip
+				// a step too long for int64_t microseconds skips nothing
+				int64_t step = 0;
+				if (key.interval.days <=
+				    (NumericLimits<int64_t>::Maximum() - key.interval.micros) / Interval::MICROS_PER_DAY) {
+					step = key.interval.days * Interval::MICROS_PER_DAY + key.interval.micros;
+				}
+				for (int64_t skip = 1; step > 0 && (end.value - current.value) / step >= skip;) {
+					timestamp_t probe(current.value + skip * step);
+					if (StrfTimeFormat::Format(probe, key.format) != result.back().path) {
+						if (skip == 1) {
+							break;
+						}
+						skip = 1;
+						continue;
+					}
+					current = probe;
+					skip = skip <= NumericLimits<int64_t>::Maximum() / 2 ? skip * 2 : skip;
+				}
 			}
 			auto next = AddOperator::Operation<timestamp_t, interval_t, timestamp_t>(current, key.interval);
 			if (next <= current) {
@@ -447,32 +501,57 @@ void PartitionProjection::ThrowMissingInjectedFilter(idx_t key_index) const {
 	                            table_name, keys[key_index].name, keys[key_index].name);
 }
 
-string PartitionProjection::Location(const vector<const ProjectedValue *> &values) const {
+string PartitionProjection::Location(const vector<const string *> &paths) const {
 	if (location_template.empty()) {
 		auto result = root_location;
 		for (idx_t i = 0; i < keys.size(); i++) {
-			result +=
-			    "/" + HivePartitioning::Escape(keys[i].name) + "=" + HivePartitioning::EscapeValue(values[i]->path);
+			result += "/" + keys[i].name + "=" + *paths[i];
 		}
 		return result;
 	}
 	auto result = location_template;
 	for (idx_t i = 0; i < keys.size(); i++) {
-		result = StringUtil::Replace(result, "${" + keys[i].name + "}", values[i]->path);
+		result = StringUtil::Replace(result, "${" + keys[i].name + "}", *paths[i]);
 	}
 	return result;
 }
 
-vector<GluePartitionInfo> PartitionProjection::Combine(const vector<vector<ProjectedValue>> &values) const {
+string PartitionProjection::WriteRoot() const {
+	if (location_template.empty()) {
+		return root_location;
+	}
+	auto scheme = location_template.find("://");
+	auto path_start = scheme == string::npos ? 0 : scheme + 3;
+	auto slash = location_template.rfind('/', location_template.find("${"));
+	auto prefix = slash == string::npos || slash < path_start ? string() : location_template.substr(0, slash);
+	auto path = prefix.substr(MinValue(path_start, prefix.size()));
+	if (path.empty() || path[0] == '/' || StringUtil::Contains(path + "/", "//")) {
+		throw NotImplementedException("Can not write to Hive table '%s': its 'storage.location.template' has no "
+		                              "directory before its first placeholder, or an empty segment in it",
+		                              table_name);
+	}
+	return prefix;
+}
+
+vector<GluePartitionInfo> PartitionProjection::Combine(ClientContext &context,
+                                                       const vector<vector<ProjectedValue>> &values) const {
 	D_ASSERT(values.size() == keys.size());
+	auto max_partitions = MaxPartitions(context);
 	uint64_t count = 1;
 	for (auto &key_values : values) {
-		count *= key_values.size();
-		if (count > MAX_PARTITIONS) {
-			throw InvalidInputException("Hive table '%s' projects more than %llu partitions for the query; filter its "
-			                            "partition columns to read fewer",
-			                            table_name, idx_t(MAX_PARTITIONS));
+		if (key_values.empty()) {
+			count = 0;
+			break;
 		}
+	}
+	for (idx_t i = 0; count > 0 && i < values.size(); i++) {
+		if (values[i].size() > max_partitions / count) {
+			throw InvalidInputException("Scan of Glue table '%s' would list more than %llu derived partitions after "
+			                            "pruning (glue_projection_max_partitions); filter on the partition columns or "
+			                            "raise the setting",
+			                            table_name, max_partitions);
+		}
+		count *= values[i].size();
 	}
 	vector<GluePartitionInfo> result;
 	if (count == 0) {
@@ -480,12 +559,12 @@ vector<GluePartitionInfo> PartitionProjection::Combine(const vector<vector<Proje
 	}
 	result.reserve(count);
 	vector<idx_t> positions(values.size(), 0);
-	vector<const ProjectedValue *> current(values.size());
+	vector<const string *> current(values.size());
 	while (true) {
 		GluePartitionInfo partition;
 		for (idx_t i = 0; i < values.size(); i++) {
-			current[i] = &values[i][positions[i]];
-			partition.values.push_back(current[i]->value);
+			current[i] = &values[i][positions[i]].path;
+			partition.values.push_back(values[i][positions[i]].value);
 		}
 		partition.location = Location(current);
 		result.push_back(std::move(partition));
@@ -502,6 +581,92 @@ vector<GluePartitionInfo> PartitionProjection::Combine(const vector<vector<Proje
 			}
 		}
 	}
+}
+
+ProjectedPartitionWriter::ProjectedPartitionWriter(ClientContext &context,
+                                                   shared_ptr<const PartitionProjection> projection_p,
+                                                   const vector<LogicalType> &types)
+    : projection(std::move(projection_p)), paths(projection->Keys().size()) {
+	auto &keys = projection->Keys();
+	for (idx_t i = 0; i < keys.size(); i++) {
+		if (keys[i].type == ProjectionType::INJECTED || keys[i].type == ProjectionType::INTEGER) {
+			continue;
+		}
+		for (auto &value : projection->Values(context, i)) {
+			auto typed = GlueTypes::PartitionValue(context, keys[i].name, value.value, types[i]);
+			paths[i].emplace(typed.ToString(), value.path);
+		}
+	}
+}
+
+string ProjectedPartitionWriter::Location(const vector<Value> &values) const {
+	auto &keys = projection->Keys();
+	vector<string> texts(keys.size());
+	vector<const string *> key_paths(keys.size());
+	for (idx_t i = 0; i < keys.size(); i++) {
+		auto refuse = [&](const string &reason) {
+			return InvalidInputException("Can not write to Hive table '%s': partition column '%s' has the value %s, %s",
+			                             projection->TableName(), keys[i].name, values[i].ToSQLString(), reason);
+		};
+		if (values[i].IsNull()) {
+			throw InvalidInputException("Can not write to Hive table '%s': partition column '%s' is NULL, and a "
+			                            "projected partition holds no NULL",
+			                            projection->TableName(), keys[i].name);
+		}
+		texts[i] = values[i].ToString();
+		if (keys[i].type == ProjectionType::INJECTED) {
+			if (texts[i].empty()) {
+				throw refuse("and an injected key has no empty value");
+			}
+			key_paths[i] = &texts[i];
+			continue;
+		}
+		auto not_derived = [&]() {
+			return refuse(StringUtil::Format("which its projection (projection.%s.*) does not derive", keys[i].name));
+		};
+		if (keys[i].type == ProjectionType::INTEGER) {
+			// in the range and on the interval's grid, and for a string column spelled padded as the scan reads it
+			auto &key = keys[i];
+			auto number = values[i].DefaultTryCastAs(LogicalType::BIGINT);
+			if (!number) {
+				throw not_derived();
+			}
+			auto value = number->GetValue<int64_t>();
+			if (!values[i].type().IsIntegral() && values[i].type().id() != LogicalTypeId::VARCHAR) {
+				// a fraction is no integer value
+				auto back = number->DefaultTryCastAs(values[i].type());
+				if (!back || *back != values[i]) {
+					throw not_derived();
+				}
+			}
+			if (value < key.min || value > key.max ||
+			    (static_cast<uint64_t>(value) - static_cast<uint64_t>(key.min)) % static_cast<uint64_t>(key.step) !=
+			        0) {
+				throw not_derived();
+			}
+			auto path = ZeroPad(value, key.digits);
+			if (values[i].type().id() == LogicalTypeId::VARCHAR && path != texts[i]) {
+				throw not_derived();
+			}
+			texts[i] = std::move(path);
+			key_paths[i] = &texts[i];
+			continue;
+		}
+		auto entry = paths[i].find(texts[i]);
+		if (entry == paths[i].end()) {
+			throw not_derived();
+		}
+		key_paths[i] = &entry->second;
+	}
+	auto location = projection->Location(key_paths);
+	auto scheme = location.find("://");
+	auto path = location.substr(scheme == string::npos ? 0 : scheme + 3) + "/";
+	if (StringUtil::Contains(path, "//") || StringUtil::Contains(path, "/./") || StringUtil::Contains(path, "/../")) {
+		throw InvalidInputException("Can not write to Hive table '%s': the partition location '%s' has an empty, '.' "
+		                            "or '..' segment",
+		                            projection->TableName(), location);
+	}
+	return location;
 }
 
 } // namespace duckdb

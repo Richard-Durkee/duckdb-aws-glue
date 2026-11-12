@@ -4,9 +4,12 @@
 
 namespace duckdb {
 
-bool JodaPatternToStrptime(const string &pattern, string &result) {
+bool JodaPatternToStrptime(const string &pattern, string &result, bool exact_widths) {
 	result.clear();
 	bool has_year = false;
+	auto field = [&](idx_t count, const char *code) {
+		result += exact_widths && count == 1 ? string("%-") + code : string("%") + code;
+	};
 	auto append_literal = [&](char c) {
 		result += c == '%' ? string("%%") : string(1, c);
 	};
@@ -40,6 +43,10 @@ bool JodaPatternToStrptime(const string &pattern, string &result) {
 			continue;
 		}
 		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+			if (exact_widths && StringUtil::Contains("[]{}#", string(1, c))) {
+				// reserved by Java's DateTimeFormatter
+				return false;
+			}
 			append_literal(c);
 			i++;
 			continue;
@@ -49,28 +56,36 @@ bool JodaPatternToStrptime(const string &pattern, string &result) {
 			count++;
 		}
 		i += count;
+		if (exact_widths && (c == 'E' || count > (c == 'M' || c == 'y' ? 4 : c == 'S' ? count : 2))) {
+			// a width Java writes and strftime can not
+			return false;
+		}
 		switch (c) {
 		case 'y':
 			result += count == 2 ? "%y" : "%Y";
 			has_year = true;
 			break;
 		case 'M':
-			result += count >= 4 ? "%B" : count == 3 ? "%b" : "%m";
+			if (count >= 3) {
+				result += count >= 4 ? "%B" : "%b";
+			} else {
+				field(count, "m");
+			}
 			break;
 		case 'd':
-			result += "%d";
+			field(count, "d");
 			break;
 		case 'H':
-			result += "%H";
+			field(count, "H");
 			break;
 		case 'h':
-			result += "%I";
+			field(count, "I");
 			break;
 		case 'm':
-			result += "%M";
+			field(count, "M");
 			break;
 		case 's':
-			result += "%S";
+			field(count, "S");
 			break;
 		case 'S':
 			if (count != 3) {

@@ -15,7 +15,7 @@ attach '{GLUE_CATALOG_ID}' as my_datalake (
     DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
 );
 
-foreach table pp_enum_int pp_date_template pp_date_key pp_hours pp_now pp_injected pp_bad pp_disabled pp_wide
+foreach table pp_enum_int pp_date_template pp_date_key pp_hours pp_now pp_injected pp_bad pp_disabled pp_wide pp_big pp_inj_shapes pp_names pp_steps
 
 statement ok
 DROP TABLE IF EXISTS my_datalake.default.{table};
@@ -84,11 +84,31 @@ SELECT count(*) FROM my_datalake.default.pp_enum_int;
 ----
 3
 
-# writes would register partitions in Glue, which the table does not read
-statement error
+# a write goes to the partition the projection derives for the row and registers nothing in Glue
+statement ok
 INSERT INTO my_datalake.default.pp_enum_int VALUES (6, 'us', '01');
+
+query I
+SELECT id FROM my_datalake.default.pp_enum_int WHERE region = 'us' AND n = '01' ORDER BY id;
 ----
-the table uses Athena partition projection (projection.enabled)
+1
+6
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.default.pp_enum_int');
+----
+1
+
+# a value the projection does not derive fails the write
+statement error
+INSERT INTO my_datalake.default.pp_enum_int VALUES (7, 'ap', '01');
+----
+partition column 'region' has the value 'ap', which its projection (projection.region.*) does not derive
+
+statement error
+INSERT INTO my_datalake.default.pp_enum_int VALUES (7, 'us', '1');
+----
+partition column 'n' has the value '1', which its projection (projection.n.*) does not derive
 
 #---------------------------------------------------------------------------
 # a date key in its own format, at a storage.location.template
@@ -182,7 +202,7 @@ ALTER TABLE my_datalake.default.pp_hours SET ('projection.h.interval.unit' = '')
 statement error
 SELECT * FROM my_datalake.default.pp_hours;
 ----
-needs 'projection.h.interval.unit'
+needs both 'projection.h.interval' and 'projection.h.interval.unit'
 
 #---------------------------------------------------------------------------
 # a range relative to the current time
@@ -195,9 +215,12 @@ CREATE TABLE my_datalake.default.pp_now (id INTEGER, dt VARCHAR) PARTITIONED BY 
     'projection.dt.format' = 'yyyy-MM-dd',
     'projection.dt.range' = 'NOW - 2 DAYS,NOW');
 
-# today and the two days before; not three days ago
+# today and the two days before, in UTC from the start of the transaction; not three days ago
 statement ok
-COPY (SELECT i AS id, strftime(get_current_timestamp()::TIMESTAMP::DATE - i::INTEGER, '%Y-%m-%d') AS dt FROM range(4) t(i))
+BEGIN;
+
+statement ok
+COPY (SELECT i AS id, strftime(make_timestamp(epoch_us(get_current_timestamp()))::DATE - i::INTEGER, '%Y-%m-%d') AS dt FROM range(4) t(i))
 TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_now' (FORMAT parquet, PARTITION_BY (dt), OVERWRITE_OR_IGNORE);
 
 query I
@@ -206,6 +229,9 @@ SELECT id FROM my_datalake.default.pp_now ORDER BY id;
 0
 1
 2
+
+statement ok
+COMMIT;
 
 #---------------------------------------------------------------------------
 # an injected key takes its values from the query's filter
@@ -266,7 +292,228 @@ SELECT id FROM my_datalake.default.pp_wide WHERE n = '12345';
 statement error
 SELECT count(*) FROM my_datalake.default.pp_wide;
 ----
-projects more than 1000000 partitions for the query
+would list more than 100000 derived partitions after pruning (glue_projection_max_partitions)
+
+#---------------------------------------------------------------------------
+# an integer key over the whole BIGINT range: a range, an equality or an IN narrows it without enumerating the range
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_big (id INTEGER, account BIGINT, hour INTEGER) PARTITIONED BY (account, hour) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_big',
+    'projection.enabled' = 'true',
+    'projection.account.type' = 'integer',
+    'projection.account.range' = '0,9223372036854775807',
+    'projection.hour.type' = 'integer',
+    'projection.hour.range' = '0,23');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_big/account=5/hour=2/a.parquet';
+
+query I
+SELECT id FROM my_datalake.default.pp_big WHERE account BETWEEN 4 AND 6 AND hour = 2;
+----
+1
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_big WHERE account > 3 AND account <= 6 AND hour = 2;
+----
+physical_plan	<REGEX>:.*Hive Scan.*File Filters.*
+
+query I
+SELECT id FROM my_datalake.default.pp_big WHERE account IN (5, 9000000000000000000) AND hour = 2;
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_big WHERE (account = 5 OR account IS NULL) AND hour = 2;
+----
+1
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_big WHERE account IS NULL;
+----
+0
+
+# a cast between integer types keeps or fails the value, so it still names the key; a predicate that names no value
+# leaves the range to enumerate
+query I
+SELECT id FROM my_datalake.default.pp_big WHERE CAST(account AS INTEGER) = 5 AND hour = 2;
+----
+1
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_big WHERE account % 7 = 5 AND hour = 2;
+----
+projects more than 10000000 values for partition column 'account'
+
+# glue_projection_max_partitions caps the partitions derived after the filters
+statement ok
+SET glue_projection_max_partitions = 3;
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_big WHERE account = 5 AND hour < 4;
+----
+would list more than 3 derived partitions after pruning (glue_projection_max_partitions)
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_big WHERE account = 5 AND hour < 3;
+----
+1
+
+statement ok
+RESET glue_projection_max_partitions;
+
+# a copy of the scan made before its filters are pushed (a CTE inlined twice) derives with its own filters
+query I
+WITH p AS NOT MATERIALIZED (SELECT id FROM my_datalake.default.pp_big WHERE account = 5 AND hour = 2)
+SELECT * FROM p UNION ALL SELECT * FROM p;
+----
+1
+1
+
+#---------------------------------------------------------------------------
+# an injected key takes its values from =, IN, an OR of them, or NOT (NOT ...); NULL and '' name no value
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_inj_shapes (id INTEGER, k VARCHAR) PARTITIONED BY (k) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_shapes',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'injected');
+
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_shapes/k=a/f.parquet';
+
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_inj_shapes/k=b/f.parquet';
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_shapes WHERE k = 'a' OR k = 'b' ORDER BY id;
+----
+1	a
+2	b
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_shapes WHERE k = 'a' OR k IS NULL;
+----
+1	a
+
+query II
+SELECT id, k FROM my_datalake.default.pp_inj_shapes WHERE NOT (k NOT IN ('a', 'b')) ORDER BY id;
+----
+1	a
+2	b
+
+query I
+SELECT count(*) FROM my_datalake.default.pp_inj_shapes WHERE k IN ('a', 'a');
+----
+1
+
+foreach predicate k='' k<>'a' k~~'a%'
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_shapes WHERE {predicate};
+----
+must filter 'k' with = or IN
+
+endloop
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_inj_shapes WHERE k IS NULL;
+----
+must filter 'k' with = or IN
+
+#---------------------------------------------------------------------------
+# values are written as they are: no escaping, glob characters name a directory, and a '_' or '.' at the start of a
+# component below the partition is not a hidden file, from one listing per partition and one of the root alike
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_names (id INTEGER, k VARCHAR) PARTITIONED BY (k) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_names',
+    'projection.enabled' = 'true',
+    'projection.k.type' = 'enum',
+    'projection.k.values' = 'a[b],a*, x y,p+q,_u,c/.d,ab,ab');
+
+statement ok
+INSERT INTO my_datalake.default.pp_names VALUES (1, 'a[b]'), (2, 'a*'), (3, ' x y'), (4, 'p+q'), (5, '_u'), (6, 'c/.d');
+
+statement ok
+COPY (SELECT 7 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_names/k=ab/f.parquet';
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_names/k=p+q/*.parquet');
+----
+1
+
+foreach threshold 1 100
+
+statement ok
+SET hive_partition_listing_threshold = {threshold};
+
+query II
+SELECT id, k FROM my_datalake.default.pp_names ORDER BY id;
+----
+1	a[b]
+2	a*
+3	 x y
+4	p+q
+5	_u
+6	c/.d
+7	ab
+
+endloop
+
+statement ok
+RESET hive_partition_listing_threshold;
+
+#---------------------------------------------------------------------------
+# date steps: an interval without its unit (or a unit without its interval) is ignored, a step finer than the format
+# spells each directory once, yy is a year from 2000, and a bound has to read back as written
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.default.pp_steps (id INTEGER, m VARCHAR) PARTITIONED BY (m) WITH (
+    location = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/pp_steps',
+    'projection.enabled' = 'true',
+    'projection.m.type' = 'date',
+    'projection.m.format' = 'yyyy-MM',
+    'projection.m.range' = '2024-01,2024-05',
+    'projection.m.interval' = '2');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_steps WHERE m = '2024-02';
+----
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/5.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_steps SET ('projection.m.interval' = '1', 'projection.m.interval.unit' = 'MICROS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_steps WHERE m = '2024-02';
+----
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/5.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_steps SET ('projection.m.format' = 'yy', 'projection.m.range' = '98,99', 'projection.m.interval.unit' = 'YEARS');
+
+query II
+EXPLAIN SELECT count(*) FROM my_datalake.default.pp_steps WHERE m = '99';
+----
+physical_plan	<REGEX>:.*Hive Scan.*Scanning Files: 1/2.*
+
+statement ok
+ALTER TABLE my_datalake.default.pp_steps SET ('projection.m.range' = '99,01');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_steps;
+----
+whose lower bound is after its upper bound
+
+statement ok
+ALTER TABLE my_datalake.default.pp_steps SET ('projection.m.format' = 'yyyy-MM-MMM', 'projection.m.range' = '2024-01-Jan,2024-03-Apr');
+
+statement error
+SELECT count(*) FROM my_datalake.default.pp_steps;
+----
+which does not match its format
 
 #---------------------------------------------------------------------------
 # configurations that are refused
@@ -320,7 +567,7 @@ ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.format' = 'yyyy-MM-dd 
 statement error
 SELECT * FROM my_datalake.default.pp_bad;
 ----
-which uses the pattern letter 'z'
+with the date format 'yyyy-MM-dd zzz', which DuckDB can not write
 
 statement ok
 ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.format' = 'yyyy-DD');
@@ -328,7 +575,7 @@ ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.format' = 'yyyy-DD');
 statement error
 SELECT * FROM my_datalake.default.pp_bad;
 ----
-which uses 'DD' (only D and DDD are supported)
+with the date format 'yyyy-DD', which DuckDB can not write
 
 statement ok
 ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.type' = 'integer', 'projection.b.range' = '-4611686018427387904,4611686018427387904', 'projection.b.interval' = '1', 'projection.b.digits' = '1');
@@ -336,7 +583,7 @@ ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.type' = 'integer', 'pr
 statement error
 SELECT * FROM my_datalake.default.pp_bad;
 ----
-projects more than 1000000 values for partition column 'b'
+projects more than 10000000 values for partition column 'b'
 
 statement ok
 ALTER TABLE my_datalake.default.pp_bad SET ('projection.b.type' = 'date', 'projection.b.format' = 'yyyy-MM-dd', 'storage.location.template' = '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/pp_bad/${a}/');
@@ -364,7 +611,7 @@ SELECT id, region FROM my_datalake.default.pp_disabled;
 ----
 1	eu
 
-foreach table pp_enum_int pp_date_template pp_date_key pp_hours pp_now pp_injected pp_bad pp_disabled pp_wide
+foreach table pp_enum_int pp_date_template pp_date_key pp_hours pp_now pp_injected pp_bad pp_disabled pp_wide pp_big pp_inj_shapes pp_names pp_steps
 
 statement ok
 DROP TABLE my_datalake.default.{table};

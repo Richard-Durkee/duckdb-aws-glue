@@ -1,4 +1,4 @@
-# Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/README.md.
+# Runs the sqllogictests against a local Glue (moto) + S3 (MinIO), see scripts/docker-compose.yml and docs/development.md.
 #
 # A release build with DuckDB's assertions and the sanitizers on, i.e. relassert without debug info.
 

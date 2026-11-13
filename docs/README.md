@@ -528,6 +528,27 @@ descriptor with its columns, which the scan checks the partitions it reads again
 Against AWS, listing the 2526 partitions of a TPC-H SF1 `lineitem` took ~2.1s before and ~0.45s with the default of
 8 segments; `SET glue_get_partitions_segments = 1` restores one request at a time.
 
+## Handing over table definitions
+
+A caller that has already fetched a table's Glue definition can give it to the connection, so that binding the table
+calls no `GetTable`:
+
+```sql
+CALL glue_preload_tables([
+    {'table': 'my_datalake.tpcds.store_sales', 'definition': '<the Glue Table object as JSON>'},
+    {'table': 'my_datalake.tpcds.date_dim',    'definition': '<...>'}
+]);
+```
+
+The definition is a Glue `Table` object as JSON, exactly as `GetTable` returns it (and as `glue_get_table_response`
+reports in its `response` column). The table name must be fully qualified, since resolving a partial one would look the
+table up, which is the call this avoids. One row is returned per table.
+
+The definitions live with the connection, so the statements after the call use them, and they are read in place of a
+`GetTable` for as long as they are there. The partitions of a partitioned table are still fetched from Glue. Any
+mutation through this connection drops them all, because what Glue holds may no longer be what was given. Nothing
+checks the definition against Glue: a table that does not exist there binds and then fails to read.
+
 ## Inspecting tables
 
 Every table entry carries its format in `duckdb_tables().tags['table_type']` (`HIVE`, `ICEBERG`, `DELTA`, `HUDI`,

@@ -61,6 +61,9 @@ public:
 	//! object of the response as JSON.
 	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                     const string &table_name, GlueTableInfo &result, string *raw_json = nullptr);
+	//! The table a Glue 'Table' object in JSON describes, as GetTable would have returned it for 'database_name'.
+	//! Throws when the JSON is not a Glue table of that name
+	static GlueTableInfo TableFromJson(const string &json, const string &database_name, const string &table_name);
 
 	//! Create a database
 	static GlueCreateOutcome CreateDatabase(ClientContext &context, GlueCatalog &catalog,

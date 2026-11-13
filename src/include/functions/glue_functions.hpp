@@ -26,12 +26,18 @@ struct GluePartitionTarget {
 //! require_partitions, unpartitioned tables
 GluePartitionTarget ResolveGlueTable(ClientContext &context, const string &function_name, const Value &table_name,
                                      bool require_partitions = true);
+//! A struct field by name (case-insensitive), NULL if the struct has no such field
+Value GetStructField(const Value &value, const string &field_name);
 //! GlueTypes::PartitionValue, but a partition value that can't be cast to the key's type is NULL instead of throwing,
 //! so one bad partition doesn't make the whole glue_partitions() listing fail (e.g. 'abc' for an INT key lists as
 //! NULL).
 Value PartitionListingValue(ClientContext &context, const string &key, const string &str_value,
                             const LogicalType &type);
 
+//! glue_preload_tables([{table: '<catalog>.<database>.<table>', definition: '<Glue Table JSON>'}, ...]): give the
+//! connection the Glue definitions of tables it is about to read, so that binding them calls no GetTable. One row per
+//! table. For a caller that has fetched the definitions already; any mutation drops them
+TableFunction GetGluePreloadTablesFunction();
 //! glue_get_table_response('<catalog>.<schema>.<table>'): the Glue GetTable response for a table of an attached
 //! Glue catalog (a partially qualified name is resolved like in a query), for inspecting what Glue knows about a table.
 //! One row with the most useful fields as columns and the complete Glue Table object as VARIANT.

@@ -696,18 +696,6 @@ unique_ptr<GlobalTableFunctionState> GlueAlterTableInit(ClientContext &context, 
 	return make_uniq<GlueAlterTableState>();
 }
 
-//! A struct field by name (case-insensitive), NULL if the struct has no such field
-Value GetStructField(const Value &value, const string &field_name) {
-	auto &types = StructType::GetChildTypes(value.type());
-	auto &children = StructValue::GetChildren(value);
-	for (idx_t i = 0; i < types.size(); i++) {
-		if (StringUtil::CIEquals(types[i].first.GetIdentifierName(), field_name)) {
-			return children[i];
-		}
-	}
-	return Value();
-}
-
 //! A partition given as a list of {key, value} structs (value NULL for the default partition)
 vector<string> ParsePartitionPairsValue(const string &function_name, const GluePartitionTarget &target,
                                         const Value &pairs) {

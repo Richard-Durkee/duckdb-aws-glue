@@ -1,5 +1,7 @@
 #include "functions/glue_functions.hpp"
 
+#include "catalog/glue_preloaded_tables.hpp"
+
 #include "duckdb/catalog/catalog.hpp"
 #include "duckdb/catalog/entry_lookup_info.hpp"
 #include "duckdb/common/exception.hpp"
@@ -159,7 +161,74 @@ void GlueGetDatabaseResponseScan(ClientContext &context, TableFunctionInput &dat
 	output.CheckCardinality(1);
 }
 
+struct GluePreloadTablesBindData : public TableFunctionData {
+	//! The catalog each definition was given for, and the definition
+	vector<std::pair<string, shared_ptr<const GlueTableInfo>>> tables;
+
+	//! The definitions come from the arguments: a prepared statement binds again on every execution
+	bool SupportStatementCache() const override {
+		return false;
+	}
+};
+
+unique_ptr<FunctionData> GluePreloadTablesBind(ClientContext &context, TableFunctionBindInput &input,
+                                               vector<LogicalType> &return_types, vector<Identifier> &names) {
+	auto &definitions = input.inputs[0];
+	if (definitions.IsNull() || definitions.type().id() != LogicalTypeId::LIST) {
+		throw BinderException("glue_preload_tables expects a list of {table, definition}");
+	}
+	auto result = make_uniq<GluePreloadTablesBindData>();
+	for (auto &entry : ListValue::GetChildren(definitions)) {
+		auto table_field = GetStructField(entry, "table");
+		auto definition_field = GetStructField(entry, "definition");
+		if (table_field.IsNull() || definition_field.IsNull()) {
+			throw BinderException("glue_preload_tables expects a list of {table, definition}");
+		}
+		auto qualified_name = table_field.ToString();
+		auto parsed = QualifiedName::Parse(qualified_name);
+		if (parsed.Catalog().empty() || parsed.Schema().empty()) {
+			// resolving a partial name would look the table up, which is the call this function exists to avoid
+			throw BinderException("glue_preload_tables needs the catalog and database of '%s'", qualified_name);
+		}
+		auto name = ResolveGlueTableName(context, "glue_preload_tables", qualified_name);
+		auto database_name = name.Schema().GetIdentifierName();
+		auto table =
+		    GlueAPI::TableFromJson(definition_field.ToString(), database_name, name.Name().GetIdentifierName());
+		result->tables.emplace_back(name.Catalog().GetIdentifierName(),
+		                            make_shared_ptr<const GlueTableInfo>(std::move(table)));
+	}
+	names = {"database_name", "table_name"};
+	return_types = {LogicalType::VARCHAR, LogicalType::VARCHAR};
+	return std::move(result);
+}
+
+void GluePreloadTablesScan(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+	auto &state = data.global_state->Cast<GlueGetTableResponseState>();
+	if (state.done) {
+		return;
+	}
+	state.done = true;
+	auto &bind_data = data.bind_data->Cast<GluePreloadTablesBindData>();
+	for (auto &entry : bind_data.tables) {
+		GluePreloadedTables::Put(context, entry.first, entry.second);
+		output.data[0].Append(Value(entry.second->schema_name));
+		output.data[1].Append(Value(entry.second->name));
+	}
+	output.SetCardinality(bind_data.tables.size());
+}
+
 } // namespace
+
+Value GetStructField(const Value &value, const string &field_name) {
+	auto &types = StructType::GetChildTypes(value.type());
+	auto &children = StructValue::GetChildren(value);
+	for (idx_t i = 0; i < types.size(); i++) {
+		if (StringUtil::CIEquals(types[i].first.GetIdentifierName(), field_name)) {
+			return children[i];
+		}
+	}
+	return Value();
+}
 
 LogicalType GlueColumnsType() {
 	return LogicalType::LIST(LogicalType::STRUCT(
@@ -210,6 +279,14 @@ QualifiedName ResolveGlueTableName(ClientContext &context, const string &functio
 TableFunction GetGlueGetDatabaseResponseFunction() {
 	TableFunction function("glue_get_database_response", {LogicalType::VARCHAR}, GlueGetDatabaseResponseScan,
 	                       GlueGetDatabaseResponseBind, GlueGetTableResponseInit);
+	return function;
+}
+
+TableFunction GetGluePreloadTablesFunction() {
+	TableFunction function("glue_preload_tables",
+	                       {LogicalType::LIST(LogicalType::STRUCT(
+	                           {{"table", LogicalType::VARCHAR}, {"definition", LogicalType::VARCHAR}}))},
+	                       GluePreloadTablesScan, GluePreloadTablesBind, GlueGetTableResponseInit);
 	return function;
 }
 

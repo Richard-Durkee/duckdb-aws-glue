@@ -4,6 +4,7 @@ add_library_unity(
   glue_attach.cpp
   glue_catalog.cpp
   glue_file_credentials.cpp
+  glue_preloaded_tables.cpp
   glue_schema_entry.cpp
   glue_schema_set.cpp
   glue_table.cpp

@@ -1,5 +1,7 @@
 #include "catalog/glue_transaction.hpp"
+
 #include "catalog/glue_catalog.hpp"
+#include "catalog/glue_preloaded_tables.hpp"
 #include "duckdb/catalog/catalog_entry/view_catalog_entry.hpp"
 #include "planning/hive_query_cache.hpp"
 
@@ -127,6 +129,8 @@ void GlueTransactionCache::Invalidate(ClientContext &context, Catalog &catalog) 
 		state->ClearAll();
 	}
 	ClearHiveListingCache(context);
+	// a definition given before the mutation may describe the table as it no longer is
+	GluePreloadedTables::Clear(context);
 }
 
 bool GlueTransactionCache::ConnectionScoped(ClientContext &context) {

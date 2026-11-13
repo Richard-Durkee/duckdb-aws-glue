@@ -114,6 +114,23 @@ bool GlueAPI::GetTable(ClientContext &context, GlueCatalog &catalog, const strin
 	return true;
 }
 
+GlueTableInfo GlueAPI::TableFromJson(const string &json, const string &database_name, const string &table_name) {
+	Aws::Utils::Json::JsonValue parsed(json);
+	if (!parsed.WasParseSuccessful()) {
+		throw InvalidInputException("Not a Glue table: %s", ToStdString(parsed.GetErrorMessage()));
+	}
+	auto view = parsed.View();
+	if (!view.IsObject() || !view.KeyExists("Name")) {
+		throw InvalidInputException("Not a Glue table: no 'Name'");
+	}
+	Aws::Glue::Model::Table table(view);
+	auto result = ToTableInfo(table, database_name);
+	if (!StringUtil::CIEquals(result.name, table_name)) {
+		throw InvalidInputException("Glue table '%s' was given as the definition of '%s'", result.name, table_name);
+	}
+	return result;
+}
+
 GlueCreateOutcome GlueAPI::CreateHiveTable(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &table) {
 	GlueTransactionCache::InvalidateOnExit invalidate(context, catalog);
 	CheckWritable(catalog, "CreateTable");

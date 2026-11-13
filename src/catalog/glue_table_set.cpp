@@ -1,5 +1,7 @@
 #include "catalog/glue_table_set.hpp"
 
+#include "catalog/glue_preloaded_tables.hpp"
+
 #include "duckdb/common/error_data.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -158,6 +160,11 @@ optional_ptr<CatalogEntry> GlueTableSet::GetEntry(ClientContext &context, const 
 	}
 	bool asked_glue = false;
 	auto load = [&]() -> shared_ptr<const GlueTableInfo> {
+		auto preloaded = GluePreloadedTables::Find(context, catalog.GetName().GetIdentifierName(),
+		                                           schema.GetDatabaseName(), glue_name);
+		if (preloaded) {
+			return preloaded;
+		}
 		asked_glue = true;
 		GlueTableInfo table;
 		if (!GlueAPI::GetTable(context, catalog, schema.GetDatabaseName(), glue_name, table)) {

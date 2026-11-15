@@ -1,4 +1,5 @@
 #include "api/glue_http_client.hpp"
+#include "api/glue_request_metrics.hpp"
 
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -33,6 +34,8 @@
 // HttpClientFactory whose HttpClient forwards every request to HTTPUtil::Get(db). The concrete transport is whatever
 // the DatabaseInstance has registered (httpfs's curl client on native). Requests go through a transport manager
 // session rather than the client directly, so that DuckDB's connection pool, retry and HTTP logging all apply.
+
+#include <chrono>
 
 namespace duckdb {
 
@@ -130,6 +133,16 @@ public:
 	MakeRequest(const std::shared_ptr<Aws::Http::HttpRequest> &request, Aws::Utils::RateLimits::RateLimiterInterface *,
 	            Aws::Utils::RateLimits::RateLimiterInterface *) const override {
 		auto aws_response = Aws::MakeShared<Aws::Http::Standard::StandardHttpResponse>("GlueDuckDBHttp", request);
+		auto start = std::chrono::steady_clock::now();
+		auto record = [&]() {
+			auto context = GlueHttpClientContextScope::Current();
+			if (context && request->HasHeader("x-amz-target")) {
+				auto elapsed = std::chrono::steady_clock::now() - start;
+				GlueRequestMetrics::Record(
+				    *context, request->GetHeaderValue("x-amz-target").c_str(),
+				    NumericCast<idx_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count()));
+			}
+		};
 		try {
 			string url = EnsureUrlHasPath(request->GetUri().GetURIString(true).c_str());
 
@@ -204,6 +217,7 @@ public:
 
 			if (!response) {
 				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
+				record();
 				return aws_response;
 			}
 			if (response->HasRequestError()) {
@@ -214,6 +228,7 @@ public:
 				aws_response->SetResponseCode(Aws::Http::HttpResponseCode::REQUEST_NOT_MADE);
 				aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
 				aws_response->SetClientErrorMessage(response->GetRequestError().c_str());
+				record();
 				return aws_response;
 			}
 			aws_response->SetResponseCode(static_cast<Aws::Http::HttpResponseCode>(static_cast<int>(response->status)));
@@ -231,6 +246,7 @@ public:
 			aws_response->SetClientErrorType(Aws::Client::CoreErrors::NETWORK_CONNECTION);
 			aws_response->SetClientErrorMessage(ex.what());
 		}
+		record();
 		return aws_response;
 	}
 

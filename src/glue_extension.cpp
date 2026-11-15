@@ -16,6 +16,7 @@
 #include "planning/stats/hive_stats.hpp"
 #include "api/glue_api.hpp"
 #include "api/glue_http_client.hpp"
+#include "api/glue_request_metrics.hpp"
 #include "core/glue_log_types.hpp"
 #include "duckdb/main/extension_helper.hpp"
 
@@ -185,6 +186,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// ATTACH '<catalog id>' (TYPE GLUE)
 	StorageExtension::Register(config, "glue", make_shared_ptr<GlueStorageExtension>());
 
+	GlueRequestMetrics::Register(loader);
 	loader.RegisterFunction(GetGlueGetTableResponseFunction());
 	loader.RegisterFunction(GetGlueGetDatabaseResponseFunction());
 	loader.RegisterFunction(GetGlueGetPartitionResponseFunction());

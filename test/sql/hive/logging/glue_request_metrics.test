@@ -1,0 +1,84 @@
+# name: test/sql/hive/logging/glue_request_metrics.test
+# description: The profiler reports the Glue requests a query makes, in total and per operation
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.grm_orders;
+
+statement ok
+CREATE TABLE my_datalake.default.grm_orders (id BIGINT, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.grm_orders SELECT i, 'd' || (i % 3)::VARCHAR FROM range(30) r(i);
+
+# every metric is listed, so a profiling configuration can ask for them by name
+query I
+SELECT count(*) FROM duckdb_available_metrics() WHERE metric_name LIKE 'glue.%';
+----
+38
+
+query I
+SELECT count(*) FROM duckdb_available_metrics()
+WHERE metric_name IN ('glue.requests', 'glue.request_time', 'glue.get_partitions.requests', 'glue.get_table.request_time');
+----
+4
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEMP_DIR}/glue_request_metrics.json';
+
+# a fresh transaction looks the table up and fetches its partitions
+statement ok
+SELECT count(*) FROM my_datalake.default.grm_orders;
+
+statement ok
+SET enable_profiling = 'no_output';
+
+# the profile nests the names: {"glue": {"requests": ..., "get_partitions": {"requests": ...}}}
+query IIIII
+SELECT (j->>'$.glue.requests')::UBIGINT
+           >= (j->>'$.glue.get_partitions.requests')::UBIGINT + (j->>'$.glue.get_table.requests')::UBIGINT,
+       (j->>'$.glue.get_partitions.requests')::UBIGINT >= 1,
+       (j->>'$.glue.get_table.requests')::UBIGINT >= 1,
+       (j->>'$.glue.request_time')::DOUBLE > 0,
+       (j->>'$.glue.request_time')::DOUBLE >= (j->>'$.glue.get_partitions.request_time')::DOUBLE
+FROM read_json_objects('{TEMP_DIR}/glue_request_metrics.json') t(j);
+----
+true	true	true	true	true
+
+# a query that makes no Glue request reports none
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEMP_DIR}/glue_request_metrics_none.json';
+
+statement ok
+SELECT 42;
+
+statement ok
+SET enable_profiling = 'no_output';
+
+query I
+SELECT coalesce((j->>'$.glue.requests')::UBIGINT, 0)
+FROM read_json_objects('{TEMP_DIR}/glue_request_metrics_none.json') t(j);
+----
+0
+
+statement ok
+DROP TABLE my_datalake.default.grm_orders;

@@ -577,6 +577,19 @@ where the SDK has none).
 `connection_id`, `transaction_id` and `query_id` that made them. Only requests sent through DuckDB's HTTP layer are
 logged.
 
+With profiling enabled, each query's profile also counts its Glue requests: `glue.requests` and `glue.request_time`
+(seconds) over all of them, and `glue.<operation>.requests` and `glue.<operation>.request_time` per operation, e.g.
+`glue.get_partitions.requests`. Retries and pages count as requests, and the time is summed over requests that may
+run at the same time, so it can exceed the query's wall time. `duckdb_available_metrics()` lists them. Like the
+`HTTP` log, they cover requests sent through DuckDB's HTTP layer.
+
+```sql
+SET enable_profiling = 'json';
+SET profiling_output = 'profile.json';
+SELECT count(*) FROM my_datalake.default.orders;
+SELECT j->>'$.glue.requests', j->>'$.glue.get_partitions.request_time' FROM read_json_objects('profile.json') t(j);
+```
+
 The `GlueScan` log type (`INFO`) records what each scan of a Hive table does, one entry per `event`, with the
 `scan_id` that numbers the scans of a query from 1:
 

@@ -610,6 +610,31 @@ CALL enable_logging('GlueRetry', storage = 'memory');
 SELECT error, status, count(*) FROM duckdb_logs_parsed('GlueRetry') GROUP BY ALL;
 ```
 
+With profiling enabled (`PRAGMA enable_profiling = 'json'`) the query profile reports what a query asked of Glue.
+A metric a query did not touch is absent.
+
+- `glue.api_requests`: requests the AWS SDK sent to the Glue API, retries included. The count is per request the SDK
+  sends, not per HTTP attempt: if DuckDB's HTTP transport repeats a request by itself, it is still counted once.
+  Requests to other services, such as the credential calls of an AWS credential chain, are not counted. These requests
+  are also counted in `httpfs.requests`, so `glue.api_requests` is a subset of it.
+- `glue.api_retries`: Glue requests the AWS SDK sent again after a failed attempt. A retry for clock skew does not go
+  through the retry strategy and is not counted here, only in `glue.api_requests`.
+- `glue.api_request_time`: time the Glue API requests took, in microseconds, added up over all threads.
+- `glue.partitions_loaded`: partitions loaded from Glue.
+- `glue.partitions_read`: partitions of the table whose data files the scans listed, after pruning. A partition is
+  counted once per scan, however many lists the scan derives by pruning. A table without partitions, and a scan that
+  lists no partition (all pruned, or stopped early by a `LIMIT`), leaves it absent.
+- `glue.listings`: directory listings made to find data files, for a partition, the table root or an unpartitioned
+  table. A listing found in the per query cache or in `glue_cache_listings` was made before and is not counted again, and
+  a listing that never runs (a `LIMIT` that stops the scan first) is not counted.
+- `glue.files_listed`: data files found by those listings, counted when the scan reads a listing. A root listing is
+  counted in full, including the files of pruned partitions. A root listing that was only sampled to estimate the table
+  is not counted here until a scan reads it.
+
+`glue.api_requests` and `glue.api_request_time` are counted by the DuckDB HTTP client only: with
+`glue_network_calls_via_duckdb = false` the SDK's own client is used and they stay absent, while `glue.api_retries` is
+still counted. A prepared statement loads and lists again on every execution, so each execution reports its own figures.
+
 ## Testing
 
 The tests are written against two `--test-config` files, which decide where the catalog and the storage are:

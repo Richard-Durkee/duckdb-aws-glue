@@ -1,0 +1,181 @@
+# name: test/sql/hive/logging/glue_query_profile_scans.test
+# description: The Glue figures of the query profile over several tables, parallel GetPartitions requests, unpartitioned tables and prepared statements
+# group: [logging]
+
+require httpfs
+
+require glue
+
+require json
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gpq_a;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gpq_b;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.gpq_flat;
+
+statement ok
+CREATE TABLE my_datalake.default.gpq_a (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.gpq_a VALUES (1, 'a'), (2, 'b'), (3, 'c');
+
+statement ok
+CREATE TABLE my_datalake.default.gpq_b (id INTEGER, dt VARCHAR) PARTITIONED BY (dt);
+
+statement ok
+INSERT INTO my_datalake.default.gpq_b VALUES (1, 'x'), (2, 'y');
+
+statement ok
+CREATE TABLE my_datalake.default.gpq_flat AS SELECT 7 AS id;
+
+# a catalog connection that has not looked at the tables, so each query asks Glue for them
+statement ok
+attach '{GLUE_CATALOG_ID}' as gpq_multi (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+PRAGMA enable_profiling = 'json';
+
+statement ok
+PRAGMA profiling_output = '{TEST_DIR}/glue_multi_profile.json';
+
+query I
+SELECT count(*) FROM gpq_multi.default.gpq_a a JOIN gpq_multi.default.gpq_b b ON a.id = b.id;
+----
+2
+
+statement ok
+PRAGMA disable_profiling;
+
+# The figures of the tables add up: 3 + 2 partitions, each with one file. A listing is made per partition or per root,
+# whichever the scan chooses, so at least one per table
+query IIII
+SELECT glue.partitions_loaded, glue.partitions_read, glue.listings >= 2, glue.files_listed
+FROM read_json('{TEST_DIR}/glue_multi_profile.json');
+----
+5	5	true	5
+
+# Several GetPartitions requests at the same time, each on a thread of its own: the requests of those threads are in the
+# query's figures. Against a server given with ENDPOINT the setting is the only way to get more than one segment
+statement ok
+attach '{GLUE_CATALOG_ID}' as gpq_segments (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+SET glue_get_partitions_segments = 4;
+
+statement ok
+PRAGMA enable_profiling = 'json';
+
+statement ok
+PRAGMA profiling_output = '{TEST_DIR}/glue_segments_profile.json';
+
+query I
+SELECT count(*) FROM gpq_segments.default.gpq_a;
+----
+3
+
+statement ok
+PRAGMA disable_profiling;
+
+statement ok
+RESET glue_get_partitions_segments;
+
+# the table, and one GetPartitions request per segment
+query II
+SELECT glue.api_requests >= 5, glue.partitions_loaded FROM read_json('{TEST_DIR}/glue_segments_profile.json');
+----
+true	3
+
+# A table without partitions: no partition is loaded or read, and the one listing finds the one file
+statement ok
+attach '{GLUE_CATALOG_ID}' as gpq_flat_dl (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+PRAGMA enable_profiling = 'json';
+
+statement ok
+PRAGMA profiling_output = '{TEST_DIR}/glue_flat_profile.json';
+
+query I
+SELECT id FROM gpq_flat_dl.default.gpq_flat;
+----
+7
+
+statement ok
+PRAGMA disable_profiling;
+
+query III
+SELECT glue.api_requests > 0, glue.listings, glue.files_listed FROM read_json('{TEST_DIR}/glue_flat_profile.json');
+----
+true	1	1
+
+# the metrics the query did not touch are absent, not zero
+query I
+SELECT count(*) FROM (SELECT unnest(json_keys(to_json(glue))) AS metric FROM read_json('{TEST_DIR}/glue_flat_profile.json'))
+WHERE metric IN ('partitions_loaded', 'partitions_read');
+----
+0
+
+# A prepared statement loads and lists on every execution (PREPARE makes no Glue call), and each execution reports its
+# own figures
+statement ok
+attach '{GLUE_CATALOG_ID}' as gpq_prep (TYPE glue, ENDPOINT '{GLUE_ENDPOINT}');
+
+statement ok
+PREPARE gpq_stmt AS SELECT count(*) FROM gpq_prep.default.gpq_a WHERE dt = 'b';
+
+statement ok
+PRAGMA enable_profiling = 'json';
+
+statement ok
+PRAGMA profiling_output = '{TEST_DIR}/glue_prepared_first_profile.json';
+
+query I
+EXECUTE gpq_stmt;
+----
+1
+
+statement ok
+PRAGMA profiling_output = '{TEST_DIR}/glue_prepared_second_profile.json';
+
+query I
+EXECUTE gpq_stmt;
+----
+1
+
+statement ok
+PRAGMA disable_profiling;
+
+query IIIII
+SELECT glue.api_requests > 0, glue.partitions_loaded, glue.partitions_read, glue.listings, glue.files_listed
+FROM read_json('{TEST_DIR}/glue_prepared_first_profile.json');
+----
+true	3	1	1	1
+
+# the second execution asks Glue and lists again, and reports its own figures, not the first execution's added on
+query IIIII
+SELECT glue.api_requests > 0, glue.partitions_loaded, glue.partitions_read, glue.listings, glue.files_listed
+FROM read_json('{TEST_DIR}/glue_prepared_second_profile.json');
+----
+true	3	1	1	1
+
+statement ok
+DROP TABLE my_datalake.default.gpq_a;
+
+statement ok
+DROP TABLE my_datalake.default.gpq_b;
+
+statement ok
+DROP TABLE my_datalake.default.gpq_flat;

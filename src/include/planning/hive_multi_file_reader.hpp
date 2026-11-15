@@ -45,6 +45,9 @@ struct HiveScanInfo : public TableFunctionInfo {
 	//! which can run concurrently with opening files.
 	mutable mutex file_partitions_lock;
 	unordered_map<string, idx_t> file_partitions;
+	//! The partitions already reported as read in the query profile (glue.partitions_read). The lists derived from one
+	//! another by pruning share this, so a partition they all list is counted once. Guarded by file_partitions_lock.
+	unordered_set<idx_t> partitions_counted;
 	//! The statistics function of the bound file format reader. BindHiveScan wraps it to answer partition columns from
 	//! the partition values, and every other column is delegated back to this. Null when the reader has none.
 	table_statistics_extended_t format_statistics = nullptr;
@@ -140,6 +143,8 @@ private:
 	//! Decide the listings from the partitions to read (once, under the lock)
 	void PlanListings() const;
 	void ListRoot(const vector<idx_t> &partitions) const;
+	//! Reports 'partitions' as read in the query profile, the ones no list of this scan reported before
+	void CountPartitionsRead(const vector<idx_t> &partitions) const;
 	//! Lists the directories of 'partition_indexes' in parallel
 	void ListPartitions(const vector<idx_t> &partition_indexes) const;
 	//! The files of the partitions the fetched pages of the root listing hold completely, fetching more only until

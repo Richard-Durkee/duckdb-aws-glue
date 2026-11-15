@@ -6,6 +6,7 @@ add_library_unity(
   glue_format.cpp
   glue_info.cpp
   glue_log_types.cpp
+  glue_metrics.cpp
   glue_types.cpp
   helpers.cpp
   hive_location.cpp

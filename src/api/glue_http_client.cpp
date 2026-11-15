@@ -1,4 +1,5 @@
 #include "api/glue_http_client.hpp"
+#include "core/glue_metrics.hpp"
 
 #include "duckdb/common/http_util.hpp"
 #include "duckdb/common/mutex.hpp"
@@ -137,6 +138,15 @@ public:
 			// connection's HTTP log. Calls outside a GlueHttpClientContextScope (e.g. credential refreshes) fall
 			// back to the database level parameters.
 			auto context = GlueHttpClientContextScope::Current();
+			// MakeRequest runs once per attempt of the SDK, so this counts the SDK's retries as requests too. Only
+			// calls to the Glue service count: other SDK clients built while a scope is active (credential providers,
+			// such as STS or SSO) go through this client as well, and Glue's JSON protocol names its operation in
+			// X-Amz-Target on every request, whatever endpoint it goes to
+			bool is_glue = false;
+			if (request->HasHeader("x-amz-target")) {
+				is_glue = StringUtil::StartsWith(request->GetHeaderValue("x-amz-target").c_str(), "AWSGlue.");
+			}
+			GlueApiRequestMetrics request_metrics(is_glue ? context : optional_ptr<ClientContext>());
 			auto &manager = DBConfig::GetConfig(db).GetHTTPTransportManager();
 			auto session = context ? manager.CreateSession(*context, url) : manager.CreateSession(db, url);
 			auto &params = session.Parameters();

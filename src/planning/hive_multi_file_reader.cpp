@@ -3,6 +3,7 @@
 #include "planning/hive_query_cache.hpp"
 #include "planning/stats/hive_stats.hpp"
 #include "core/glue_log_types.hpp"
+#include "core/glue_metrics.hpp"
 
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/error_data.hpp"
@@ -102,6 +103,7 @@ shared_ptr<const vector<GluePartitionInfo>> HiveScanInfo::Partitions(ClientConte
 			event.partitions = partitions->size();
 			event.Finish();
 			DUCKDB_LOG(context, GlueScanLogType, event);
+			GlueMetrics::Add(context, GlueMetrics::PARTITIONS_LOADED, partitions->size());
 		}
 	}
 	return partitions;
@@ -294,12 +296,20 @@ static void ListDataFiles(ClientContext &context, bool cached, const string &loc
 		return;
 	}
 	auto prefix = directory + "/";
-	for (auto &file : HiveQueryCache::Get(context)->GetDirectoryListing(context, directory, cached)->GetAllFiles()) {
+	// every directory listing of a scan but the root's and its sample goes through here; the listing itself is counted
+	// where it is made (HiveQueryCache::GetDirectoryListing)
+	auto query_cache = HiveQueryCache::Get(context);
+	idx_t found = 0;
+	for (auto &file : query_cache->GetDirectoryListing(context, directory, cached)->GetAllFiles()) {
 		if (!IsDataFile(file, prefix)) {
 			continue;
 		}
+		found++;
 		CarryFileSecret(file, file_secret);
 		files.push_back(std::move(file));
+	}
+	if (query_cache->ClaimListedFiles(directory)) {
+		GlueMetrics::Add(context, GlueMetrics::FILES_LISTED, found);
 	}
 }
 
@@ -536,6 +546,7 @@ void HiveMultiFileList::ListPartitions(const vector<idx_t> &partition_indexes) c
 		StringUtil::RTrim(location, "/");
 		locations.push_back(std::move(location));
 	}
+	CountPartitionsRead(partition_indexes);
 	// each listing costs at least one S3 round trip, so they run at the same time rather than one after another; the
 	// first error stops the listings not yet started and is thrown
 	vector<vector<OpenFileInfo>> listed(locations.size());
@@ -585,8 +596,8 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	}
 	// one recursive listing of the root: on S3 a flat ListObjectsV2 over the prefix, 1000 keys per request, continued
 	// from the pages the sample fetched
-	auto files = HiveQueryCache::Get(client_context)
-	                 ->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info))
+	auto query_cache = HiveQueryCache::Get(client_context);
+	auto files = query_cache->GetDirectoryListing(client_context, root, CacheListings(client_context, *scan_info))
 	                 ->GetAllFiles();
 	unordered_set<idx_t> reading;
 	auto all = scan_info->Partitions(client_context);
@@ -603,11 +614,14 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 	BuildPartitionLocations();
 	auto root_prefix = root + "/";
 	auto comparable_size = ComparableLocation(root).size() + 1;
+	CountPartitionsRead(partitions);
 	lock_guard<mutex> guard(scan_info->file_partitions_lock);
+	idx_t found = 0;
 	for (auto &file : files) {
 		if (!IsRootListedDataFile(file, root_prefix, comparable_size, *all)) {
 			continue;
 		}
+		found++;
 		auto partition_index = OwningPartition(file.path, comparable_size);
 		if (!partition_index.IsValid()) {
 			continue;
@@ -617,6 +631,22 @@ void HiveMultiFileList::ListRoot(const vector<idx_t> &partitions) const {
 			continue;
 		}
 		AddFile(std::move(file), partition_index.GetIndex());
+	}
+	if (query_cache->ClaimListedFiles(root)) {
+		GlueMetrics::Add(client_context, GlueMetrics::FILES_LISTED, found);
+	}
+}
+
+void HiveMultiFileList::CountPartitionsRead(const vector<idx_t> &partitions) const {
+	idx_t added = 0;
+	{
+		lock_guard<mutex> guard(scan_info->file_partitions_lock);
+		for (auto partition_index : partitions) {
+			added += scan_info->partitions_counted.insert(partition_index).second ? 1 : 0;
+		}
+	}
+	if (added > 0) {
+		GlueMetrics::Add(client_context, GlueMetrics::PARTITIONS_READ, added);
 	}
 }
 

@@ -1,5 +1,6 @@
 #include "planning/hive_query_cache.hpp"
 
+#include "core/glue_metrics.hpp"
 #include "core/hive_location.hpp"
 
 #include "duckdb/common/file_system.hpp"
@@ -20,9 +21,11 @@ namespace {
 //! The directory listings of Glue tables, kept across statements under glue_cache_listings
 class HiveListingCache : public ClientContextState {
 public:
-	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &directory) {
+	//! 'listed' tells whether this call made the listing, rather than finding one an earlier statement made
+	shared_ptr<MultiFileList> GetListing(ClientContext &context, const string &directory, bool &listed) {
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		auto &listing = listings[directory];
+		listed = !listing;
 		if (!listing) {
 			auto &fs = FileSystem::GetFileSystem(context);
 			listing = shared_ptr<MultiFileList>(ListLocation(fs, directory));
@@ -80,6 +83,7 @@ void HiveQueryCache::QueryEnd(ClientContext &context) {
 	glue_tables.clear();
 	samples.clear();
 	directory_listings.clear();
+	unreported_listings.clear();
 	scan_count = 0;
 }
 
@@ -110,9 +114,17 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
                                                               bool cache_in_connection) {
 	auto key = directory;
 	StringUtil::RTrim(key, "/");
+	// The one place a directory listing is made, whichever scan path asks for it (the table, a partition, the root, a
+	// sample): a listing found in a cache was made before and is not counted
 	if (cache_in_connection) {
 		// the connection's listings (glue_cache_listings): kept for later statements, cleared with the metadata cache
-		return context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)->GetListing(context, key);
+		bool listed = false;
+		auto listing = context.registered_state->GetOrCreate<HiveListingCache>(HIVE_LISTING_CACHE)
+		                   ->GetListing(context, key, listed);
+		if (listed) {
+			ReportListing(context, key);
+		}
+		return listing;
 	}
 	shared_ptr<HiveDirectoryListingEntry> entry;
 	{
@@ -129,8 +141,24 @@ shared_ptr<MultiFileList> HiveQueryCache::GetDirectoryListing(ClientContext &con
 	if (!entry->listing) {
 		auto &fs = FileSystem::GetFileSystem(context);
 		entry->listing = shared_ptr<MultiFileList>(ListLocation(fs, key));
+		ReportListing(context, key);
 	}
 	return entry->listing;
+}
+
+void HiveQueryCache::ReportListing(ClientContext &context, const string &directory) {
+	{
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		unreported_listings.insert(directory);
+	}
+	GlueMetrics::Add(context, GlueMetrics::LISTINGS, 1);
+}
+
+bool HiveQueryCache::ClaimListedFiles(const string &directory) {
+	auto key = directory;
+	StringUtil::RTrim(key, "/");
+	annotated_lock_guard<annotated_mutex> guard(lock);
+	return unreported_listings.erase(key) > 0;
 }
 
 shared_ptr<const vector<GluePartitionInfo>> GetTablePartitions(ClientContext &context, const HiveScanInfo &info) {

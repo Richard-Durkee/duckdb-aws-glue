@@ -1,5 +1,6 @@
 #include "api/glue_retry_strategy.hpp"
 #include "api/glue_http_client.hpp"
+#include "core/glue_metrics.hpp"
 #include "core/glue_log_types.hpp"
 
 #include "duckdb/common/numeric_utils.hpp"
@@ -19,6 +20,13 @@ bool GlueLoggingRetryStrategy::ShouldRetry(const Aws::Client::AWSError<Aws::Clie
                                            long attempted_retries) const {
 	auto retry = strategy->ShouldRetry(error, attempted_retries);
 	auto context = GlueHttpClientContextScope::Current();
+	// this strategy belongs to the Glue client alone, so every retry it allows is a Glue request being sent again
+	if (retry && context) {
+		try {
+			GlueMetrics::Add(*context, GlueMetrics::API_RETRIES, 1);
+		} catch (...) { // NOLINT: a lost figure must not stop the retry
+		}
+	}
 	if (retry && context && Logger::Get(*context).ShouldLog(GlueRetryLogType::NAME, GlueRetryLogType::LEVEL)) {
 		GlueRetryEvent event;
 		event.error = error.GetExceptionName().c_str();

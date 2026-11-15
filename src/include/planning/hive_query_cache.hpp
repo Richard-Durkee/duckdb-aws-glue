@@ -3,6 +3,7 @@
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/main/client_context_state.hpp"
 
 #include "core/glue_info.hpp"
@@ -52,14 +53,22 @@ public:
 	//! listing is kept beyond the query (glue_cache_listings)
 	shared_ptr<MultiFileList> GetDirectoryListing(ClientContext &context, const string &directory,
 	                                              bool cache_in_connection = false);
+	//! True for the first caller to ask after this query had 'directory' listed (a listing served from a cache of an
+	//! earlier query is not one): that caller reports the files the listing found, so each listing is reported once
+	bool ClaimListedFiles(const string &directory);
 	//! The id of the next scan bound in this query, starting at 1
 	idx_t NextScanId();
 
 private:
+	//! Counts a listing made by this query
+	void ReportListing(ClientContext &context, const string &directory);
+
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<GlueTableEntry>> glue_tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveTableSampleEntry>> samples DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<HiveDirectoryListingEntry>> directory_listings DUCKDB_GUARDED_BY(lock);
+	//! The directories this query listed whose files are not reported yet
+	unordered_set<string> unreported_listings DUCKDB_GUARDED_BY(lock);
 	idx_t scan_count DUCKDB_GUARDED_BY(lock) = 0;
 };
 

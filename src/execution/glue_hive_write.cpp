@@ -72,27 +72,64 @@ void GlueHiveWrite::CheckExistingPartitionLocations(ClientContext &context, Glue
 	}
 }
 
+static void RemoveFilesBestEffort(FileSystem &fs, const vector<string> &files) {
+	if (files.empty()) {
+		return;
+	}
+	try {
+		fs.RemoveFiles(files);
+	} catch (std::exception &) {
+		for (auto &file : files) {
+			fs.TryRemoveFile(file);
+		}
+	}
+}
+
 void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 	auto table = database_name + "." + table_name;
+	// the database's file system, not one that stops at the interrupt the failed query set to end its pipelines
+	auto &fs = DatabaseInstance::GetDatabase(context).GetFileSystem();
 	// CREATE TABLE AS: whether the location holds data files of another writer, which a dropped table would leave
 	// behind unread. Counted as ClearLocation does, so files a scan skips (_SUCCESS, markers) do not keep the table
 	bool others_files = false;
 	bool listed = false;
-	if (LocationHasGlob(location)) {
+	if (complete && !created_table) {
+		// the statement finished, so its files are known: deleted by name, without listing the table
+		auto known_files = files;
+		known_files.insert(known_files.end(), published_files.begin(), published_files.end());
+		if (journal_written) {
+			known_files.push_back(JournalPath());
+		}
+		DUCKDB_LOG_INFO(context, "Undoing a failed write into Hive table '%s': deleting its %llu files by name", table,
+		                known_files.size());
+		try {
+			RemoveFilesBestEffort(fs, known_files);
+		} catch (std::exception &ex) {
+			DUCKDB_LOG_WARNING(context, "Could not delete the files a failed write left in Hive table '%s': %s", table,
+			                   ErrorData(ex).RawMessage());
+		}
+		return;
+	}
+	// a statement that did not finish: its files are found by their write id. A staged write into an unpartitioned
+	// table wrote only below its staging root; one into a partitioned table may also have written new partitions in
+	// place, so the whole location is listed
+	auto undo_root =
+	    !staging_root.empty() && this->table.partition_keys.empty() && !created_table ? staging_root : location;
+	if (LocationHasGlob(undo_root)) {
 		// the listing below would read the location as a pattern
 		DUCKDB_LOG_WARNING(context,
 		                   "Could not list the location of Hive table '%s' to undo a failed write: '%s' contains a "
 		                   "glob character",
-		                   table, location);
+		                   table, undo_root);
 	} else {
+		DUCKDB_LOG_INFO(context, "Undoing a failed write into Hive table '%s': listing '%s' for its files", table,
+		                undo_root);
 		try {
-			// the database's file system, not one that stops at the interrupt the failed query set to end its pipelines
-			auto &fs = DatabaseInstance::GetDatabase(context).GetFileSystem();
 			auto prefix = write_id + "_";
 			auto data_prefix = location + "/";
 			vector<string> written_files;
 			// S3 lists by key prefix, not by file name, so the files of the write are found by listing the location
-			auto listing = ListLocation(fs, location);
+			auto listing = ListLocation(fs, undo_root);
 			for (auto &file : listing->GetAllFiles()) {
 				auto name = file.path.substr(file.path.find_last_of('/') + 1);
 				if (StringUtil::StartsWith(name, prefix)) {
@@ -105,9 +142,8 @@ void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 			if (journal_written) {
 				written_files.push_back(JournalPath());
 			}
-			if (!written_files.empty()) {
-				fs.RemoveFiles(written_files);
-			}
+			written_files.insert(written_files.end(), published_files.begin(), published_files.end());
+			RemoveFilesBestEffort(fs, written_files);
 		} catch (std::exception &ex) {
 			DUCKDB_LOG_WARNING(context, "Could not delete the files a failed write left in Hive table '%s': %s", table,
 			                   ErrorData(ex).RawMessage());

@@ -92,12 +92,13 @@ CALL truncate_duckdb_logs();
 statement ok
 CREATE TABLE my_datalake.default.calls_ctas PARTITIONED BY (p) AS SELECT range AS id, range % 2 AS p FROM range(10);
 
+# one GetTable when the statement starts, which checks with Glue that the name is still free
 query II
 FROM glue_calls();
 ----
 BatchCreatePartition	1
 CreateTable	1
-GetTable	3
+GetTable	4
 GetTables	1
 
 statement ok

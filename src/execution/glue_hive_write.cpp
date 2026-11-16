@@ -159,16 +159,19 @@ void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 		return;
 	}
 	try {
-		if (created_table_time.IsValid()) {
-			auto create_time = GlueAPI::GetTableCreateTime(client, catalog, database_name, table_name);
-			if (create_time.IsValid() && create_time.GetIndex() != created_table_time.GetIndex()) {
-				// most likely dropped and created again by someone else while the statement ran: keep it
-				DUCKDB_LOG_WARNING(context,
-				                   "Kept Hive table '%s' after CREATE TABLE AS failed: it was created again by another "
-				                   "client while the statement ran",
-				                   table);
-				return;
-			}
+		string stored_write_id;
+		if (!GlueAPI::GetTableParameter(client, catalog, database_name, table_name, WRITE_ID_TABLE_PARAMETER,
+		                                stored_write_id)) {
+			// dropped by someone else already
+			return;
+		}
+		if (stored_write_id != write_id) {
+			// dropped and created again by another client since the commit created it: keep it
+			DUCKDB_LOG_WARNING(context,
+			                   "Kept Hive table '%s' after CREATE TABLE AS failed: it was created again by another "
+			                   "client while the statement committed",
+			                   table);
+			return;
 		}
 		GlueAPI::DeleteTable(context, client, catalog, database_name, table_name);
 		// looked up again by name: the schema entry the statement used may have been replaced since

@@ -17,6 +17,8 @@ class GlueSchemaEntry;
 //! The prefix of the staging root of a write, below the table location: .duckdb-staging-<write id>
 static constexpr const char *STAGING_DIRECTORY_PREFIX = ".duckdb-staging-";
 static constexpr const char *STAGING_JOURNAL_NAME = "_journal";
+//! The table parameter a CREATE TABLE AS stores its write id in, so that its rollback drops only the table it created
+static constexpr const char *WRITE_ID_TABLE_PARAMETER = "duckdb.write_id";
 
 //! What an INSERT or CREATE TABLE AS into a Hive table writes and the Glue changes that make it visible, applied when
 //! its transaction commits and undone when it rolls back
@@ -52,10 +54,6 @@ struct GlueHiveWrite {
 	//! The commit created the table, and the client to drop it with
 	bool created_table = false;
 	std::shared_ptr<Aws::Glue::GlueClient> client;
-	//! The CreateTime of the table it created: a table with another CreateTime was created again by someone else, and
-	//! is not dropped. Glue keeps whole seconds, so a table dropped and created again within the same second is not
-	//! told apart
-	optional_idx created_table_time;
 
 public:
 	//! The location a written file has once published

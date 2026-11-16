@@ -158,10 +158,11 @@ public:
 	//! secret can no longer be looked up. Leaves the metadata cache alone (the rollback clears it).
 	static void DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
 	                        GlueCatalog &catalog, const string &database_name, const string &table_name);
-	//! The CreateTime of a table in milliseconds (whole seconds in Glue), with a client taken earlier: invalid if the
-	//! table does not exist, 0 if Glue gave none. Tells a table apart from one created again under its name.
-	static optional_idx GetTableCreateTime(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-	                                       const string &database_name, const string &table_name);
+	//! A parameter of a table, with a client taken earlier: false if the table does not exist; 'value' is empty when
+	//! the table has no such parameter
+	static bool GetTableParameter(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+	                              const string &database_name, const string &table_name, const string &name,
+	                              string &value);
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret. Public
 	//! for the undo of a CREATE TABLE AS, which takes the client while the secret can still be looked up
 	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);

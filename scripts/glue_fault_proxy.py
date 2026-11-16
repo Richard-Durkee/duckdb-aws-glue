@@ -223,15 +223,15 @@ class Handler(BaseHTTPRequestHandler):
         return self.get_table(database, name)["VersionId"]
 
     def recreate_as_other_client(self, database, name):
-        """Drop the table and create it again, as another client would: a table of the same name, created later."""
+        """Drop the table and create it again, as another client would: a table of the same name, without the write
+        id DuckDB stores in the tables its CREATE TABLE AS creates."""
         table = self.get_table(database, name)
         table_input = {field: table[field] for field in TABLE_INPUT_FIELDS if field in table}
+        table_input.get("Parameters", {}).pop("duckdb.write_id", None)
         status, _, data = self.forward("AWSGlue.DeleteTable",
                                        json.dumps({"DatabaseName": database, "Name": name}).encode())
         if status != 200:
             raise RuntimeError(f"DeleteTable {database}.{name} failed: {data!r}")
-        # a later CreateTime than the dropped table's, even where it is kept to the second
-        time.sleep(1.1)
         status, _, data = self.forward("AWSGlue.CreateTable",
                                        json.dumps({"DatabaseName": database, "TableInput": table_input}).encode())
         if status != 200:

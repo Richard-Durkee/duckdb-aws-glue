@@ -106,14 +106,18 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   with hive partition directories. The copy is `GlueHiveCopy` (`src/execution/hive_copy.cpp`). Each execution gets a
   write id that prefixes its file names; the copy adds a `GlueHiveWrite` (`src/execution/glue_hive_write.cpp`) to the
   transaction's `GlueWriteTransaction` (`src/catalog/glue_write_transaction.cpp`) before anything is written, and
-  `GlueHiveInsert::Finalize` records its files and new partitions. The writes are applied when the transaction
-  commits (`GlueTransactionManager::CommitTransaction`): CTAS overwrite deletes the old files, staged files
-  (`glue_write_staging`, on by default; only files of unpartitioned tables and existing partitions are staged, via the
-  `glue_staged_partition_path` wrapper on the copy's partition path) are copied into place, the CTAS table is created and the partitions are registered with
-  `BatchCreatePartition`. A rollback, or a failed commit, undoes every write: the partitions the commit registered
-  are deleted, the files are deleted by their write id prefix and the table a CTAS created is dropped, unless another
-  writer's data files are there or the table was created again since. INSERT works in explicit transactions; CTAS
-  does not.
+  `GlueHiveInsert::Finalize` records its files and new partitions. With `glue_write_staging` (on by default) the files
+  an INSERT adds to an unpartitioned table or an existing partition go below `.duckdb-staging-<write id>` (the
+  `glue_staged_partition_path` wrapper on the copy's partition path); new partitions and CTAS write in place. The
+  writes are applied when the transaction commits (`GlueTransactionManager::CommitTransaction`): CTAS overwrite
+  deletes the old files, a staged write writes its `_journal` and its files are moved into place (`MoveFile`, a
+  streaming copy where the file system throws `NotImplementedException`), the CTAS table is created with its write id
+  in `duckdb.write_id`, the partitions are registered with `BatchCreatePartition`, and the journal is removed. A
+  rollback, or a failed commit, undoes every write: the partitions the commit registered are deleted, the files are
+  deleted by name (finished statements) or found by their write id prefix, and the table a CTAS created is dropped
+  while its `duckdb.write_id` is still the write's, unless another writer's data files are there.
+  `glue_cleanup_staging` (`src/functions/glue_cleanup_staging.cpp`) removes staging roots a crashed process left
+  behind, undoing what a root's journal lists. INSERT works in explicit transactions; CTAS does not.
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar
   extension `glue_hive_ddl`, enabled with `SET active_grammar_extensions = ['glue_hive_ddl']`) rewrites Hive partition

@@ -114,6 +114,14 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 			// CREATE TABLE AS: the table is created when the statement commits
 			auto &create_schema = *schema.get_mutable();
 			create_schema.ThrowIfTableExists(context, info->Base());
+			// asked Glue, not the metadata cache the statement was bound with: a name taken since fails here, before
+			// the query runs, and not only when the commit creates the table
+			GlueTableInfo existing;
+			if (GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, existing)) {
+				throw CatalogException("Table with name \"%s\" already exists in Glue database \"%s\": it was created "
+				                       "after this statement was planned; retry CREATE TABLE IF NOT EXISTS",
+				                       table_info.name, table_info.schema_name);
+			}
 			auto overwrite = GlueSchemaEntry::ParseCreateTableOptions(context, info->Base()).overwrite;
 			write->replaced_files = CheckLocation(context, create_schema, table_info, location, overwrite);
 			write->create_schema = &create_schema;

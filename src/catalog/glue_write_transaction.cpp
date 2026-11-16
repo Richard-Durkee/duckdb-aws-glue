@@ -173,10 +173,9 @@ void GlueWriteTransaction::Commit(ClientContext &context, GlueCatalog &catalog, 
 			if (write.create_schema) {
 				// the client to drop the table with is taken first: once the table exists, nothing may stop the undo
 				write.client = GlueAPI::GetClient(context, catalog);
+				write.table.parameters[WRITE_ID_TABLE_PARAMETER] = write.write_id;
 				write.table = write.create_schema->CommitCreateTable(context, write.table);
 				write.created_table = true;
-				auto create_time_ms = write.table.create_time_ms;
-				write.created_table_time = optional_idx(create_time_ms > 0 ? static_cast<idx_t>(create_time_ms) : 0);
 			}
 			if (!write.partitions.empty()) {
 				vector<idx_t> created;

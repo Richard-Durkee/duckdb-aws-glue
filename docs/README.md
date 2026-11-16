@@ -261,15 +261,28 @@ their codec themselves.
   know, and files written into it could corrupt the table.
 - The files of one `INSERT` or `CREATE TABLE ... AS` are named `<write id>_<file id>.<extension>`, with a new write
   id (a UUIDv7) per statement. The write is added to the Glue transaction when it starts; a transaction that rolls
-  back, or whose commit fails, deletes the files named after each of its writes, the partitions its commit registered
-  and, for `CREATE TABLE ... AS`, the Glue table its commit created, so the statements can be run again. To find the
-  files, the rollback lists every object below the
-  table's location, which takes one LIST request per 1,000 objects; it lists nothing, and deletes nothing, if the
-  location contains a glob character (`*`, `?`, `[`). A table `CREATE TABLE ... AS` created is kept if it holds files
-  of another writer, or if another client dropped and created it again since. This is best effort:
-  a step that fails is logged as a warning (`CALL enable_logging(level := 'warning')` shows it). If the process
-  dies, nothing is cleaned up: the files stay, and the rows in them appear once their partition is registered, by a
-  later `INSERT`, `MSCK REPAIR` or a crawler. Other queries can read the files of an insert before it finishes.
+  back, or whose commit fails, deletes the files of each of its writes, the partitions its commit registered and,
+  for `CREATE TABLE ... AS`, the Glue table its commit created, so the statements can be run again. The files of a
+  statement that finished are known and deleted by name. Those of a statement that failed while it ran are found by
+  their write id: below its staging root for an unpartitioned table, below the table's location otherwise, one LIST
+  request per 1,000 objects; nothing is listed, or deleted, if the location contains a glob character (`*`, `?`,
+  `[`). The table of a `CREATE TABLE ... AS` carries the write id in its `duckdb.write_id` parameter, and is dropped
+  only while it still does, so a table another client dropped and created again is kept; it is also kept if it
+  holds files of another writer. A `CREATE TABLE ... AS` checks with Glue when it starts that its table does not
+  exist yet. This is best effort: a step that fails is logged as a warning (`CALL enable_logging(level :=
+  'warning')` shows it).
+- Staged files are moved into place, which S3 does with a server-side copy (httpfs's `MoveFile`); where the file
+  system can not move a file (an object over 5 GB, another bucket's credentials, an httpfs without `MoveFile`) its
+  bytes are copied through DuckDB. Before it publishes, the commit writes a journal (`_journal`) into the staging
+  root that lists the final path of every file of the write, and removes it once the write is complete. If the
+  process dies, nothing is cleaned up automatically: a staging root that is left behind is never read, but the files
+  a commit already published, or wrote in place into new partitions, are. `CALL glue_cleanup_staging('<table>',
+  older_than := INTERVAL '1 day')` removes the staging roots of writes older than `older_than` (one day by default;
+  the age is the write id's time), and for a root that still holds its journal first deletes the files the journal
+  lists, undoing the commit that did not finish. It returns one row per removed root (`staging_root`, `written_at`,
+  `rolled_back`, `deleted_files`). Files of new partitions written in place by a statement that never reached its
+  commit are not journaled; they stay until something registers their partition (a later `INSERT`, `MSCK REPAIR`
+  or a crawler). Without staging, other queries can read the files of an insert before it commits.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.

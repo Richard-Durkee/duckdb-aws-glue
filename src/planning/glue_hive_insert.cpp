@@ -659,7 +659,7 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	Value staging;
 	if (existing_table && context.TryGetCurrentSetting("glue_write_staging", staging) && !staging.IsNull() &&
 	    BooleanValue::Get(staging)) {
-		staging_directory = ".duckdb-staging-" + write_id;
+		staging_directory = STAGING_DIRECTORY_PREFIX + write_id;
 		staging_root = location + "/" + staging_directory;
 	}
 	auto return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST);

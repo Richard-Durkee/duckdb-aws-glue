@@ -1,0 +1,129 @@
+# name: test/sql/hive/dml/insert/insert_cleanup_staging.test
+# description: glue_cleanup_staging removes the staging roots of old writes and undoes a commit that left its journal
+# group: [insert]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.default.stgc;
+
+statement ok
+CREATE TABLE my_datalake.default.stgc (id INTEGER, p INTEGER) PARTITIONED BY (p);
+
+statement ok
+INSERT INTO my_datalake.default.stgc SELECT i, 0 FROM range(3) t(i);
+
+# a commit that published one file and stopped before it finished: its staging root still holds the journal
+statement ok
+COPY (SELECT 1 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/.duckdb-staging-00000001-0000-7000-8000-000000000000/p=0/staged.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT 100 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/p=0/published.parquet' (FORMAT parquet);
+
+statement ok
+COPY (SELECT '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/p=0/published.parquet' AS path) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/.duckdb-staging-00000001-0000-7000-8000-000000000000/_journal' (FORMAT csv, HEADER false);
+
+# a write that never reached its commit: only staged files
+statement ok
+COPY (SELECT 2 AS id) TO '{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/.duckdb-staging-00000002-0000-7000-8000-000000000000/p=0/staged.parquet' (FORMAT parquet);
+
+query I
+SELECT count(*) FROM my_datalake.default.stgc;
+----
+4
+
+# a write that is running: its staging root is younger than older_than and kept
+statement ok
+BEGIN;
+
+statement ok
+INSERT INTO my_datalake.default.stgc SELECT i, 0 FROM range(10, 12) t(i);
+
+query TITI con2
+SELECT regexp_extract(staging_root, '[^/]*$'), year(written_at), rolled_back, deleted_files
+FROM glue_cleanup_staging('my_datalake.default.stgc') ORDER BY 1;
+----
+.duckdb-staging-00000001-0000-7000-8000-000000000000	1970	true	3
+.duckdb-staging-00000002-0000-7000-8000-000000000000	1970	false	1
+
+query I con2
+SELECT count(*) FROM my_datalake.default.stgc;
+----
+3
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/.duckdb-staging-0000000*/**');
+----
+0
+
+query I
+SELECT count(*) > 0 FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/.duckdb-staging-*/**');
+----
+true
+
+statement ok
+COMMIT;
+
+query I
+SELECT count(*) FROM my_datalake.default.stgc;
+----
+5
+
+# nothing left to clean: a committed write removes its staging root and journal
+query I
+SELECT count(*) FROM glue_cleanup_staging('my_datalake.default.stgc', older_than := INTERVAL '0 seconds');
+----
+0
+
+# a commit that fails after publishing removes the published files and its journal
+statement ok
+SET glue_debug_fail_partition_registration = 'InvalidInputException:0';
+
+statement error
+INSERT INTO my_datalake.default.stgc SELECT i, CASE WHEN i < 22 THEN 0 ELSE 5 END FROM range(20, 24) t(i);
+----
+was rolled back
+
+statement ok
+RESET glue_debug_fail_partition_registration;
+
+query I
+SELECT count(*) FROM my_datalake.default.stgc;
+----
+5
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/.duckdb-staging-*/**');
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/default/stgc/**');
+----
+2
+
+statement error
+SELECT * FROM glue_cleanup_staging('my_datalake.default.stgc', older_than := INTERVAL '-1 day');
+----
+must not be negative
+
+statement error
+SELECT * FROM glue_cleanup_staging('my_datalake.default.no_such_table');
+----
+does not exist
+
+statement ok
+DROP TABLE my_datalake.default.stgc;

@@ -10,8 +10,13 @@
 
 namespace duckdb {
 class ClientContext;
+class FileSystem;
 class GlueCatalog;
 class GlueSchemaEntry;
+
+//! The prefix of the staging root of a write, below the table location: .duckdb-staging-<write id>
+static constexpr const char *STAGING_DIRECTORY_PREFIX = ".duckdb-staging-";
+static constexpr const char *STAGING_JOURNAL_NAME = "_journal";
 
 //! What an INSERT or CREATE TABLE AS into a Hive table writes and the Glue changes that make it visible, applied when
 //! its transaction commits and undone when it rolls back
@@ -41,6 +46,7 @@ struct GlueHiveWrite {
 	bool complete = false;
 
 	//! Progress of the commit, so that a failed commit undoes exactly what it did
+	bool journal_written = false;
 	vector<string> published_files;
 	vector<vector<string>> created_partitions;
 	//! The commit created the table, and the client to drop it with
@@ -54,6 +60,11 @@ struct GlueHiveWrite {
 public:
 	//! The location a written file has once published
 	string FinalPath(const string &file) const;
+	//! The file in the staging root that lists the final paths of the write while its commit publishes them: a staging
+	//! root that still holds it belongs to a commit that did not finish (glue_cleanup_staging)
+	string JournalPath() const;
+	//! Writes the journal of a staged write before its commit publishes it
+	void WriteJournal(FileSystem &fs) const;
 	//! Fails when a partition the files were written for already existed at another location, whose files are the
 	//! ones read. A partition the plan saw is compared with the location it had then; one it did not see was
 	//! registered by another writer since, and is looked up.

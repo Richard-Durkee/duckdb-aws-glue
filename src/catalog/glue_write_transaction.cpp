@@ -134,7 +134,10 @@ void GlueWriteTransaction::Commit(ClientContext &context, GlueCatalog &catalog, 
 				fs.RemoveFiles(write.replaced_files);
 				write.replaced_files.clear();
 			}
-			if (!write.staging_root.empty()) {
+			if (!write.staging_root.empty() && !write.files.empty()) {
+				// before anything becomes visible: a commit that does not finish is found and undone by its journal
+				write.WriteJournal(fs);
+				write.journal_written = true;
 				PublishStagedFiles(fs, write);
 			}
 			if (write.create_schema) {
@@ -181,6 +184,10 @@ void GlueWriteTransaction::Commit(ClientContext &context, GlueCatalog &catalog, 
 	for (auto &write : writes) {
 		if (write->staging_root.empty()) {
 			continue;
+		}
+		if (write->journal_written) {
+			// the write is complete: from here on, glue_cleanup_staging only deletes what is left in the staging root
+			RemoveFilesBestEffort(fs, {write->JournalPath()});
 		}
 		vector<string> staged;
 		for (auto &file : write->files) {

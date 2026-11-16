@@ -23,6 +23,21 @@ string GlueHiveWrite::FinalPath(const string &file) const {
 	return location + file.substr(staging_root.size());
 }
 
+string GlueHiveWrite::JournalPath() const {
+	return staging_root + "/" + STAGING_JOURNAL_NAME;
+}
+
+void GlueHiveWrite::WriteJournal(FileSystem &fs) const {
+	string contents;
+	for (auto &file : files) {
+		contents += FinalPath(file) + "\n";
+	}
+	auto handle = fs.OpenFile(JournalPath(), FileFlags::FILE_FLAGS_WRITE | FileFlags::FILE_FLAGS_FILE_CREATE_NEW);
+	handle->Write(&contents[0], contents.size());
+	handle->Sync();
+	handle->Close();
+}
+
 void GlueHiveWrite::CheckExistingPartitionLocations(ClientContext &context, GlueCatalog &catalog,
                                                     const vector<GluePartitionInput> &already_existing) const {
 	auto check = [&](const GluePartitionInput &partition, const string &registered) {
@@ -87,6 +102,9 @@ void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 				}
 			}
 			listed = true;
+			if (journal_written) {
+				written_files.push_back(JournalPath());
+			}
 			if (!written_files.empty()) {
 				fs.RemoveFiles(written_files);
 			}

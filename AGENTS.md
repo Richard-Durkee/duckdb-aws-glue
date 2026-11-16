@@ -110,7 +110,9 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   `GlueHiveInsert::Finalize` completes it once the partitions are registered. A write still registered when the
   transaction ends belongs to a failed statement: `GlueTransaction::Rollback` undoes it (`UndoHiveWrite`,
   `src/execution/hive_write_undo.cpp`), deleting its files (by prefix) and the table a CTAS created, unless another
-  writer's data files are there or the table was created again since. A failed partition registration deletes its
+  writer's data files are there or the table is no longer the one it created (it was created again since). The
+  CTAS table carries `duckdb.write_id` until `Finalize` has registered its partitions and removed it, so a CREATE
+  TABLE or INSERT that finds it refuses to take the table as it is. A failed partition registration deletes its
   files itself, in Finalize (the partitions it registered stay, empty).
 - **Partition DDL**: DuckDB has no `ALTER TABLE ... PARTITION` syntax, so `src/functions/glue_partition_functions.cpp`
   provides `glue_partitions`, `glue_add_partition`, ... and `glue_alter_table`; `src/grammar/glue_grammar.cpp` (grammar

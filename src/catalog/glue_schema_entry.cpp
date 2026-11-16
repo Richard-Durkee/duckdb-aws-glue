@@ -325,6 +325,10 @@ GlueCreateTableOptions GlueSchemaEntry::ParseCreateTableOptions(ClientContext &c
 			                      key, BucketingOptionFor(key));
 		} else if (!OtherEngineOptionFor(key).empty()) {
 			throw BinderException("Unknown CREATE TABLE option '%s', use %s instead", key, OtherEngineOptionFor(key));
+		} else if (GlueTableInfo::IsUnfinishedWriteParameter(key)) {
+			throw BinderException("CREATE TABLE option '%s' is reserved: it marks a table whose CREATE TABLE AS has "
+			                      "not finished",
+			                      key);
 		} else {
 			// everything else is a table property, stored in Glue's table parameters (like Hive / Trino do)
 			result.parameters[key] = string_value;
@@ -364,8 +368,13 @@ static void CheckEntryType(optional_ptr<CatalogEntry> existing, CatalogType expe
 	}
 }
 
-static optional_ptr<CatalogEntry> OnExistingTable(const CreateTableInfo &base, const string &database_name,
-                                                  const string &table_name) {
+optional_ptr<CatalogEntry> GlueSchemaEntry::OnExistingTable(ClientContext &context, const CreateTableInfo &base,
+                                                            CatalogEntry &existing, const string &table_name) {
+	if (!existing.Cast<GlueTable>().table_info.GetUnfinishedWriteId().empty()) {
+		// a connection-scoped cache may hold the table from before its CREATE TABLE AS finished
+		DefinitionForWrite(context, existing).ThrowIfUnfinishedWrite();
+	}
+	auto &database_name = database_info.name;
 	switch (base.on_conflict) {
 	case OnCreateConflict::IGNORE_ON_CONFLICT:
 		return nullptr;
@@ -531,7 +540,7 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto existing = tables.GetEntry(context, lookup);
 	CheckEntryType(existing, CatalogType::TABLE_ENTRY, table_name, "create");
 	if (existing) {
-		return OnExistingTable(base, database_info.name, table_name);
+		return OnExistingTable(context, base, *existing, table_name);
 	}
 	// CREATE TABLE AS creates its table through CreateTableFromInfo
 	if (!resolved_table_info && base.options.find("overwrite") != base.options.end()) {
@@ -541,20 +550,27 @@ optional_ptr<CatalogEntry> GlueSchemaEntry::CreateTableInternal(CatalogTransacti
 	auto table = resolved_table_info ? *resolved_table_info : BuildTableInfo(context, base);
 	D_ASSERT(table.name == table_name);
 	D_ASSERT(table.schema_name == database_info.name);
-	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
-		// another client created the table since the lookup above: take its entry
-		auto raced = tables.GetEntry(context, lookup);
-		if (!raced) {
-			throw CatalogException("Glue table \"%s.%s\" exists but could not be fetched", database_info.name,
-			                       table_name);
-		}
-		CheckEntryType(raced, CatalogType::TABLE_ENTRY, table_name, "create");
-		return OnExistingTable(base, database_info.name, table_name);
-	}
-
 	// re-fetch so the entry reflects what Glue stored
 	GlueTableInfo created;
-	if (!GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, created)) {
+	bool fetched = false;
+	if (GlueAPI::CreateHiveTable(context, glue_catalog, table) == GlueCreateOutcome::ALREADY_EXISTED) {
+		// a CREATE TABLE AS finds the table it created if the SDK sent its CreateTable again after a lost answer
+		auto write_id = table.GetUnfinishedWriteId();
+		fetched = !write_id.empty() &&
+		          GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, created) &&
+		          created.GetUnfinishedWriteId() == write_id;
+		if (!fetched) {
+			// another client created the table since the lookup above: take its entry
+			auto raced = tables.GetEntry(context, lookup);
+			if (!raced) {
+				throw CatalogException("Glue table \"%s.%s\" exists but could not be fetched", database_info.name,
+				                       table_name);
+			}
+			CheckEntryType(raced, CatalogType::TABLE_ENTRY, table_name, "create");
+			return OnExistingTable(context, base, *raced, table_name);
+		}
+	}
+	if (!fetched && !GlueAPI::GetTable(context, glue_catalog, database_info.name, table_name, created)) {
 		throw CatalogException("Glue table \"%s.%s\" was created but could not be fetched afterwards",
 		                       database_info.name, table_name);
 	}
@@ -730,6 +746,11 @@ static void CheckTablePropertyChangeable(const string &key) {
 	if (GlueTableFormat::IsParameter(key)) {
 		throw InvalidInputException("Table property '%s' decides how the table is read and can not be changed "
 		                            "with ALTER TABLE",
+		                            key);
+	}
+	if (GlueTableInfo::IsUnfinishedWriteParameter(key)) {
+		throw InvalidInputException("Table property '%s' marks a table whose CREATE TABLE AS has not finished and "
+		                            "cannot be changed with ALTER TABLE; drop the table instead",
 		                            key);
 	}
 }

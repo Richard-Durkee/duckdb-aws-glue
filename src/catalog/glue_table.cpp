@@ -138,7 +138,8 @@ void AddHiveTableProperties(CreateTableInfo &info, const GlueTableInfo &table_in
 	// Table.Parameters pass-through: emit each remaining key as a WITH option.
 	// Skip keys we already set above.
 	for (auto &param : table_info.parameters) {
-		if (info.options.find(param.first) != info.options.end()) {
+		if (info.options.find(param.first) != info.options.end() ||
+		    GlueTableInfo::IsUnfinishedWriteParameter(param.first)) {
 			continue;
 		}
 		info.options[param.first] = ConstantExpression::FromValue(Value(param.second));

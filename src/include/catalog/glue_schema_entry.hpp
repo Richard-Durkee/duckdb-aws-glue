@@ -99,6 +99,10 @@ public:
 private:
 	optional_ptr<CatalogEntry> CreateTableInternal(CatalogTransaction transaction, BoundCreateTableInfo &info,
 	                                               const GlueTableInfo *resolved_table_info);
+	//! CREATE TABLE of a name that exists: nothing for IF NOT EXISTS, an error otherwise, and an error either way for
+	//! a table whose CREATE TABLE AS has not finished
+	optional_ptr<CatalogEntry> OnExistingTable(ClientContext &context, const CreateTableInfo &base,
+	                                           CatalogEntry &existing, const string &table_name);
 	static bool CatalogTypeIsSupported(CatalogType type);
 	//! The ALTER TABLE forms below rewrite the table from 'table', the bound entry's definition
 	void AlterTableProperties(ClientContext &context, const GlueTableInfo &table, AlterTableInfo &alter_table);

@@ -77,6 +77,11 @@ public:
 	//! object of the response as JSON.
 	static bool GetTable(ClientContext &context, GlueCatalog &catalog, const string &database_name,
 	                     const string &table_name, GlueTableInfo &result, string *raw_json = nullptr);
+	//! The same with a client taken earlier, for the undo of a CREATE TABLE AS, which runs when the secret can no
+	//! longer be looked up
+	static bool GetTable(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
+	                     const string &database_name, const string &table_name, GlueTableInfo &result,
+	                     string *raw_json = nullptr);
 
 	//! Create a database
 	static GlueCreateOutcome CreateDatabase(ClientContext &context, GlueCatalog &catalog,
@@ -112,9 +117,11 @@ public:
 	                             const string &location);
 	//! Change the table parameters (Hive's TBLPROPERTIES): the 'set' entries are added or overwritten and the 'unset'
 	//! keys removed, the other parameters and the rest of the Glue definition stay as they are. The parameters the
-	//! table format is derived from (GlueTableFormat::IsParameter) are refused.
+	//! table format is derived from (GlueTableFormat::IsParameter) are refused. With 'skip_archive' Glue keeps no
+	//! version of the definition it replaces.
 	static void UpdateTableParameters(ClientContext &context, GlueCatalog &catalog, const GlueTableInfo &bound,
-	                                  const vector<pair<string, string>> &set, const vector<string> &unset);
+	                                  const vector<pair<string, string>> &set, const vector<string> &unset,
+	                                  bool skip_archive = false);
 	//! Point a partition at another location. 'partition' is the partition as fetched; it is rewritten from the
 	//! Partition it carries, nothing is fetched again.
 	static void SetPartitionLocation(ClientContext &context, GlueCatalog &catalog, const string &database_name,
@@ -175,10 +182,6 @@ public:
 	//! secret can no longer be looked up. Leaves the metadata cache alone (the rollback clears it).
 	static void DeleteTable(ClientContext &context, const std::shared_ptr<Aws::Glue::GlueClient> &client,
 	                        GlueCatalog &catalog, const string &database_name, const string &table_name);
-	//! The CreateTime of a table in milliseconds (whole seconds in Glue), with a client taken earlier: invalid if the
-	//! table does not exist, 0 if Glue gave none. Tells a table apart from one created again under its name.
-	static optional_idx GetTableCreateTime(const std::shared_ptr<Aws::Glue::GlueClient> &client, GlueCatalog &catalog,
-	                                       const string &database_name, const string &table_name);
 	//! Get (or create) the Glue client for the catalog, using the credentials of the configured DuckDB secret. Public
 	//! for the undo of a CREATE TABLE AS, which takes the client while the secret can still be looked up
 	static std::shared_ptr<Aws::Glue::GlueClient> GetClient(ClientContext &context, GlueCatalog &catalog);

@@ -16,11 +16,21 @@ forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+amz-sdk-request header) and forwarded when the SDK retries it. UpdateTable and DeleteTable on a
+fault_unfinished_ctas* database are answered with AccessDeniedException, so a CREATE TABLE AS there can neither finish
+nor undo its table and leaves it as a crashed one would. An UpdateTable on a fault_lost_update_answer* database is
+forwarded and then answered with InternalServiceException, as if its answer had been lost; on a
+fault_lost_update_and_read* database the GetTable that follows it fails the same way too. A CreateTable on a
+fault_lost_create_answer* database is answered with InternalFailure (HTTP 500), which the SDK sends the request
+again for. Only the first UpdateTable of a table on a
+fault_conflict_once* database races another client's update (the ones after it find the other client's change in
+place). The second GetTable of a table after its CreateTable on a fault_recreated_before_finish* database finds the
+table dropped and created again by another client."""
 
 import argparse
 import http.client
 import json
+import threading
 import time
 import uuid
 import urllib.parse
@@ -35,6 +45,8 @@ DENIED_TABLE_PREFIX = "fault_denied_"
 RACED_CREATE_PREFIX = "fault_already_exists"
 # UpdateTable on a database with this prefix races another client's update of the same table
 RACED_UPDATE_PREFIX = "fault_concurrent_update"
+# only the first UpdateTable of each table on a database with this prefix races another client's update
+RACED_UPDATE_ONCE_PREFIX = "fault_conflict_once"
 # the first attempt of a request on a database with this prefix is throttled, its retries are not
 THROTTLED_PREFIX = "fault_throttled"
 # BatchCreatePartition on a database with this prefix is forwarded after a delay
@@ -46,6 +58,18 @@ RECREATED_PREFIX = "fault_recreated_during_write"
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
 # CreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
+# on a database with this prefix, a CREATE TABLE AS cannot finish or undo its table: the UpdateTable that removes its
+# duckdb.write_id and the DeleteTable of its undo are refused, which leaves the table as a crash would
+UNFINISHED_CTAS_PREFIX = "fault_unfinished_ctas"
+# an UpdateTable on a database with this prefix is applied, and then answered with an error
+LOST_UPDATE_ANSWER_PREFIX = "fault_lost_update_answer"
+# as LOST_UPDATE_ANSWER_PREFIX, and the next GetTable of the table fails too
+LOST_UPDATE_AND_READ_PREFIX = "fault_lost_update_and_read"
+# a CreateTable on a database with this prefix is applied, and then answered with an error
+LOST_CREATE_ANSWER_PREFIX = "fault_lost_create_answer"
+# the second GetTable of a table after its CreateTable, on a database with this prefix, finds it created again
+RECREATED_BEFORE_FINISH_PREFIX = "fault_recreated_before_finish"
+RECREATED_BEFORE_FINISH_READ = 2
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -96,6 +120,7 @@ def as_other_clients_object(target, request):
     else:
         columns = request["TableInput"].setdefault("StorageDescriptor", {}).setdefault("Columns", [])
         columns.append({"Name": "created_by_another_client", "Type": "int"})
+        request["TableInput"].get("Parameters", {}).pop("duckdb.write_id", None)
     return json.dumps(request).encode()
 
 
@@ -108,8 +133,31 @@ def is_raced_update(target, database):
     return target == "AWSGlue.UpdateTable" and database.startswith(RACED_UPDATE_PREFIX)
 
 
+def is_raced_update_once(target, database):
+    return target == "AWSGlue.UpdateTable" and database.startswith(RACED_UPDATE_ONCE_PREFIX)
+
+
 def is_slow_partitions(target, database):
     return target == "AWSGlue.BatchCreatePartition" and database.startswith(SLOW_PARTITIONS_PREFIX)
+
+
+def is_unfinished_ctas(target, database):
+    return target in ("AWSGlue.UpdateTable", "AWSGlue.DeleteTable") and database.startswith(UNFINISHED_CTAS_PREFIX)
+
+
+def is_lost_update_answer(target, database):
+    return target == "AWSGlue.UpdateTable" and (database.startswith(LOST_UPDATE_ANSWER_PREFIX)
+                                                or database.startswith(LOST_UPDATE_AND_READ_PREFIX))
+
+
+def is_lost_create_answer(target, database):
+    return target == "AWSGlue.CreateTable" and database.startswith(LOST_CREATE_ANSWER_PREFIX)
+
+
+def table_key(target, request, database):
+    table_input = request.get("TableInput", {})
+    name = table_input.get("Name") if target in ("AWSGlue.UpdateTable", "AWSGlue.CreateTable") else request.get("Name")
+    return (database, name)
 
 
 def is_recreated_during_write(target, database):
@@ -162,13 +210,33 @@ class Handler(BaseHTTPRequestHandler):
         if error:
             self.reply_error(error)
             return
+        if is_unfinished_ctas(target, database):
+            self.reply_error("AccessDeniedException")
+            return
         if is_slow_partitions(target, database):
             time.sleep(SLOW_PARTITIONS_SECONDS)
         if is_recreated_during_write(target, database):
             self.recreate_as_other_client(database, request["TableName"])
             self.reply_error("InternalServiceException")
             return
-        if is_raced_update(target, database):
+        if target == "AWSGlue.GetTable":
+            key = table_key(target, request, database)
+            with self.server.lock:
+                failing = key in self.server.failing_reads
+                self.server.failing_reads.discard(key)
+                reads = self.server.reads_after_create.get(key)
+                if reads is not None:
+                    reads += 1
+                    self.server.reads_after_create[key] = reads
+            if failing:
+                self.reply_error("InternalServiceException")
+                return
+            if database.startswith(RECREATED_BEFORE_FINISH_PREFIX) and reads == RECREATED_BEFORE_FINISH_READ:
+                self.recreate_as_other_client(database, key[1])
+        # only the first UpdateTable of a table races: the table then carries the other client's change
+        raced_once = is_raced_update_once(target, database) and "changed_by_another_client" not in (
+            self.get_table(database, request["TableInput"]["Name"]).get("Parameters", {}))
+        if is_raced_update(target, database) or raced_once:
             current_version = self.update_as_other_client(database, request["TableInput"]["Name"])
             if "VersionId" in request and request["VersionId"] != current_version:
                 self.reply_error("ConcurrentModificationException")
@@ -183,6 +251,19 @@ class Handler(BaseHTTPRequestHandler):
         if raced:
             body = as_other_clients_object(target, request)
         status, headers, data = self.forward(target, body)
+        if is_lost_update_answer(target, database) and status == 200:
+            if database.startswith(LOST_UPDATE_AND_READ_PREFIX):
+                with self.server.lock:
+                    self.server.failing_reads.add(table_key(target, request, database))
+            self.reply_error("InternalServiceException")
+            return
+        if target == "AWSGlue.CreateTable" and status == 200:
+            with self.server.lock:
+                self.server.reads_after_create[table_key(target, request, database)] = 0
+            if is_lost_create_answer(target, database):
+                # an error the SDK sends the request again for
+                self.reply_error("InternalFailure", 500)
+                return
         if raced and status == 200:
             # the object exists now, but as far as this client can tell another client created it first
             self.reply_error("AlreadyExistsException")
@@ -226,21 +307,21 @@ class Handler(BaseHTTPRequestHandler):
         """Drop the table and create it again, as another client would: a table of the same name, created later."""
         table = self.get_table(database, name)
         table_input = {field: table[field] for field in TABLE_INPUT_FIELDS if field in table}
+        # another client's table does not carry the write id of the statement that created the dropped one
+        table_input.get("Parameters", {}).pop("duckdb.write_id", None)
         status, _, data = self.forward("AWSGlue.DeleteTable",
                                        json.dumps({"DatabaseName": database, "Name": name}).encode())
         if status != 200:
             raise RuntimeError(f"DeleteTable {database}.{name} failed: {data!r}")
-        # a later CreateTime than the dropped table's, even where it is kept to the second
-        time.sleep(1.1)
         status, _, data = self.forward("AWSGlue.CreateTable",
                                        json.dumps({"DatabaseName": database, "TableInput": table_input}).encode())
         if status != 200:
             raise RuntimeError(f"CreateTable {database}.{name} failed: {data!r}")
 
-    def reply_error(self, error):
+    def reply_error(self, error, status=400):
         payload = json.dumps({"__type": error, "Message": "injected by glue_fault_proxy"}).encode()
         headers = [("Content-Type", "application/x-amz-json-1.1"), ("x-amzn-ErrorType", error)]
-        self.reply(400, headers + [("x-amzn-RequestId", str(uuid.uuid4()))], payload)
+        self.reply(status, headers + [("x-amzn-RequestId", str(uuid.uuid4()))], payload)
 
     def reply(self, status, headers, body):
         self.send_response(status)
@@ -261,6 +342,11 @@ def main():
     args = parser.parse_args()
     server = ThreadingHTTPServer(("0.0.0.0", args.port), Handler)
     server.upstream = urllib.parse.urlsplit(args.upstream)
+    server.lock = threading.Lock()
+    # (database, table) whose next GetTable fails, after a fault_lost_update_and_read* UpdateTable
+    server.failing_reads = set()
+    # (database, table) -> the GetTables of it since it was created
+    server.reads_after_create = {}
     server.serve_forever()
 
 

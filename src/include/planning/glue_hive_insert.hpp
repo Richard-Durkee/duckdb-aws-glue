@@ -60,6 +60,9 @@ private:
 	                      const GlueTableInfo &table_info, PhysicalOperator &plan, const vector<Identifier> &names,
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
+	//! CREATE TABLE AS: remove the write id that marks its table as not finished. 'fetched' is the table as fetched
+	//! after it was created, if it was: the first attempt uses it instead of reading the table
+	void FinishCreatedTable(ClientContext &context, optional_ptr<const GlueTableInfo> fetched = nullptr) const;
 	//! Adds the files of a write whose partitions are registered to the glue_written_files temporary table
 	void RecordWrittenFiles(ClientContext &context, const vector<string> &files) const;
 	//! Throws when a partition registration skipped as existing is registered at another location than its files

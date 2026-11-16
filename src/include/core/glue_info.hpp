@@ -96,6 +96,8 @@ struct GlueTableInfo {
 	//! StorageDescriptor.SortColumns, in Glue's order; only name and sort_order are set
 	vector<GlueColumn> sort_columns;
 	unordered_map<string, string> parameters;
+	//! The table parameter a CREATE TABLE AS creates its table with and removes once its files are registered
+	static constexpr const char *UNFINISHED_WRITE_PARAMETER = "duckdb.write_id";
 	//! Glue's VersionId and CreateTime of a fetched table; a DROP + CREATE starts at the same version again, CreateTime
 	//! (and TableType, within one second) tells the two apart. Empty for a definition not fetched from Glue.
 	string version_id;
@@ -117,6 +119,9 @@ public:
 	string GetMetadataLocation() const;
 	//! Look up a table parameter (case-insensitive key), returns empty string if missing
 	string GetParameter(const string &key) const;
+	string GetUnfinishedWriteId() const;
+	static bool IsUnfinishedWriteParameter(const string &key);
+	void ThrowIfUnfinishedWrite() const;
 	bool IsBucketed() const;
 	//! Whether this is a partitioned table with Athena partition projection on (projection.enabled): Athena then
 	//! derives the partitions from the projection.* parameters and ignores the ones registered in Glue

@@ -244,8 +244,17 @@ their codec themselves.
   stay, empty), so the statement can be run again without adding its
   rows twice. Because the partition keys are the last columns of the table, `INSERT ... VALUES` without a
   column list must list them last. `CREATE TABLE ... AS` creates the Glue table when the statement starts executing,
-  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing). It is refused when the
-  location already holds data files, such as those of a dropped table, which would read as rows of the new table.
+  before the query runs (planning it, e.g. with `EXPLAIN` or `PREPARE`, creates nothing). The table carries the table
+  parameter `duckdb.write_id` until the statement has registered its files and removes it with an UpdateTable (the
+  role needs `glue:UpdateTable`; no table version is archived). If another client changed the table meanwhile, the
+  statement reads it again, up to three attempts; if another client dropped and created it again, it fails and leaves
+  that table alone (Glue cannot update a table only if it was created at a given time, so a table created again
+  between that read and the UpdateTable is not noticed). A `CREATE TABLE` (with or without a query or `IF NOT EXISTS`) or an `INSERT` that finds the
+  parameter on a table is refused: a `CREATE TABLE ... AS` that did not finish left the table empty or partly
+  written, or is still running, and the table is dropped before the statement is run again. `SELECT` and `ALTER TABLE`
+  still work on it, except that `duckdb.write_id` cannot be given as a `CREATE TABLE` option or changed with
+  `ALTER TABLE SET` / `RESET`. A `CREATE TABLE ... AS` is refused when the location already holds data files, such as
+  those of a dropped table, which would read as rows of the new table.
   `WITH (overwrite = true)` deletes those files instead, in one
   `RemoveFiles` call when the statement starts executing and before the table is created: they stay deleted if the
   statement then fails, and a failed delete may leave some of them (the table is then not created). It is refused
@@ -268,10 +277,12 @@ their codec themselves.
   table it created, so the statement can be run again. To find the files, the rollback lists every object below the
   table's location, which takes one LIST request per 1,000 objects; it lists nothing, and deletes nothing, if the
   location contains a glob character (`*`, `?`, `[`). A table `CREATE TABLE ... AS` created is kept if it holds files
-  of another writer, or if another client dropped and created it again while the statement ran. This is best effort:
+  of another writer, or if it is no longer the table the statement created (another client dropped and created it
+  again while the statement ran). This is best effort:
   a step that fails is logged as a warning (`CALL enable_logging(level := 'warning')` shows it). If the process
   dies, nothing is cleaned up: the files stay, and the rows in them appear once their partition is registered, by a
-  later `INSERT`, `MSCK REPAIR` or a crawler. Other queries can read the files of an insert before it finishes.
+  later `INSERT`, `MSCK REPAIR` or a crawler; the table a `CREATE TABLE ... AS` created keeps its `duckdb.write_id`.
+  Other queries can read the files of an insert before it finishes.
 - `ALTER TABLE ... ADD COLUMN` (appended last, no defaults or collations), `DROP COLUMN` (not the last data
   column, not a partition key, bucket or sort column) and `ALTER COLUMN ... TYPE` (no collations) update the Glue
   definition with UpdateTable.
@@ -692,7 +703,12 @@ CreateDatabase / CreateTable on a `fault_already_exists*` database before answer
 creates differs from what was asked for), and refuses the first attempt of each request on a `fault_throttled*`
 database with ThrottlingException, letting the SDK's retries through. A table named `fault_denied_*` is one the caller
 may not describe, as Lake Formation leaves it: GetTable on it fails with AccessDeniedException and GetTables leaves it
-out. Tests that need the proxy are skipped without it. It
+out. For `CREATE TABLE ... AS`, a `fault_unfinished_ctas*` database refuses UpdateTable and DeleteTable (the table is
+left as a crash would leave it), a `fault_lost_update_answer*` / `fault_lost_update_and_read*` database answers an
+applied UpdateTable with an error (and fails the GetTable after it), a `fault_lost_create_answer*` database does the
+same for CreateTable, a `fault_conflict_once*` database races another client's update against the first UpdateTable of
+each table, and a `fault_recreated_before_finish*` database drops and creates the table again, as another client,
+before the statement reads it to finish. Tests that need the proxy are skipped without it. It
 also sets `GLUE_LINK_PROXY_ENDPOINT`: `scripts/resource_link_proxy.py` in front of moto, which answers for the database
 `link_db` as Glue does through a database resource link whose target is `target_db`, and `GLUE_ENDPOINT_ALIAS`: moto
 under another URL, which is another Glue catalog to the prefetch cool-down (`glue_partition_load_cooldown`), which

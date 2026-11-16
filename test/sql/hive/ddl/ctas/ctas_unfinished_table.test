@@ -1,0 +1,543 @@
+# name: test/sql/hive/ddl/ctas/ctas_unfinished_table.test
+# description: A CREATE TABLE AS marks its table with duckdb.write_id until it finishes, and later statements refuse a marked table
+# group: [ctas]
+
+require httpfs
+
+require parquet
+
+require glue
+
+require-env GLUE_CATALOG_ID
+
+require-env GLUE_TEST_DB
+
+require-env GLUE_FAULT_ENDPOINT
+
+statement ok
+attach '{GLUE_CATALOG_ID}' as my_datalake (
+    TYPE glue,
+    ENDPOINT '{GLUE_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}',
+    DEFAULT_SCHEMA '{GLUE_TEST_DB}'
+);
+
+# The Glue API calls since the last truncate_duckdb_logs(), by operation
+statement ok
+CREATE MACRO glue_calls() AS TABLE
+    SELECT regexp_extract(request.headers['x-amz-target'], 'AWSGlue\.(\w+)', 1) AS api, count(*) AS n
+    FROM duckdb_logs_parsed('HTTP')
+    WHERE request.headers['x-amz-target'] IS NOT NULL
+    GROUP BY 1 ORDER BY 1;
+
+# the Glue operation is in the x-amz-target header, which HTTP logs redact by default
+statement ok
+SET redact_http_logs = false;
+
+statement ok
+CALL enable_logging('HTTP', storage='memory');
+
+# the fault proxy (scripts/glue_fault_proxy.py) refuses UpdateTable and DeleteTable on a fault_unfinished_ctas*
+# database, so a CREATE TABLE AS there can neither finish nor undo its table, as if its process had died
+statement ok
+attach '{GLUE_CATALOG_ID}' as fault_dl (
+    TYPE glue,
+    ENDPOINT '{GLUE_FAULT_ENDPOINT}',
+    DEFAULT_LOCATION '{DEFAULT_S3_LOCATION}/{TEST_DIR}'
+);
+
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_unfinished_ctas CASCADE;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_finished_plain;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_finished_partitioned;
+
+statement ok
+DROP TABLE IF EXISTS my_datalake.{GLUE_TEST_DB}.ctas_finished_empty;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_unfinished_ctas;
+
+#---------------------------------------------------------------------------
+# a finished CREATE TABLE AS leaves no marker
+#---------------------------------------------------------------------------
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_finished_plain AS SELECT range AS id FROM range(5);
+
+query I
+SELECT parameters['duckdb.write_id'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_finished_plain');
+----
+NULL
+
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_finished_partitioned PARTITIONED BY (p) AS
+SELECT range AS id, range % 2 AS p FROM range(6);
+
+query I
+SELECT parameters['duckdb.write_id'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_finished_partitioned');
+----
+NULL
+
+# a query without rows writes no files, and still finishes its table
+statement ok
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_finished_empty AS SELECT range AS id FROM range(0);
+
+query I
+SELECT parameters['duckdb.write_id'] FROM glue_get_table_response('my_datalake.{GLUE_TEST_DB}.ctas_finished_empty');
+----
+NULL
+
+# an IF NOT EXISTS against a finished table is the usual no-op
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.{GLUE_TEST_DB}.ctas_finished_plain AS SELECT range AS id FROM range(100);
+
+query I
+SELECT count(*) FROM my_datalake.{GLUE_TEST_DB}.ctas_finished_plain;
+----
+5
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS that does not finish leaves its table marked
+#---------------------------------------------------------------------------
+statement error
+CREATE TABLE fault_dl.fault_unfinished_ctas.left_behind PARTITIONED BY (p) AS
+SELECT range AS id, range % 3 AS p FROM range(9);
+----
+AccessDeniedException
+
+query I
+SELECT parameters['duckdb.write_id'] IS NOT NULL
+FROM glue_get_table_response('my_datalake.fault_unfinished_ctas.left_behind');
+----
+true
+
+# rerunning it, with or without IF NOT EXISTS, is refused instead of keeping or failing on the table
+statement error
+CREATE TABLE IF NOT EXISTS my_datalake.fault_unfinished_ctas.left_behind PARTITIONED BY (p) AS
+SELECT range AS id, range % 3 AS p FROM range(9);
+----
+was created by a CREATE TABLE AS that has not finished
+
+statement error
+CREATE TABLE my_datalake.fault_unfinished_ctas.left_behind PARTITIONED BY (p) AS
+SELECT range AS id, range % 3 AS p FROM range(9);
+----
+was created by a CREATE TABLE AS that has not finished
+
+# so is a CREATE TABLE IF NOT EXISTS without a query, which would otherwise take the table as it is
+statement error
+CREATE TABLE IF NOT EXISTS my_datalake.fault_unfinished_ctas.left_behind (id BIGINT);
+----
+was created by a CREATE TABLE AS that has not finished
+
+# the refusals leave the table as it was
+query I
+SELECT parameters['duckdb.write_id'] IS NOT NULL
+FROM glue_get_table_response('my_datalake.fault_unfinished_ctas.left_behind');
+----
+true
+
+# the marker cannot be set or removed as a table property
+statement error
+ALTER TABLE my_datalake.fault_unfinished_ctas.left_behind RESET ("duckdb.write_id");
+----
+marks a table whose CREATE TABLE AS has not finished
+
+statement error
+CREATE TABLE my_datalake.{GLUE_TEST_DB}.ctas_reserved (id INTEGER) WITH ("duckdb.write_id" = 'x');
+----
+is reserved
+
+# it is not part of the table's CREATE statement
+query I
+SELECT contains(sql, 'duckdb.write_id')
+FROM duckdb_tables()
+WHERE database_name = 'my_datalake' AND table_name = 'left_behind';
+----
+false
+
+# dropping the table and running the statement again works
+statement ok
+DROP TABLE my_datalake.fault_unfinished_ctas.left_behind;
+
+statement ok
+CREATE TABLE IF NOT EXISTS my_datalake.fault_unfinished_ctas.left_behind PARTITIONED BY (p) AS
+SELECT range AS id, range % 3 AS p FROM range(9);
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.fault_unfinished_ctas.left_behind;
+----
+9	36
+
+query I
+SELECT parameters['duckdb.write_id'] FROM glue_get_table_response('my_datalake.fault_unfinished_ctas.left_behind');
+----
+NULL
+
+#---------------------------------------------------------------------------
+# the same for a table without partitions, and every other statement that would use the marked table
+#---------------------------------------------------------------------------
+statement error
+CREATE TABLE fault_dl.fault_unfinished_ctas.left_plain AS SELECT range AS id FROM range(4);
+----
+AccessDeniedException
+
+query I
+SELECT parameters['duckdb.write_id'] IS NOT NULL
+FROM glue_get_table_response('my_datalake.fault_unfinished_ctas.left_plain');
+----
+true
+
+statement error
+CREATE TABLE IF NOT EXISTS my_datalake.fault_unfinished_ctas.left_plain AS SELECT range AS id FROM range(4);
+----
+was created by a CREATE TABLE AS that has not finished
+
+statement error
+CREATE TABLE my_datalake.fault_unfinished_ctas.left_plain (id INTEGER);
+----
+was created by a CREATE TABLE AS that has not finished
+
+statement error
+INSERT INTO my_datalake.fault_unfinished_ctas.left_plain SELECT range FROM range(3);
+----
+was created by a CREATE TABLE AS that has not finished
+
+statement error
+ALTER TABLE my_datalake.fault_unfinished_ctas.left_plain SET ("duckdb.write_id" = 'x');
+----
+marks a table whose CREATE TABLE AS has not finished
+
+# SELECT and the other ALTER TABLE statements still work, and keep the marker
+query I
+SELECT count(*) FROM my_datalake.fault_unfinished_ctas.left_plain;
+----
+0
+
+statement ok
+ALTER TABLE my_datalake.fault_unfinished_ctas.left_plain ADD COLUMN extra INTEGER;
+
+query I
+SELECT parameters['duckdb.write_id'] IS NOT NULL
+FROM glue_get_table_response('my_datalake.fault_unfinished_ctas.left_plain');
+----
+true
+
+statement ok
+DROP TABLE my_datalake.fault_unfinished_ctas.left_plain;
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS whose table another client keeps changing gives up after three attempts, and drops its table
+#---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_concurrent_update_ctas CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_concurrent_update_ctas;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+CREATE TABLE fault_dl.fault_concurrent_update_ctas.raced_plain AS SELECT range AS id FROM range(4);
+----
+was changed by another client since it was read
+
+# the table is read, and updated, three times
+query II
+SELECT api, n FROM glue_calls() WHERE api IN ('GetTable', 'UpdateTable');
+----
+GetTable	6
+UpdateTable	3
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement error
+CREATE TABLE fault_dl.fault_concurrent_update_ctas.raced_partitioned PARTITIONED BY (p) AS
+SELECT range AS id, range % 2 AS p FROM range(4);
+----
+was changed by another client since it was read
+
+query II
+SELECT api, n FROM glue_calls() WHERE api IN ('GetTable', 'UpdateTable');
+----
+GetTable	6
+UpdateTable	3
+
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND schema = 'fault_concurrent_update_ctas';
+----
+0
+
+statement ok
+DROP SCHEMA my_datalake.fault_concurrent_update_ctas CASCADE;
+
+#---------------------------------------------------------------------------
+# an UpdateTable whose answer is lost is read back: the CREATE TABLE AS finished
+#---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_lost_update_answer_ctas CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_lost_update_answer_ctas;
+
+statement ok
+SET glue_max_retries = 0;
+
+statement ok
+CREATE TABLE fault_dl.fault_lost_update_answer_ctas.lost_plain AS SELECT range AS id FROM range(4);
+
+statement ok
+CREATE TABLE fault_dl.fault_lost_update_answer_ctas.lost_partitioned PARTITIONED BY (p) AS
+SELECT range AS id, range % 2 AS p FROM range(4);
+
+statement ok
+RESET glue_max_retries;
+
+query I
+SELECT parameters['duckdb.write_id']
+FROM glue_get_table_response('my_datalake.fault_lost_update_answer_ctas.lost_plain');
+----
+NULL
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.fault_lost_update_answer_ctas.lost_partitioned;
+----
+4	6
+
+statement ok
+DROP SCHEMA my_datalake.fault_lost_update_answer_ctas CASCADE;
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS whose table another client changes once reads it again and finishes
+#---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_conflict_once_ctas CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_conflict_once_ctas;
+
+statement ok
+CREATE TABLE fault_dl.fault_conflict_once_ctas.once_plain AS SELECT range AS id FROM range(4);
+
+statement ok
+CREATE TABLE fault_dl.fault_conflict_once_ctas.once_partitioned PARTITIONED BY (p) AS
+SELECT range AS id, range % 2 AS p FROM range(4);
+
+# the other client's change stays, the marker is gone
+query III
+SELECT name, parameters['changed_by_another_client'], parameters['duckdb.write_id']
+FROM (
+    SELECT 'once_plain' AS name, *
+    FROM glue_get_table_response('my_datalake.fault_conflict_once_ctas.once_plain')
+    UNION ALL
+    SELECT 'once_partitioned' AS name, *
+    FROM glue_get_table_response('my_datalake.fault_conflict_once_ctas.once_partitioned')
+)
+ORDER BY name;
+----
+once_partitioned	true	NULL
+once_plain	true	NULL
+
+query II
+SELECT count(*), sum(id) FROM my_datalake.fault_conflict_once_ctas.once_partitioned;
+----
+4	6
+
+statement ok
+DROP SCHEMA my_datalake.fault_conflict_once_ctas CASCADE;
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS that cannot tell whether its marker was removed fails, and still drops its own table: on a
+# fault_lost_update_and_read* database the UpdateTable is applied, its answer lost, and the read after it fails too
+#---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_lost_update_and_read_ctas CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_lost_update_and_read_ctas;
+
+statement ok
+SET glue_max_retries = 0;
+
+statement error
+CREATE TABLE fault_dl.fault_lost_update_and_read_ctas.unknown_plain AS SELECT range AS id FROM range(4);
+----
+InternalServiceException
+
+statement error
+CREATE TABLE fault_dl.fault_lost_update_and_read_ctas.unknown_partitioned PARTITIONED BY (p) AS
+SELECT range AS id, range % 2 AS p FROM range(4);
+----
+InternalServiceException
+
+statement ok
+RESET glue_max_retries;
+
+query I
+SELECT count(*) FROM (SHOW ALL TABLES) WHERE database = 'my_datalake' AND schema = 'fault_lost_update_and_read_ctas';
+----
+0
+
+# and the name can be used again
+statement ok
+CREATE TABLE my_datalake.fault_lost_update_and_read_ctas.unknown_plain AS SELECT range AS id FROM range(4);
+
+query I
+SELECT count(*) FROM my_datalake.fault_lost_update_and_read_ctas.unknown_plain;
+----
+4
+
+statement ok
+DROP SCHEMA my_datalake.fault_lost_update_and_read_ctas CASCADE;
+
+#---------------------------------------------------------------------------
+# a CREATE TABLE AS whose table another client dropped and created again leaves that table alone: on a
+# fault_recreated_before_finish* database the second GetTable of a table after its CreateTable finds it recreated
+#---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_recreated_before_finish_ctas CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_recreated_before_finish_ctas;
+
+statement error
+CREATE TABLE fault_dl.fault_recreated_before_finish_ctas.recreated_plain AS SELECT range AS id FROM range(4);
+----
+was dropped and created again by another client
+
+statement error
+CREATE TABLE fault_dl.fault_recreated_before_finish_ctas.recreated_partitioned PARTITIONED BY (p) AS
+SELECT range AS id, range % 2 AS p FROM range(4);
+----
+was dropped and created again by another client
+
+# the other client's tables are still there, and the statement's files are gone
+query II
+SELECT name, parameters['duckdb.write_id']
+FROM (
+    SELECT 'recreated_plain' AS name, *
+    FROM glue_get_table_response('my_datalake.fault_recreated_before_finish_ctas.recreated_plain')
+    UNION ALL
+    SELECT 'recreated_partitioned' AS name, *
+    FROM glue_get_table_response('my_datalake.fault_recreated_before_finish_ctas.recreated_partitioned')
+)
+ORDER BY name;
+----
+recreated_partitioned	NULL
+recreated_plain	NULL
+
+query I
+SELECT count(*) FROM glue_partitions('my_datalake.fault_recreated_before_finish_ctas.recreated_partitioned');
+----
+0
+
+query I
+SELECT count(*) FROM glob('{DEFAULT_S3_LOCATION}/{TEST_DIR}/fault_recreated_before_finish_ctas/*/**');
+----
+0
+
+statement ok
+DROP SCHEMA my_datalake.fault_recreated_before_finish_ctas CASCADE;
+
+#---------------------------------------------------------------------------
+# a CreateTable whose answer is lost: the SDK sends it again and finds the table it created, which the statement takes
+# as its own; without retries the statement fails and drops the table
+#---------------------------------------------------------------------------
+statement ok
+DROP SCHEMA IF EXISTS my_datalake.fault_lost_create_answer_ctas CASCADE;
+
+statement ok
+CREATE SCHEMA my_datalake.fault_lost_create_answer_ctas;
+
+statement ok
+CREATE TABLE fault_dl.fault_lost_create_answer_ctas.lost_plain AS SELECT range AS id FROM range(4);
+
+statement ok
+CREATE TABLE fault_dl.fault_lost_create_answer_ctas.lost_partitioned PARTITIONED BY (p) AS
+SELECT range AS id, range % 2 AS p FROM range(4);
+
+query III
+SELECT name, parameters['duckdb.write_id'], count
+FROM (
+    SELECT 'lost_plain' AS name, *, (SELECT count(*) FROM my_datalake.fault_lost_create_answer_ctas.lost_plain) AS count
+    FROM glue_get_table_response('my_datalake.fault_lost_create_answer_ctas.lost_plain')
+    UNION ALL
+    SELECT 'lost_partitioned' AS name, *,
+           (SELECT count(*) FROM my_datalake.fault_lost_create_answer_ctas.lost_partitioned) AS count
+    FROM glue_get_table_response('my_datalake.fault_lost_create_answer_ctas.lost_partitioned')
+)
+ORDER BY name;
+----
+lost_partitioned	NULL	4
+lost_plain	NULL	4
+
+statement ok
+SET glue_max_retries = 0;
+
+statement error
+CREATE TABLE fault_dl.fault_lost_create_answer_ctas.lost_failed AS SELECT range AS id FROM range(4);
+----
+InternalFailure
+
+statement ok
+RESET glue_max_retries;
+
+query I
+SELECT count(*) FROM (SHOW ALL TABLES)
+WHERE database = 'my_datalake' AND schema = 'fault_lost_create_answer_ctas' AND name = 'lost_failed';
+----
+0
+
+statement ok
+DROP SCHEMA my_datalake.fault_lost_create_answer_ctas CASCADE;
+
+#---------------------------------------------------------------------------
+# under a connection-scoped metadata cache, a CREATE TABLE that holds the table from before it finished reads it again
+#---------------------------------------------------------------------------
+statement error
+CREATE TABLE fault_dl.fault_unfinished_ctas.cached AS SELECT range AS id FROM range(0);
+----
+AccessDeniedException
+
+statement ok con1
+SET glue_metadata_cache_scope = 'connection';
+
+query I con1
+SELECT count(*) FROM my_datalake.fault_unfinished_ctas.cached;
+----
+0
+
+# another connection drops the table and creates it again, this time finishing it
+statement ok con2
+DROP TABLE my_datalake.fault_unfinished_ctas.cached;
+
+statement ok con2
+CREATE TABLE my_datalake.fault_unfinished_ctas.cached AS SELECT range AS id FROM range(3);
+
+statement ok con1
+CREATE TABLE IF NOT EXISTS my_datalake.fault_unfinished_ctas.cached AS SELECT range AS id FROM range(100);
+
+statement ok con1
+RESET glue_metadata_cache_scope;
+
+query I
+SELECT count(*) FROM my_datalake.fault_unfinished_ctas.cached;
+----
+3
+
+statement ok
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_finished_plain;
+
+statement ok
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_finished_partitioned;
+
+statement ok
+DROP TABLE my_datalake.{GLUE_TEST_DB}.ctas_finished_empty;
+
+statement ok
+DROP SCHEMA my_datalake.fault_unfinished_ctas CASCADE;

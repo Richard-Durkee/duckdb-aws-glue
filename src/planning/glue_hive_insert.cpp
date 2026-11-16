@@ -767,6 +767,66 @@ void GlueHiveInsert::RecordWrittenFiles(ClientContext &context, const vector<str
 	}
 }
 
+void GlueHiveInsert::FinishCreatedTable(ClientContext &context, optional_ptr<const GlueTableInfo> fetched) const {
+	// a CREATE TABLE AS planned its table before creating it, an INSERT bound a fetched one
+	if (table_info.fetched) {
+		return;
+	}
+	auto write = GlueTransaction::Get(context, catalog).FindHiveWrite(write_id);
+	if (!write) {
+		throw InternalException("CREATE TABLE AS '%s.%s' has no write to finish", table_info.schema_name,
+		                        table_info.name);
+	}
+	constexpr idx_t MAX_ATTEMPTS = 3;
+	for (idx_t attempt = 1;; attempt++) {
+		GlueTableInfo read;
+		optional_ptr<const GlueTableInfo> table;
+		if (attempt == 1) {
+			table = fetched;
+		}
+		if (!table) {
+			if (!GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, read)) {
+				throw CatalogException("Glue table \"%s.%s\" created by this CREATE TABLE AS no longer exists",
+				                       table_info.schema_name, table_info.name);
+			}
+			table = optional_ptr<const GlueTableInfo>(read);
+		}
+		write->ThrowIfNotOwnTable(*table);
+		if (table->GetUnfinishedWriteId().empty()) {
+			// removed by an attempt whose answer was lost
+			return;
+		}
+		vector<string> unset;
+		for (auto &parameter : table->parameters) {
+			if (GlueTableInfo::IsUnfinishedWriteParameter(parameter.first)) {
+				unset.push_back(parameter.first);
+			}
+		}
+		// Glue may apply the change although the answer is an error: a table without the write id may be ours from now
+		write->removal_sent = true;
+		write->removal_version_id = table->version_id;
+		write->removal_create_time =
+		    table->create_time_ms > 0 ? optional_idx(NumericCast<idx_t>(table->create_time_ms)) : optional_idx();
+		try {
+			GlueAPI::UpdateTableParameters(context, catalog, *table, {}, unset, true);
+			return;
+		} catch (TransactionException &) {
+			// another client changed the table since it was read: read it again
+			if (attempt == MAX_ATTEMPTS) {
+				throw;
+			}
+		} catch (std::exception &ex) {
+			ErrorData error(ex);
+			GlueTableInfo current;
+			if (GlueAPI::GetTable(context, catalog, table_info.schema_name, table_info.name, current) &&
+			    write->OwnsTable(current) && current.GetUnfinishedWriteId().empty()) {
+				return;
+			}
+			error.Throw();
+		}
+	}
+}
+
 //! Case sensitive, like S3 paths
 using FilePathToGluePartition = unordered_map<string, GluePartitionInput>;
 
@@ -817,6 +877,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	}
 	auto &transaction = GlueTransaction::Get(context, catalog);
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
+		FinishCreatedTable(context);
 		transaction.CompleteHiveWrite(write_id);
 		RecordWrittenFiles(context, state.written_files);
 		return SinkFinalizeType::READY;
@@ -870,6 +931,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 				throw CatalogException("Table \"%s.%s\" was created but could not be fetched afterwards",
 				                       table_info.schema_name, table_info.name);
 			}
+			GlueTransaction::Get(context, catalog).FindHiveWrite(write_id)->ThrowIfNotOwnTable(created);
 			registered = &created;
 		}
 		// a cancel or timeout during registration would fail the statement with its rows in the table: undo the write
@@ -878,6 +940,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 		auto already_existing = GlueAPI::BatchCreatePartitions(context, catalog, *registered, to_register);
 		CheckExistingPartitionLocations(context, already_existing);
 		context.BlockingInterruptCheck();
+		FinishCreatedTable(context, registered);
 	} catch (std::exception &ex) {
 		// Undo the INSERT by deleting the files it wrote, so that running it again does not add its rows twice. The
 		// partitions it registered stay, empty: another INSERT may have added rows to them in the meantime.

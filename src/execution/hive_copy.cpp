@@ -124,24 +124,21 @@ unique_ptr<GlobalSinkState> GlueHiveCopy::GetGlobalSinkState(ClientContext &cont
 			ClearLocation(context, *schema.get_mutable(), table_info, location, overwrite);
 			// the client to drop the table with is taken first: once the table exists, nothing may stop the undo
 			write.client = GlueAPI::GetClient(context, catalog);
-			auto &create_schema = *schema.get_mutable();
-			auto created = create_schema.CreateTableFromInfo(catalog.GetCatalogTransaction(context), *info, table_info);
+			write.created_table = true;
+		}
+		// registered before the table is created: a table whose creation was answered with an error is undone too
+		transaction.AddHiveWrite(std::move(write));
+		if (info) {
+			auto unfinished = table_info;
+			unfinished.parameters[GlueTableInfo::UNFINISHED_WRITE_PARAMETER] = write_id;
+			auto created =
+			    schema.get_mutable()->CreateTableFromInfo(catalog.GetCatalogTransaction(context), *info, unfinished);
 			if (!created) {
 				throw CatalogException("Table with name \"%s\" appeared between planning and execution; retry CREATE "
 				                       "TABLE IF NOT EXISTS",
 				                       table_info.name);
 			}
-			write.created_table = true;
-			try {
-				write.created_table_time =
-				    GlueAPI::GetTableCreateTime(write.client, catalog, table_info.schema_name, table_info.name);
-			} catch (std::exception &ex) {
-				// not known: the undo then drops the table if it holds no other writer's files
-				DUCKDB_LOG_WARNING(context, "Could not fetch the Glue table '%s.%s' just created: %s",
-				                   table_info.schema_name, table_info.name, ErrorData(ex).RawMessage());
-			}
 		}
-		transaction.AddHiveWrite(std::move(write));
 	}
 	return PhysicalCopyToFile::GetGlobalSinkState(context);
 }

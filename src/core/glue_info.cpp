@@ -6,6 +6,7 @@
 
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/exception/binder_exception.hpp"
+#include "duckdb/common/exception/catalog_exception.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -19,6 +20,24 @@ string GlueTableInfo::GetParameter(const string &key) const {
 		}
 	}
 	return string();
+}
+
+string GlueTableInfo::GetUnfinishedWriteId() const {
+	return GetParameter(UNFINISHED_WRITE_PARAMETER);
+}
+
+bool GlueTableInfo::IsUnfinishedWriteParameter(const string &key) {
+	return StringUtil::CIEquals(key, UNFINISHED_WRITE_PARAMETER);
+}
+
+void GlueTableInfo::ThrowIfUnfinishedWrite() const {
+	auto unfinished = GetUnfinishedWriteId();
+	if (!unfinished.empty()) {
+		throw CatalogException("Table \"%s\" in Glue database \"%s\" was created by a CREATE TABLE AS that has not "
+		                       "finished (write %s): it may still be running, or it failed and left the table empty "
+		                       "or partly written. Drop the table before running the statement again",
+		                       name, schema_name, unfinished);
+	}
 }
 
 string HiveFileFormatToString(HiveFileFormat format) {

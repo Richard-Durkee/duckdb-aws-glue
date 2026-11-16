@@ -522,6 +522,7 @@ GlueTable &GlueCatalog::GetHiveTableForDML(ClientContext &context, TableCatalogE
                                            GlueTableInfo &table_info) {
 	auto &glue_table = table.Cast<GlueTable>();
 	table_info = glue_table.schema.Cast<GlueSchemaEntry>().DefinitionForWrite(context, glue_table);
+	table_info.ThrowIfUnfinishedWrite();
 	auto format = table_info.GetFormat();
 	if (!format.IsHive()) {
 		throw NotImplementedException("%s on Glue table '%s' with type %s is not supported, only Hive tables can be "

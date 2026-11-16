@@ -7,6 +7,7 @@
 #include "planning/hive_multi_file_reader.hpp"
 
 #include "duckdb/common/error_data.hpp"
+#include "duckdb/common/exception/catalog_exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/multi_file/multi_file_list.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -15,6 +16,27 @@
 #include "duckdb/main/database.hpp"
 
 namespace duckdb {
+
+bool GlueHiveWrite::OwnsTable(const GlueTableInfo &table) const {
+	auto table_write_id = table.GetUnfinishedWriteId();
+	if (table_write_id == write_id) {
+		return true;
+	}
+	if (!removal_sent || !table_write_id.empty() || table.version_id == removal_version_id) {
+		return false;
+	}
+	// Glue keeps whole seconds, and a table created again starts at the version the dropped one did
+	return !removal_create_time.IsValid() || table.create_time_ms <= 0 ||
+	       static_cast<idx_t>(table.create_time_ms) == removal_create_time.GetIndex();
+}
+
+void GlueHiveWrite::ThrowIfNotOwnTable(const GlueTableInfo &table) const {
+	if (!OwnsTable(table)) {
+		throw CatalogException("Glue table \"%s.%s\" was dropped and created again by another client while this "
+		                       "CREATE TABLE AS ran",
+		                       table.schema_name, table.name);
+	}
+}
 
 void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 	auto table = database_name + "." + table_name;
@@ -57,23 +79,24 @@ void GlueHiveWrite::Undo(ClientContext &context, GlueCatalog &catalog) {
 	if (!created_table) {
 		return;
 	}
-	if (!listed || others_files) {
-		// another writer's files would be left in a table nobody reads: keep the table
-		DUCKDB_LOG_WARNING(context, "Kept Hive table '%s' after CREATE TABLE AS failed: %s", table,
-		                   listed ? "it holds files another writer added" : "its location could not be listed");
-		return;
-	}
 	try {
-		if (created_table_time.IsValid()) {
-			auto create_time = GlueAPI::GetTableCreateTime(client, catalog, database_name, table_name);
-			if (create_time.IsValid() && create_time.GetIndex() != created_table_time.GetIndex()) {
-				// most likely dropped and created again by someone else while the statement ran: keep it
-				DUCKDB_LOG_WARNING(context,
-				                   "Kept Hive table '%s' after CREATE TABLE AS failed: it was created again by another "
-				                   "client while the statement ran",
-				                   table);
-				return;
-			}
+		GlueTableInfo current;
+		if (!GlueAPI::GetTable(client, catalog, database_name, table_name, current)) {
+			return;
+		}
+		if (!OwnsTable(current)) {
+			// not created by the statement, or dropped and created again by someone else while it ran: keep it
+			DUCKDB_LOG_WARNING(context,
+			                   "Kept Hive table '%s' after CREATE TABLE AS failed: it is not the table the statement "
+			                   "created",
+			                   table);
+			return;
+		}
+		if (!listed || others_files) {
+			// another writer's files would be left in a table nobody reads: keep the table
+			DUCKDB_LOG_WARNING(context, "Kept Hive table '%s' after CREATE TABLE AS failed: %s", table,
+			                   listed ? "it holds files another writer added" : "its location could not be listed");
+			return;
 		}
 		GlueAPI::DeleteTable(context, client, catalog, database_name, table_name);
 		// looked up again by name: the schema entry the statement used may have been replaced since

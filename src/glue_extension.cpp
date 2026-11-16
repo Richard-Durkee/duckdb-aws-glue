@@ -168,6 +168,11 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "them. Default true; false writes every file in place.",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(true));
 
+	config.AddExtensionOption("glue_debug_publish_by_copy",
+	                          "For tests and measurements: publish staged files by copying their bytes through DuckDB "
+	                          "instead of moving them. Default false.",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
+
 	config.AddExtensionOption(
 	    "glue_debug_fail_partition_registration",
 	    "For tests: '<Glue error code>:<n>' makes the n-th partition a write registers in Glue, "

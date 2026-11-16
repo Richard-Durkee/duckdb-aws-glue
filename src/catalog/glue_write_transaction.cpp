@@ -5,6 +5,7 @@
 #include "catalog/glue_transaction.hpp"
 
 #include "duckdb/common/atomic.hpp"
+#include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/logging/logger.hpp"
@@ -52,7 +53,22 @@ static void CopyFileContents(FileSystem &fs, const string &from, const string &t
 	target->Close();
 }
 
-static void PublishStagedFiles(FileSystem &fs, GlueHiveWrite &write) {
+//! Moves the staged file into place, which S3 does with a server-side copy; a file system that can not move it (an
+//! object over CopyObject's limit, another bucket's credentials, an older httpfs) gets its bytes copied instead
+static bool PublishFile(FileSystem &fs, const string &from, const string &to, bool force_copy, string &copy_reason) {
+	if (!force_copy) {
+		try {
+			fs.MoveFile(from, to);
+			return true;
+		} catch (NotImplementedException &ex) {
+			copy_reason = ErrorData(ex).RawMessage();
+		}
+	}
+	CopyFileContents(fs, from, to);
+	return false;
+}
+
+static void PublishStagedFiles(ClientContext &context, FileSystem &fs, GlueHiveWrite &write) {
 	vector<string> staged;
 	for (auto &file : write.files) {
 		if (write.FinalPath(file) != file) {
@@ -62,9 +78,14 @@ static void PublishStagedFiles(FileSystem &fs, GlueHiveWrite &write) {
 	if (staged.empty()) {
 		return;
 	}
+	Value force_copy_setting;
+	auto force_copy = context.TryGetCurrentSetting("glue_debug_publish_by_copy", force_copy_setting) &&
+	                  !force_copy_setting.IsNull() && BooleanValue::Get(force_copy_setting);
 	mutex publish_lock;
 	ErrorData first_error;
 	atomic<idx_t> next {0};
+	atomic<idx_t> moved {0};
+	string copy_reason;
 	auto worker = [&]() {
 		while (true) {
 			auto index = next++;
@@ -73,8 +94,14 @@ static void PublishStagedFiles(FileSystem &fs, GlueHiveWrite &write) {
 			}
 			auto final_path = write.FinalPath(staged[index]);
 			try {
-				CopyFileContents(fs, staged[index], final_path);
+				string reason;
+				if (PublishFile(fs, staged[index], final_path, force_copy, reason)) {
+					moved++;
+				}
 				lock_guard<mutex> guard(publish_lock);
+				if (copy_reason.empty()) {
+					copy_reason = reason;
+				}
 				write.published_files.push_back(final_path);
 			} catch (std::exception &ex) {
 				lock_guard<mutex> guard(publish_lock);
@@ -99,6 +126,9 @@ static void PublishStagedFiles(FileSystem &fs, GlueHiveWrite &write) {
 	if (first_error.HasError()) {
 		throw IOException("Publishing a staged file failed: %s", first_error.RawMessage());
 	}
+	DUCKDB_LOG_INFO(context, "Published the %llu staged files of Hive table '%s.%s': %llu moved, %llu copied%s",
+	                staged.size(), write.database_name, write.table_name, moved.load(), staged.size() - moved.load(),
+	                copy_reason.empty() ? string() : " (" + copy_reason + ")");
 }
 
 static void RemoveFilesBestEffort(FileSystem &fs, const vector<string> &files) {
@@ -138,7 +168,7 @@ void GlueWriteTransaction::Commit(ClientContext &context, GlueCatalog &catalog, 
 				// before anything becomes visible: a commit that does not finish is found and undone by its journal
 				write.WriteJournal(fs);
 				write.journal_written = true;
-				PublishStagedFiles(fs, write);
+				PublishStagedFiles(context, fs, write);
 			}
 			if (write.create_schema) {
 				// the client to drop the table with is taken first: once the table exists, nothing may stop the undo

@@ -11,6 +11,7 @@
 
 namespace duckdb {
 class GlueCatalog;
+struct GlueHiveWrite;
 class GlueSchemaEntry;
 class GlueTable;
 
@@ -61,7 +62,7 @@ private:
 	                      const vector<LogicalType> &types, optional_ptr<GlueSchemaEntry> create_schema,
 	                      unique_ptr<BoundCreateTableInfo> create_info);
 	//! Adds the files of a write to the glue_written_files temporary table
-	void RecordWrittenFiles(ClientContext &context, const vector<string> &files) const;
+	void RecordWrittenFiles(ClientContext &context, const GlueHiveWrite &write) const;
 
 public:
 	//! The target catalog (for partition registration after the file write).

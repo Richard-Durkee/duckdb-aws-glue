@@ -9,6 +9,8 @@
 #include "duckdb/common/hive_partitioning.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/common/types/uuid.hpp"
+#include "duckdb/common/unordered_set.hpp"
+#include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/execution/operator/persistent/physical_copy_to_file.hpp"
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/function/function_binder.hpp"
@@ -230,17 +232,63 @@ static unique_ptr<Expression> FinishPartitionPath(unique_ptr<BoundCaseExpression
 	return std::move(result);
 }
 
+//! The directories of the partitions readers already see: rows written there go below the staging directory of the
+//! write instead, and are copied into place when it commits
+struct StagedPartitionPathData : public FunctionData {
+	StagedPartitionPathData(string staging_directory_p, unordered_set<string> directories_p)
+	    : staging_directory(std::move(staging_directory_p)), directories(std::move(directories_p)) {
+	}
+
+	string staging_directory;
+	unordered_set<string> directories;
+
+public:
+	unique_ptr<FunctionData> Copy() const override {
+		return make_uniq<StagedPartitionPathData>(staging_directory, directories);
+	}
+	bool Equals(const FunctionData &other_p) const override {
+		auto &other = other_p.Cast<StagedPartitionPathData>();
+		return staging_directory == other.staging_directory && directories == other.directories;
+	}
+};
+
+static void StagedPartitionPathFunction(DataChunk &args, ExpressionState &state, Vector &result) {
+	auto &data = state.expr.Cast<BoundFunctionExpression>().BindInfo()->Cast<StagedPartitionPathData>();
+	UnaryExecutor::Execute<string_t, string_t>(args.data[0], result, [&](const string_t &path) {
+		auto directory = path.GetString();
+		if (data.directories.find(directory) == data.directories.end()) {
+			return StringVector::AddString(result, directory);
+		}
+		return StringVector::AddString(result, data.staging_directory + "/" + directory);
+	});
+}
+
+//! 'path' with the directories in 'directories' moved below 'staging_directory'
+static unique_ptr<Expression> StagePartitionPath(unique_ptr<Expression> path, const string &staging_directory,
+                                                 unordered_set<string> directories) {
+	if (staging_directory.empty() || directories.empty()) {
+		return path;
+	}
+	ScalarFunction function(Identifier("glue_staged_partition_path"), {LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                        StagedPartitionPathFunction);
+	vector<unique_ptr<Expression>> children;
+	children.push_back(std::move(path));
+	return make_uniq<BoundFunctionExpression>(
+	    BoundScalarFunction(function), std::move(children),
+	    make_uniq<StagedPartitionPathData>(staging_directory, std::move(directories)));
+}
+
 //! The PARTITION_PATH of the copy: the hive layout (<key>=<value>/...), except for the existing partitions registered
 //! at other locations, which are written to their own location, and the existing partitions whose column types differ
 //! from the table's, which a row may not be written to: files of the table's types in them would not match what the
 //! partition declares. 'planned_locations' receives the location of every existing partition by its Glue values, and
-//! 'partition_directories' receives the directories of the partitions at other locations with their Glue values.
-static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, optional_ptr<GlueTable> existing_table,
-                                                  const GlueTableInfo &table_info, const string &location,
-                                                  const vector<Identifier> &names, const vector<LogicalType> &types,
-                                                  const vector<idx_t> &partition_columns,
-                                                  map<vector<string>, string> &planned_locations,
-                                                  unordered_map<string, vector<string>> &partition_directories) {
+//! 'partition_directories' receives the directories of the partitions at other locations with their Glue values. With
+//! a 'staging_directory', the rows of existing partitions, which readers see, are written below it.
+static unique_ptr<Expression>
+CreatePartitionPath(ClientContext &context, optional_ptr<GlueTable> existing_table, const GlueTableInfo &table_info,
+                    const string &location, const vector<Identifier> &names, const vector<LogicalType> &types,
+                    const vector<idx_t> &partition_columns, map<vector<string>, string> &planned_locations,
+                    unordered_map<string, vector<string>> &partition_directories, const string &staging_directory) {
 	FunctionBinder function_binder(context);
 	vector<unique_ptr<Expression>> components;
 	for (idx_t i = 0; i < partition_columns.size(); i++) {
@@ -272,6 +320,7 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		keys.push_back(names[column_index].GetIdentifierName());
 	}
 	vector<pair<string, vector<string>>> custom_directories;
+	unordered_set<string> visible_directories;
 	for (auto &partition : partitions) {
 		planned_locations.emplace(partition.values, partition.location);
 		if (partition.values.size() != partition_columns.size()) {
@@ -295,6 +344,9 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		auto mismatch = partition.FindColumnTypeMismatch(table_info.columns, columns_by_position);
 		bool writable;
 		auto relative_path = RelativePartitionPath(location, partition.location, writable);
+		if (!mismatch.IsValid() && writable && !relative_path.empty()) {
+			visible_directories.insert(relative_path);
+		}
 		// otherwise the rows are written to the partition's location with its Glue values, so that the INSERT
 		// does not register a second partition there
 		if (!mismatch.IsValid() && relative_path == HivePartitionDirectory(keys, canonical_values).ToString() &&
@@ -354,7 +406,8 @@ static unique_ptr<Expression> CreatePartitionPath(ClientContext &context, option
 		                       StringUtil::Join(custom.second, ", ")));
 		result->CaseChecksMutable().push_back(std::move(check));
 	}
-	return FinishPartitionPath(std::move(result), std::move(hive_path));
+	return StagePartitionPath(FinishPartitionPath(std::move(result), std::move(hive_path)), staging_directory,
+	                          std::move(visible_directories));
 }
 
 //! The part of a parquet file name before ".parquet" that names its codec, as parquet-mr names them ("snappy." for
@@ -598,14 +651,17 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 
 	// Glue catalogs have no catalog version, so every execution plans again and gets its own write id
 	auto write_id = UUID::ToString(UUIDv7::GenerateRandomUUID());
-	// staged: every file goes below a hidden directory of the location, and is copied into place at commit
+	// Staged: the files readers would see before the commit go below a hidden directory of the location, and are copied
+	// into place when the write commits. Those are the files of an unpartitioned table and of its existing partitions;
+	// new partitions and the table of a CREATE TABLE AS are only read once the commit registers them.
+	string staging_directory;
 	string staging_root;
 	Value staging;
-	if (context.TryGetCurrentSetting("glue_write_staging", staging) && !staging.IsNull() &&
+	if (existing_table && context.TryGetCurrentSetting("glue_write_staging", staging) && !staging.IsNull() &&
 	    BooleanValue::Get(staging)) {
-		staging_root = location + "/.duckdb-staging-" + write_id;
+		staging_directory = ".duckdb-staging-" + write_id;
+		staging_root = location + "/" + staging_directory;
 	}
-	auto write_root = staging_root.empty() ? location : staging_root;
 	auto return_types = GetCopyFunctionReturnLogicalTypes(CopyFunctionReturnType::CHANGED_ROWS_AND_FILE_LIST);
 	auto &copy = planner
 	                 .Make<GlueHiveCopy>(std::move(return_types), copy_function->function, std::move(function_data),
@@ -622,19 +678,19 @@ void GlueHiveInsert::PlanWrite(ClientContext &context, PhysicalPlanGenerator &pl
 	map<vector<string>, string> planned_locations;
 	unordered_map<string, vector<string>> partition_directories;
 	if (!partition_columns.empty()) {
-		copy.file_path = write_root;
+		copy.file_path = location;
 		copy.partition_output = true;
 		copy.partition_columns = partition_columns;
 		copy.write_partition_columns = false;
 		copy.hive_file_pattern = true;
 		copy.partition_path_expression =
 		    CreatePartitionPath(context, existing_table, table_info, location, copy_names, copy_types,
-		                        partition_columns, planned_locations, partition_directories);
+		                        partition_columns, planned_locations, partition_directories, staging_directory);
 		// with partitioned output the copy must not initialize a single (partition-less) output file
 		copy.write_empty_file = true;
 		copy.per_thread_output = false;
 	} else {
-		copy.file_path = write_root;
+		copy.file_path = staging_root.empty() ? location : staging_root;
 		copy.partition_output = false;
 		// false makes the first Sink open a writer at the location itself, leaving an object at the table key
 		copy.write_empty_file = true;
@@ -757,10 +813,16 @@ SinkResultType GlueHiveInsert::Sink(ExecutionContext &context, DataChunk &chunk,
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
-void GlueHiveInsert::RecordWrittenFiles(ClientContext &context, const vector<string> &files) const {
-	if (!files.empty() && GlueWrittenFiles::IsEnabled(context)) {
-		GlueWrittenFiles::Append(context, table_info.schema_name + "." + table_info.name, files);
+void GlueHiveInsert::RecordWrittenFiles(ClientContext &context, const GlueHiveWrite &write) const {
+	if (write.files.empty() || !GlueWrittenFiles::IsEnabled(context)) {
+		return;
 	}
+	// where the files are once the write commits, not the staging directory they were written to
+	vector<string> files;
+	for (auto &file : write.files) {
+		files.push_back(write.FinalPath(file));
+	}
+	GlueWrittenFiles::Append(context, table_info.schema_name + "." + table_info.name, files);
 }
 
 //! Case sensitive, like S3 paths
@@ -781,7 +843,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	}
 	if (table_info.partition_keys.empty() || state.written_files.empty()) {
 		write->complete = true;
-		RecordWrittenFiles(context, state.written_files);
+		RecordWrittenFiles(context, *write);
 		return SinkFinalizeType::READY;
 	}
 
@@ -825,7 +887,7 @@ SinkFinalizeType GlueHiveInsert::Finalize(Pipeline &pipeline, Event &event, Clie
 	}
 	// registered when the transaction commits
 	write->complete = true;
-	RecordWrittenFiles(context, state.written_files);
+	RecordWrittenFiles(context, *write);
 	return SinkFinalizeType::READY;
 }
 

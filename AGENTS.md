@@ -108,7 +108,8 @@ Benchmarks (`benchmark/`, incl. TPC-H/TPC-DS SF1 against local Glue) run with
   transaction's `GlueWriteTransaction` (`src/catalog/glue_write_transaction.cpp`) before anything is written, and
   `GlueHiveInsert::Finalize` records its files and new partitions. The writes are applied when the transaction
   commits (`GlueTransactionManager::CommitTransaction`): CTAS overwrite deletes the old files, staged files
-  (`glue_write_staging`) are copied into place, the CTAS table is created and the partitions are registered with
+  (`glue_write_staging`, on by default; only files of unpartitioned tables and existing partitions are staged, via the
+  `glue_staged_partition_path` wrapper on the copy's partition path) are copied into place, the CTAS table is created and the partitions are registered with
   `BatchCreatePartition`. A rollback, or a failed commit, undoes every write: the partitions the commit registered
   are deleted, the files are deleted by their write id prefix and the table a CTAS created is dropped, unless another
   writer's data files are there or the table was created again since. INSERT works in explicit transactions; CTAS

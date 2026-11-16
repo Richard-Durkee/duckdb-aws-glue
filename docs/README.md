@@ -236,9 +236,13 @@ their codec themselves.
   of a statement that has not committed. Glue errors on single partitions that may pass (throttling, internal errors)
   are retried; when Glue still refuses a partition, or the statement fails or is rolled back, the write is undone: the
   files it wrote are deleted, and the partitions and the table it created at commit are removed again, so the
-  statement can be run again without adding its rows twice. Files written into existing partitions or an
-  unpartitioned table are visible as soon as they are written; with `SET glue_write_staging = true` every file is
-  written below a hidden staging directory of the table location and copied into place at commit instead. Because
+  statement can be run again without adding its rows twice. The files an `INSERT` adds to an unpartitioned table
+  or to an existing partition are written below a hidden staging directory of the table location,
+  `.duckdb-staging-<write id>`, and copied into place when the transaction commits, so no reader sees them before.
+  Files of new partitions, and every file of a `CREATE TABLE ... AS`, are written in place: they are read only once
+  the commit registers their partition or creates their table. `SET glue_write_staging = false` writes every file in
+  place, which makes the files of existing partitions and unpartitioned tables visible as soon as they are written.
+  Because
   the partition keys are the last columns of the table, `INSERT ... VALUES` without a column list must list them
   last. `CREATE TABLE ... AS` is refused when the location already holds data files, such as those of a dropped
   table, which would read as rows of the new table. `WITH (overwrite = true)` deletes those files instead, when the

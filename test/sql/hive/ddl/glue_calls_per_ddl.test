@@ -242,7 +242,6 @@ FROM glue_calls();
 ----
 CreateTable	1
 GetTable	2
-GetTables	1
 
 statement ok
 CALL truncate_duckdb_logs();

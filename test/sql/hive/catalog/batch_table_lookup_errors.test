@@ -129,10 +129,12 @@ SELECT count(*) FROM (
 ----
 2
 
+# the next statement starts over, as every transaction does: its first lookup is direct, and its second tries
+# GetTables once more
 query II con3
 SELECT glue_calls('GetTables'), glue_calls('GetTable');
 ----
-2	2
+1	2
 
 statement ok con3
 DETACH invalid_dl;

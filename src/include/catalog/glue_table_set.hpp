@@ -51,10 +51,9 @@ private:
 	mutex entry_lock;
 	case_insensitive_map_t<unique_ptr<CatalogEntry>> entries;
 	bool is_loaded = false;
-	//! Direct-lookup round trips since the last bulk fetch: bulk pays off from the second one on
-	idx_t direct_lookups = 0;
-	//! The GlueTransactionCache::Id() the last successful bulk fetch warmed (0 = none yet)
-	idx_t bulk_loaded_cache_id = 0;
+	//! The last GetTables page left tables out: a name not on it is not worth another page
+	bool partial_page = false;
+	case_insensitive_set_t page_tables;
 	//! GetTables was refused for lack of permission: no more bulk fetches
 	bool batch_forbidden = false;
 };

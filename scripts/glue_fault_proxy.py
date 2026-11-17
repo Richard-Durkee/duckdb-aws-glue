@@ -16,7 +16,8 @@ forwarded only after SLOW_PARTITIONS_SECONDS, so a statement timeout lands while
 fault_recreated_during_write* database finds the table dropped and created again by another client, and then fails
 with InternalServiceException, so the write that registers them fails with a table that is no longer its own. A
 request on a fault_throttled* database is answered with ThrottlingException on its first attempt (the SDK's
-amz-sdk-request header) and forwarded when the SDK retries it."""
+amz-sdk-request header) and forwarded when the SDK retries it. GetTables on a fault_paged_tables* database answers
+PAGED_TABLES_PAGE_SIZE tables a page, as Glue pages a large database."""
 
 import argparse
 import http.client
@@ -46,6 +47,9 @@ RECREATED_PREFIX = "fault_recreated_during_write"
 RACED_PARTITION_PREFIX = "fault_partition_elsewhere"
 # CreatePartition on a database with this prefix registers each value with a leading '0'
 NONCANONICAL_PREFIX = "fault_noncanonical_values"
+# GetTables on a database with this prefix answers a few tables a page
+PAGED_TABLES_PREFIX = "fault_paged_tables"
+PAGED_TABLES_PAGE_SIZE = 2
 # the TableInput fields of a Table that GetTable returns
 TABLE_INPUT_FIELDS = ("Name", "Description", "Owner", "Retention", "StorageDescriptor", "PartitionKeys",
                       "ViewOriginalText", "ViewExpandedText", "TableType", "Parameters", "TargetTable")
@@ -70,6 +74,16 @@ def listing_error(target, database):
     if target != "AWSGlue.GetTables":
         return None
     return next((error for prefix, error in LISTING_FAULTS.items() if database.startswith(prefix)), None)
+
+
+def tables_page(data, token):
+    """The page of moto's GetTables answer at offset 'token', with a NextToken while more follow."""
+    tables = json.loads(data).get("TableList", [])
+    offset = int(token or 0)
+    page = {"TableList": tables[offset:offset + PAGED_TABLES_PAGE_SIZE]}
+    if offset + PAGED_TABLES_PAGE_SIZE < len(tables):
+        page["NextToken"] = str(offset + PAGED_TABLES_PAGE_SIZE)
+    return json.dumps(page).encode()
 
 
 def is_denied_table(target, request):
@@ -182,6 +196,10 @@ class Handler(BaseHTTPRequestHandler):
         raced = is_raced_create(target, database)
         if raced:
             body = as_other_clients_object(target, request)
+        paged = target == "AWSGlue.GetTables" and database.startswith(PAGED_TABLES_PREFIX)
+        if paged:
+            # moto answers every table; the page is cut from that below, so moto must not see this proxy's token
+            body = json.dumps({k: v for k, v in request.items() if k not in ("NextToken", "MaxResults")}).encode()
         status, headers, data = self.forward(target, body)
         if raced and status == 200:
             # the object exists now, but as far as this client can tell another client created it first
@@ -189,6 +207,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if target == "AWSGlue.GetTables" and status == 200:
             data = without_denied_tables(data)
+            if paged:
+                data = tables_page(data, request.get("NextToken"))
         self.reply(status, headers, data)
 
     def forward(self, target, body):

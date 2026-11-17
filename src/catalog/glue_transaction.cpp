@@ -103,11 +103,6 @@ void GlueTransaction::UndoHiveWrite() {
 	write->Undo(*client_context, glue_catalog);
 }
 
-idx_t GlueTransactionCache::NextId() {
-	static atomic<idx_t> next_id {0};
-	return ++next_id;
-}
-
 optional_ptr<GlueTransactionCache> GlueTransactionCache::Of(ClientContext &context, Catalog &catalog) {
 	auto transaction = Transaction::TryGet(context, catalog.GetAttached());
 	if (!transaction) {

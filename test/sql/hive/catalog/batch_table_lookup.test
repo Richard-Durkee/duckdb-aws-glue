@@ -76,7 +76,58 @@ SELECT glue_calls('GetTable') = 1 AND glue_calls('GetTables') = 1;
 ----
 true
 
-# a miss after the bulk load stays direct: one GetTable, no second GetTables
+# a later statement, in its own transaction, batches the lookups of the same tables again
+statement ok con2
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT count(*) FROM (
+    SELECT id FROM dl2.default.btl_t1
+    UNION ALL SELECT id FROM dl2.default.btl_t2
+    UNION ALL SELECT id FROM dl2.default.btl_t3
+);
+----
+3
+
+query I con2
+SELECT glue_calls('GetTable') = 1 AND glue_calls('GetTables') = 1;
+----
+true
+
+# under glue_metadata_cache_scope = 'connection' a later statement asks nothing
+statement ok con2
+SET glue_metadata_cache_scope = 'connection';
+
+query I con2
+SELECT count(*) FROM (
+    SELECT id FROM dl2.default.btl_t1
+    UNION ALL SELECT id FROM dl2.default.btl_t2
+    UNION ALL SELECT id FROM dl2.default.btl_t3
+);
+----
+3
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT count(*) FROM (
+    SELECT id FROM dl2.default.btl_t1
+    UNION ALL SELECT id FROM dl2.default.btl_t2
+    UNION ALL SELECT id FROM dl2.default.btl_t3
+);
+----
+3
+
+query I con2
+SELECT glue_calls('GetTable') + glue_calls('GetTables');
+----
+0
+
+statement ok con2
+RESET glue_metadata_cache_scope;
+
+# a new transaction's first lookup stays direct: one GetTable, no GetTables
 statement ok
 CREATE TABLE my_datalake.default.btl_t4 AS SELECT 4 AS id;
 
@@ -92,6 +143,34 @@ query I con2
 SELECT glue_calls('GetTables') = 0 AND glue_calls('GetTable') = 1;
 ----
 true
+
+# a transaction reads one page at most: a table created after it costs one GetTable
+statement ok con2
+BEGIN;
+
+query I con2
+SELECT count(*) FROM (SELECT id FROM dl2.default.btl_t1 UNION ALL SELECT id FROM dl2.default.btl_t2);
+----
+2
+
+statement ok
+CREATE TABLE my_datalake.default.btl_t6 AS SELECT 6 AS id;
+
+statement ok con2
+CALL truncate_duckdb_logs();
+
+query I con2
+SELECT id FROM dl2.default.btl_t6;
+----
+6
+
+query I con2
+SELECT glue_calls('GetTables') = 0 AND glue_calls('GetTable') = 1;
+----
+true
+
+statement ok con2
+COMMIT;
 
 # a single-table query on a fresh attach must not enumerate the database: the attach's first
 # round-trip miss stays a direct lookup
@@ -216,3 +295,6 @@ DROP TABLE my_datalake.default.btl_t3;
 
 statement ok
 DROP TABLE my_datalake.default.btl_t4;
+
+statement ok
+DROP TABLE my_datalake.default.btl_t6;

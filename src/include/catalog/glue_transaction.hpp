@@ -50,9 +50,45 @@ public:
 		shared_ptr<CacheEntry<GlueTableInfo>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(tables, database_name + "\n" + table_name);
+			entry = FindEntry(tables, Key(database_name, table_name));
 		}
 		return Resolve(*entry, load);
+	}
+	//! Whether looking the table up asks Glue nothing: the cache holds its definition or is loading it
+	bool HasTable(const string &database_name, const string &table_name) {
+		shared_ptr<CacheEntry<GlueTableInfo>> entry;
+		{
+			annotated_lock_guard<annotated_mutex> guard(lock);
+			auto existing = tables.find(StringUtil::Lower(Key(database_name, table_name)));
+			if (existing == tables.end()) {
+				return false;
+			}
+			entry = existing->second;
+		}
+		if (!entry->load_lock.try_lock()) {
+			return true;
+		}
+		auto held = entry->value != nullptr;
+		entry->load_lock.unlock();
+		return held;
+	}
+	//! A table lookup in 'database_name' asked Glue
+	void CountTableRoundTrip(const string &database_name) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		table_lookups[StringUtil::Lower(database_name)].round_trips++;
+	}
+	//! Whether a GetTables page should warm the cache: from the database's second round trip on, once
+	bool ShouldBulkLoad(const string &database_name) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &lookups = table_lookups[StringUtil::Lower(database_name)];
+		return lookups.round_trips > 0 && !lookups.bulk_loaded;
+	}
+	//! A GetTables page of 'database_name' was asked for: a failed one is tried again after the next round trip
+	void BulkLoadAttempted(const string &database_name, bool loaded) {
+		annotated_lock_guard<annotated_mutex> guard(lock);
+		auto &lookups = table_lookups[StringUtil::Lower(database_name)];
+		lookups.round_trips = 0;
+		lookups.bulk_loaded = loaded;
 	}
 	shared_ptr<const vector<GluePartitionInfo>>
 	GetPartitions(const string &database_name, const string &table_name,
@@ -60,7 +96,7 @@ public:
 		shared_ptr<CacheEntry<vector<GluePartitionInfo>>> entry;
 		{
 			annotated_lock_guard<annotated_mutex> guard(lock);
-			entry = FindEntry(partitions, database_name + "\n" + table_name);
+			entry = FindEntry(partitions, Key(database_name, table_name));
 		}
 		return Resolve(*entry, load);
 	}
@@ -68,15 +104,19 @@ public:
 		annotated_lock_guard<annotated_mutex> guard(lock);
 		tables.clear();
 		partitions.clear();
-	}
-	//! Tells cache instances apart (monotonic, never reused): a bulk table fetch warms each instance at most once
-	//! (GlueTableSet), and under the default scope a new transaction brings a new instance
-	idx_t Id() const {
-		return id;
+		table_lookups.clear();
 	}
 
 private:
-	static idx_t NextId();
+	//! How the table lookups of one database went in this cache
+	struct TableLookups {
+		idx_t round_trips = 0;
+		bool bulk_loaded = false;
+	};
+
+	static string Key(const string &database_name, const string &name) {
+		return database_name + "\n" + name;
+	}
 
 	//! One cached value and the lock that guards loading it. The lock is per entry so the Glue calls for
 	//! different tables do not wait on each other (resolving N tables runs their fetches in parallel).
@@ -112,7 +152,7 @@ private:
 	annotated_mutex lock;
 	unordered_map<string, shared_ptr<CacheEntry<GlueTableInfo>>> tables DUCKDB_GUARDED_BY(lock);
 	unordered_map<string, shared_ptr<CacheEntry<vector<GluePartitionInfo>>>> partitions DUCKDB_GUARDED_BY(lock);
-	const idx_t id = NextId();
+	unordered_map<string, TableLookups> table_lookups DUCKDB_GUARDED_BY(lock);
 };
 
 //! The connection's caches under glue_metadata_cache_scope='connection', one per attached Glue catalog. Lives in
